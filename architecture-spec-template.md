@@ -92,33 +92,224 @@
 
 ### 2.2 Folder Structure
 
+> Pick the structure that matches your tech stack. Use only one.
+
+#### Option A — Java (Spring Boot)
+
 ```
 src/
-├── api/              # API route handlers
-│   ├── v1/
+├── main/
+│   ├── java/com/divii/[project]/
+│   │   ├── config/           # SecurityConfig, CorsConfig, SwaggerConfig
+│   │   ├── controller/       # REST controllers (@RestController)
+│   │   ├── dto/
+│   │   │   ├── request/      # CreateEventRequest, LoginRequest
+│   │   │   └── response/     # EventResponse, PageResponse
+│   │   ├── entity/           # JPA entities (@Entity)
+│   │   ├── enums/            # Role, EventStatus, CheckInStatus
+│   │   ├── exception/        # CustomException, GlobalExceptionHandler
+│   │   ├── filter/           # JwtAuthFilter, RateLimitFilter
+│   │   ├── mapper/           # Entity ↔ DTO mappers (MapStruct)
+│   │   ├── repository/       # JPA repositories (@Repository)
+│   │   ├── security/         # JwtProvider, UserDetailsServiceImpl
+│   │   ├── service/          # Business logic (@Service)
+│   │   │   └── impl/
+│   │   └── util/             # DateUtil, QrCodeGenerator
+│   └── resources/
+│       ├── application.yml
+│       ├── application-dev.yml
+│       ├── application-prod.yml
+│       ├── db/migration/     # Flyway: V1__create_users.sql
+│       └── templates/        # Email templates (Thymeleaf)
+└── test/
+    ├── java/com/divii/[project]/
+    │   ├── controller/       # @WebMvcTest
+    │   ├── service/          # @SpringBootTest / Mockito
+    │   └── repository/       # @DataJpaTest
+    └── resources/
+        └── application-test.yml
+```
+
+#### Option B — NestJS
+
+```
+src/
+├── common/
+│   ├── decorators/          # @CurrentUser, @Roles
+│   ├── dto/                 # PaginationDto, ApiResponseDto
+│   ├── enums/               # role.enum.ts, status.enum.ts
+│   ├── filters/             # http-exception.filter.ts
+│   ├── guards/              # jwt-auth.guard.ts, roles.guard.ts
+│   ├── interceptors/        # logging.interceptor.ts, transform.interceptor.ts
+│   ├── middleware/           # rate-limit.middleware.ts
+│   └── pipes/               # validation.pipe.ts
+├── config/
+│   ├── database.config.ts
+│   ├── jwt.config.ts
+│   └── app.config.ts
+├── modules/
+│   ├── auth/
+│   │   ├── auth.controller.ts
+│   │   ├── auth.service.ts
+│   │   ├── auth.module.ts
+│   │   ├── dto/             # login.dto.ts, register.dto.ts
+│   │   └── strategies/      # jwt.strategy.ts
+│   ├── users/
+│   │   ├── users.controller.ts
+│   │   ├── users.service.ts
+│   │   ├── users.module.ts
+│   │   ├── dto/
+│   │   └── entities/        # user.entity.ts
+│   └── [feature]/
+│       ├── [feature].controller.ts
+│       ├── [feature].service.ts
+│       ├── [feature].module.ts
+│       ├── dto/
+│       └── entities/
+├── database/
+│   ├── migrations/          # TypeORM: 1696000000-CreateUsers.ts
+│   └── seeds/
+├── app.module.ts
+└── main.ts
+test/
+├── unit/
+├── integration/
+└── e2e/
+```
+
+#### Option C — Next.js (Full-stack, App Router)
+
+```
+src/
+├── app/
+│   ├── (auth)/              # Route group — no layout nesting
+│   │   ├── login/page.tsx
+│   │   ├── register/page.tsx
+│   │   └── layout.tsx       # Auth layout (no sidebar)
+│   ├── (dashboard)/
+│   │   ├── events/
+│   │   │   ├── page.tsx           # Event list
+│   │   │   ├── [id]/page.tsx      # Event detail
+│   │   │   └── new/page.tsx       # Create event
+│   │   ├── check-in/page.tsx
+│   │   └── layout.tsx       # Dashboard layout (sidebar + nav)
+│   ├── api/
 │   │   ├── auth/
-│   │   ├── users/
-│   │   └── [resource]/
-├── components/       # Reusable UI components
-│   ├── common/       # Shared (Button, Modal, etc.)
-│   └── [feature]/    # Feature-specific
-├── config/           # App configuration
+│   │   │   ├── login/route.ts
+│   │   │   ├── register/route.ts
+│   │   │   └── refresh/route.ts
+│   │   ├── events/
+│   │   │   ├── route.ts          # GET list, POST create
+│   │   │   └── [id]/route.ts     # GET, PATCH, DELETE
+│   │   └── check-in/route.ts
+│   ├── layout.tsx           # Root layout
+│   ├── page.tsx             # Landing
+│   └── globals.css
+├── components/
+│   ├── ui/                  # Button, Modal, Input, Table
+│   └── [feature]/           # EventCard, CheckInScanner, QrCode
+├── hooks/                   # useAuth, useEvents, usePagination
+├── lib/
+│   ├── auth.ts              # JWT verify, session helpers
+│   ├── db.ts                # Prisma client
+│   ├── validations.ts       # Zod schemas
+│   └── utils.ts
+├── services/                # Server-side business logic
+├── types/                   # TypeScript interfaces
+└── middleware.ts             # Auth redirect, rate limit
+prisma/
+├── schema.prisma
+├── migrations/
+└── seed.ts
+```
+
+#### Option D — React (Frontend only, Vite)
+
+```
+src/
+├── api/                     # Axios instance + endpoint functions
+│   ├── client.ts            # Axios config, interceptors, token refresh
+│   ├── auth.api.ts          # login(), register(), refresh()
+│   ├── events.api.ts        # getEvents(), createEvent()
+│   └── check-in.api.ts
+├── assets/                  # Images, fonts, icons
+├── components/
+│   ├── common/              # Button, Modal, Input, Table, Pagination
+│   ├── layout/              # Header, Sidebar, Footer, AuthLayout
+│   └── [feature]/           # EventCard, QrScanner, AttendeeList
+├── contexts/                # AuthContext, ThemeContext
+├── hooks/                   # useAuth, useEvents, usePagination, useDebounce
+├── pages/
+│   ├── auth/
+│   │   ├── LoginPage.tsx
+│   │   └── RegisterPage.tsx
+│   ├── events/
+│   │   ├── EventListPage.tsx
+│   │   ├── EventDetailPage.tsx
+│   │   └── CreateEventPage.tsx
+│   ├── check-in/
+│   │   └── CheckInPage.tsx
+│   └── dashboard/
+│       └── DashboardPage.tsx
+├── router/                  # React Router config + guards
+│   ├── index.tsx
+│   └── PrivateRoute.tsx
+├── store/                   # Zustand / Redux (if needed)
+├── types/                   # TypeScript interfaces
+├── utils/                   # formatDate, formatCurrency, validators
+├── App.tsx
+├── main.tsx
+└── vite-env.d.ts
+```
+
+#### Option E — Node / Express
+
+```
+src/
+├── api/
+│   └── v1/
+│       ├── auth/
+│       │   ├── auth.controller.ts
+│       │   ├── auth.service.ts
+│       │   ├── auth.routes.ts
+│       │   └── auth.validation.ts   # Joi / Zod schemas
+│       ├── users/
+│       │   ├── users.controller.ts
+│       │   ├── users.service.ts
+│       │   ├── users.routes.ts
+│       │   └── users.validation.ts
+│       └── [feature]/
+│           ├── [feature].controller.ts
+│           ├── [feature].service.ts
+│           ├── [feature].routes.ts
+│           └── [feature].validation.ts
+├── config/
+│   ├── database.ts
+│   ├── redis.ts
+│   ├── env.ts               # dotenv + validation
+│   └── cors.ts
 ├── db/
-│   ├── migrations/   # Sequential migration files
-│   ├── seeds/        # Seed data
-│   └── models/       # ORM models / schema
-├── hooks/            # Custom hooks (frontend)
-├── lib/              # Shared utilities
-│   ├── auth.ts
-│   ├── logger.ts
-│   └── validator.ts
-├── middleware/        # Express/Next middleware
-├── services/         # Business logic layer
-├── types/            # TypeScript type definitions
-└── tests/
-    ├── unit/
-    ├── integration/
-    └── e2e/
+│   ├── models/              # Sequelize/TypeORM entities
+│   ├── migrations/
+│   └── seeds/
+├── middleware/
+│   ├── auth.middleware.ts    # JWT verify
+│   ├── error.middleware.ts   # Global error handler
+│   ├── rate-limit.middleware.ts
+│   └── validate.middleware.ts
+├── lib/
+│   ├── logger.ts            # Winston / Pino
+│   ├── mailer.ts
+│   ├── qr.ts
+│   └── response.ts          # Standard response helper
+├── types/
+│   └── express.d.ts         # Extend Request with user
+├── app.ts                   # Express app setup
+└── server.ts                # HTTP server + listen
+test/
+├── unit/
+├── integration/
+└── fixtures/
 ```
 
 ### 2.3 Branching & Commit Rules
