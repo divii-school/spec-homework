@@ -94,7 +94,73 @@
 
 > Pick the structure that matches your tech stack. Use only one.
 
-#### Option A — Java (Spring Boot)
+#### Option A — Fullstack Monorepo (Frontend + Backend)
+
+```
+root/
+├── client/                      # Frontend (React / Next.js)
+│   ├── public/
+│   ├── src/
+│   │   ├── api/                 # API client (Axios instance + endpoints)
+│   │   │   ├── client.ts
+│   │   │   ├── auth.api.ts
+│   │   │   └── [feature].api.ts
+│   │   ├── assets/              # Images, fonts, icons
+│   │   ├── components/
+│   │   │   ├── common/          # Button, Modal, Input, Table
+│   │   │   ├── layout/          # Header, Sidebar, Footer
+│   │   │   └── [feature]/       # Feature-specific components
+│   │   ├── contexts/            # AuthContext, ThemeContext
+│   │   ├── hooks/               # useAuth, usePagination, useDebounce
+│   │   ├── pages/               # Route-level page components
+│   │   │   ├── auth/
+│   │   │   ├── [feature]/
+│   │   │   └── dashboard/
+│   │   ├── router/              # Route config + guards
+│   │   ├── store/               # State management (Zustand / Redux)
+│   │   ├── types/               # Shared TypeScript interfaces
+│   │   ├── utils/               # formatDate, validators
+│   │   ├── App.tsx
+│   │   └── main.tsx
+│   ├── package.json
+│   └── vite.config.ts
+├── server/                      # Backend (Node / Express / NestJS)
+│   ├── src/
+│   │   ├── api/
+│   │   │   └── v1/
+│   │   │       ├── auth/
+│   │   │       │   ├── auth.controller.ts
+│   │   │       │   ├── auth.service.ts
+│   │   │       │   ├── auth.routes.ts
+│   │   │       │   └── auth.validation.ts
+│   │   │       ├── users/
+│   │   │       └── [feature]/
+│   │   ├── config/              # database, redis, env, cors
+│   │   ├── db/
+│   │   │   ├── models/          # ORM entities
+│   │   │   ├── migrations/
+│   │   │   └── seeds/
+│   │   ├── middleware/          # auth, error, rate-limit, validate
+│   │   ├── lib/                 # logger, mailer, qr, response helper
+│   │   ├── types/
+│   │   ├── app.ts
+│   │   └── server.ts
+│   ├── test/
+│   │   ├── unit/
+│   │   ├── integration/
+│   │   └── fixtures/
+│   └── package.json
+├── shared/                      # Shared between client & server
+│   ├── types/                   # Common interfaces, DTOs, enums
+│   ├── constants/               # Roles, status codes, config values
+│   └── validations/             # Zod / Joi schemas (reused both sides)
+├── docker-compose.yml
+├── .env.example
+├── package.json                 # Root (workspaces)
+└── README.md
+```
+
+#### Option B — Java (Spring Boot)
 
 ```
 src/
@@ -130,7 +196,7 @@ src/
         └── application-test.yml
 ```
 
-#### Option B — NestJS
+#### Option C — NestJS
 
 ```
 src/
@@ -177,7 +243,7 @@ test/
 └── e2e/
 ```
 
-#### Option C — Next.js (Full-stack, App Router)
+#### Option D — Next.js (Full-stack, App Router)
 
 ```
 src/
@@ -223,7 +289,7 @@ prisma/
 └── seed.ts
 ```
 
-#### Option D — React (Frontend only, Vite)
+#### Option E — React (Frontend only, Vite)
 
 ```
 src/
@@ -262,7 +328,7 @@ src/
 └── vite-env.d.ts
 ```
 
-#### Option E — Node / Express
+#### Option F — Node / Express
 
 ```
 src/
