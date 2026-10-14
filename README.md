@@ -35,7 +35,7 @@ Each folder has:
 | Build test | Mon, Oct 26 |
 | Scoring and review | Tue, Oct 27 |
 
-The system to specify and the full brief are shared at the kickoff.
+**Start here:** read [`BRIEF.md`](BRIEF.md) (the system to specify and the rules) and [`RUBRIC.md`](RUBRIC.md) (how you are scored).
 
 ## Rules
 
