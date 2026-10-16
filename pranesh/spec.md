@@ -1040,7 +1040,14 @@ All SQL below binds `:now` from the injected `Clock`; the database's `now()` is 
 1. Loads the resume's `text_redacted` and signals and the job role with its skills. If the analysis or its resume no longer exists, the task ends without calling the AI and finalises `FAILED` / `PROCESSING_TIMEOUT` with the guarded update below. (The retention job never removes a resume with an in-progress analysis, so this happens only after erasure or resume deletion, where the guarded update affects 0 rows and nothing is written.)
 2. Calls the AI (§4.6.4). Failures map as in §4.4.
 3. Validates (rules below). If rule V1 fails, or the JSON could not be parsed, or `stop_reason = max_tokens`, it calls the AI once more (`AI_INVALID_OUTPUT_RETRIES`); a second failure → `AI_INVALID_RESPONSE`.
-4. Finalises (one transaction): on success the `COMPLETED` update and the child inserts; on failure
+4. Finalises (one transaction). On success:
+   ```sql
+   UPDATE analyses SET status = 'COMPLETED', overall_score = :overallScore, completed_at = :now,
+          ai_model = :model, ai_input_tokens = :inputTokens, ai_output_tokens = :outputTokens,
+          locked_by = NULL, locked_until = NULL
+   WHERE id = :id AND status = 'PROCESSING' AND locked_by = :me;
+   ```
+   then, only if 1 row was updated, the inserts into TBL-004, TBL-005 and TBL-006. On failure:
    ```sql
    UPDATE analyses SET status = 'FAILED', failure_code = :code, completed_at = :now,
           locked_by = NULL, locked_until = NULL
