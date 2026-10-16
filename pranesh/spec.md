@@ -1518,7 +1518,728 @@ Ten active roles, `created_by = updated_by = 00000000-0000-0000-0000-00000000000
 
 ## 6. API design
 
-_Being written._
+### 6.1 Common rules
+
+| Rule | Definition |
+|---|---|
+| Base path | `/api/ro/v1` on the Platform host (e.g. `https://app.surfingbear.com/api/ro/v1`). Backend port 8080. |
+| Versioning | Breaking changes go to `/api/ro/v2`; `v1` is then kept for at least 90 days. Adding an optional request field or a new response field is not breaking; clients must ignore unknown response fields. |
+| Auth | Cookie `sb_at` (CR-001…003). No other mechanism. Unauthenticated → `401 UNAUTHENTICATED`. |
+| CSRF | Header `X-Requested-By: ro-web` on every `POST`/`PUT`/`PATCH`/`DELETE` (CR-005). |
+| Request id | Optional request header `X-Request-Id` (UUID); always returned in the response header `X-Request-Id` (CR-011). |
+| Content types | Requests: `application/json; charset=utf-8`, except API-004 (`multipart/form-data`). Responses: `application/json; charset=utf-8`, except API-010 (`application/pdf`) and `204` (no body). |
+| JSON | `camelCase` properties; `null` fields are **included** (not omitted) so the shape is stable; enums as their constant names. |
+| Ids | UUID strings, lower case, e.g. `"8f14e45f-ceea-4e7a-9a3b-0c1d2e3f4a5b"`. A malformed id in a path → `400 VALIDATION_FAILED` (`fieldErrors[0].code = "INVALID_FORMAT"`). |
+| Date / time | ISO-8601 UTC with milliseconds and `Z`, e.g. `"2026-10-16T12:03:44.120Z"` (CR-031). |
+| Pagination | List endpoints API-005 and API-008 take `page` (1-based, default `1`, integer ≥ 1) and `size` (default `20`, 1–100). Out-of-range or non-integer values → `400 VALIDATION_FAILED` (`OUT_OF_RANGE` / `INVALID_FORMAT`). A page after the last one returns `200` with an empty `items`. Sorting is fixed per endpoint (no `sort` parameter). Response shape below. |
+| Errors | Exactly the format of §1.4 (repeated below). Codes from §6.3 only. |
+| Idempotency | API-007 requires `Idempotency-Key` (UUID). `PUT` and `DELETE` endpoints are naturally idempotent except that a second `DELETE` of the same id returns `404`. |
+| Rate limits | CR-020 buckets; `429 RATE_LIMITED` with `Retry-After`. |
+| Management endpoints | Served on the separate management port 8081, not routed by the ALB: `GET /actuator/health/liveness`, `GET /actuator/health/readiness` (ALB target health check), `GET /actuator/info`, `GET /actuator/prometheus`. No authentication (network-restricted to the VPC). |
+| API documentation | springdoc-openapi: `/api/ro/v3/api-docs` and `/api/ro/swagger-ui.html`, enabled only in `local` and `dev` (§1.7). |
+
+Paginated response:
+
+```json
+{
+  "items": [ ],
+  "page": { "number": 1, "size": 20, "totalItems": 42, "totalPages": 3 }
+}
+```
+
+`totalPages = ceil(totalItems / size)`; `0` when `totalItems = 0`.
+
+Standard error format (same as §1.4):
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_FAILED",
+    "message": "Some fields are missing or invalid.",
+    "requestId": "3f6d9c1e-2a47-4b8e-9d0f-6c1b2a3e4f50",
+    "timestamp": "2026-10-16T12:03:44.120Z",
+    "details": {},
+    "fieldErrors": [ { "field": "experienceLevel", "code": "INVALID_VALUE", "message": "must be one of ENTRY, MID, SENIOR, LEAD" } ]
+  }
+}
+```
+
+**Errors every endpoint can return** (not repeated in each endpoint table):
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | `UNAUTHENTICATED` | Missing, invalid or expired token (all except API-017) |
+| 403 | `CSRF_HEADER_MISSING` | `POST`/`PUT`/`PATCH`/`DELETE` without `X-Requested-By: ro-web` |
+| 404 | `ENDPOINT_NOT_FOUND` | Unknown path |
+| 405 | `METHOD_NOT_ALLOWED` | Known path, wrong method (with `Allow` header) |
+| 429 | `RATE_LIMITED` | CR-020 bucket exceeded |
+| 500 | `INTERNAL_ERROR` | Unexpected error |
+| 503 | `SERVICE_UNAVAILABLE` | Database unavailable, or `parse-pool` full (API-004) |
+
+**Shared response objects** (used by several endpoints; field names and types are identical wherever they appear):
+
+`ResumeResponse`
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | uuid | |
+| `filename` | string | `resumes.original_filename` |
+| `fileType` | `"PDF"` \| `"DOCX"` | |
+| `fileSizeBytes` | integer | |
+| `pageCount` | integer \| null | `null` for DOCX |
+| `redactionCount` | integer | UI shows "We hid {n} contact details before analysis." |
+| `analysisCount` | integer | The user's analyses with this `resume_id` |
+| `createdAt` | datetime | |
+| `expiresAt` | datetime | |
+
+`AnalysisSummary` (list item)
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | uuid | |
+| `status` | `"QUEUED"` \| `"PROCESSING"` \| `"COMPLETED"` \| `"FAILED"` | |
+| `failureCode` | string \| null | One of ERR-031…034 codes, only when `FAILED` |
+| `resume` | object `{ "id": uuid \| null, "filename": string }` | `id` is `null` after the resume expired |
+| `jobRole` | object `{ "id": uuid, "name": string }` | Name as copied at creation |
+| `experienceLevel` | `"ENTRY"` \| `"MID"` \| `"SENIOR"` \| `"LEAD"` | |
+| `overallScore` | integer \| null | Only when `COMPLETED` |
+| `scoreBand` | `"NEEDS_WORK"` \| `"FAIR"` \| `"GOOD"` \| `"EXCELLENT"` \| null | Only when `COMPLETED` (FR-011) |
+| `createdAt` | datetime | |
+| `completedAt` | datetime \| null | Set for `COMPLETED` and `FAILED` |
+
+`AnalysisResponse` = every field of `AnalysisSummary` plus:
+
+| Field | Type | Notes |
+|---|---|---|
+| `startedAt` | datetime \| null | |
+| `dimensions` | array \| null | `null` unless `COMPLETED`; otherwise 6 items in §4.6.4 order: `{ "dimension": string, "label": string, "weight": number, "score": integer, "rationale": string }` |
+| `skills` | object \| null | `null` unless `COMPLETED`; `{ "matched": [ { "name": string, "importance": "REQUIRED" \| "PREFERRED" } ], "missing": [ same ] }`, ordered per FR-012 |
+| `suggestions` | object \| null | `null` unless `COMPLETED`; `{ "visible": [ Suggestion ], "lockedCount": integer, "totalCount": integer }` per FR-014 |
+
+`Suggestion`: `{ "id": uuid, "priority": integer, "dimension": string, "originalText": string, "suggestedText": string, "reason": string }`.
+
+`JobRoleResponse`: `{ "id": uuid, "name": string, "description": string, "skills": [ { "name": string, "importance": "REQUIRED" \| "PREFERRED", "displayOrder": integer } ] }`. `AdminJobRoleResponse` = `JobRoleResponse` plus `"isActive": boolean, "createdAt": datetime, "updatedAt": datetime`.
+
+### 6.2 Endpoints
+
+#### API-001 `GET /api/ro/v1/me`
+- **Purpose:** The caller's plan, admin flag, consent status and this month's usage.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-001, FR-002 (criterion 1), FR-024.
+
+**Request:** no parameters.
+
+**Response 200**
+
+```json
+{
+  "userId": "7d0c2f1e-5b8a-4c39-9a51-0f1f2c3d4e5f",
+  "plan": "FREE",
+  "isAdmin": false,
+  "consent": {
+    "currentVersion": "2026-10-v1",
+    "accepted": true,
+    "acceptedAt": "2026-10-16T11:58:02.511Z"
+  },
+  "usage": {
+    "period": "2026-10",
+    "used": 1,
+    "limit": 3,
+    "remaining": 2,
+    "resetsAt": "2026-10-31T18:30:00.000Z"
+  }
+}
+```
+
+`consent.acceptedAt` is `null` when `accepted` is `false`.
+
+**Errors:** only the common ones.
+
+#### API-002 `POST /api/ro/v1/me/consent`
+- **Purpose:** Accept the current privacy notice.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-002.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `noticeVersion` | body | string | yes | 1–20 characters; must equal `CONSENT_NOTICE_VERSION` |
+
+**Response 200** (also when the consent already existed; then the existing row is returned)
+
+```json
+{ "noticeVersion": "2026-10-v1", "acceptedAt": "2026-10-16T11:58:02.511Z" }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `noticeVersion` missing, blank or longer than 20 |
+| 400 | `MALFORMED_REQUEST` | Body is not valid JSON or has unknown fields |
+| 409 | `CONSENT_VERSION_MISMATCH` | `noticeVersion` ≠ current; `details.currentVersion` |
+
+#### API-003 `GET /api/ro/v1/job-roles`
+- **Purpose:** Active job roles for the role picker.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-003.
+
+**Request:** no parameters. Not paginated (≤ 200 roles, FR-023).
+
+**Response 200**
+
+```json
+{
+  "items": [
+    {
+      "id": "10000000-0000-0000-0000-000000000001",
+      "name": "Backend Developer (Java)",
+      "description": "Builds and maintains server-side applications and APIs in Java.",
+      "skills": [
+        { "name": "Java", "importance": "REQUIRED", "displayOrder": 1 },
+        { "name": "Docker", "importance": "PREFERRED", "displayOrder": 9 }
+      ]
+    }
+  ]
+}
+```
+
+(`items` holds `JobRoleResponse` objects; the example shows 2 of 14 skills.)
+
+**Errors:** only the common ones.
+
+#### API-004 `POST /api/ro/v1/resumes`
+- **Purpose:** Upload a resume.
+- **Auth / role:** any authenticated user with active consent.
+- **Implements:** FR-004, FR-005.
+
+**Request** (`multipart/form-data`)
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `file` | body (multipart part) | binary | yes | ≤ `MAX_FILE_BYTES`; PDF or DOCX by content (§4.6.1); all FR-004 checks |
+
+**Response 201** — `ResumeResponse`, header `Location: /api/ro/v1/resumes/{id}`
+
+```json
+{
+  "id": "2b7e1516-28ae-4d2a-a6ab-f7158809cf4f",
+  "filename": "Asha_Resume_2026.pdf",
+  "fileType": "PDF",
+  "fileSizeBytes": 184233,
+  "pageCount": 2,
+  "redactionCount": 3,
+  "analysisCount": 0,
+  "createdAt": "2026-10-16T12:00:10.004Z",
+  "expiresAt": "2026-11-15T12:00:10.004Z"
+}
+```
+
+**Errors** (in the FR-004 order)
+
+| HTTP | Error code | When |
+|---|---|---|
+| 403 | `CONSENT_REQUIRED` | No active consent; `details.currentVersion` |
+| 409 | `RESUME_LIMIT_REACHED` | User already has `MAX_STORED_RESUMES`; `details.maxResumes` |
+| 400 | `FILE_MISSING` | No `file` part, or 0 bytes |
+| 413 | `FILE_TOO_LARGE` | Larger than `MAX_FILE_BYTES` (also when the whole request exceeds 6 MB); `details.maxBytes` |
+| 415 | `UNSUPPORTED_FILE_TYPE` | Not PDF/DOCX by content; `details.allowed = ["PDF","DOCX"]` |
+| 422 | `FILE_ENCRYPTED` | Password-protected |
+| 422 | `FILE_CORRUPT` | Cannot be parsed |
+| 422 | `FILE_PROCESSING_TIMEOUT` | Parsing exceeded `PARSE_TIMEOUT` |
+| 422 | `RESUME_TOO_MANY_PAGES` | PDF over `MAX_PDF_PAGES`; `details.maxPages`, `details.pageCount` |
+| 422 | `RESUME_TEXT_TOO_SHORT` | Under `MIN_TEXT_CHARS`; `details.minChars` |
+| 422 | `RESUME_TEXT_TOO_LONG` | Over `MAX_TEXT_CHARS`; `details.maxChars` |
+| 422 | `RESUME_LANGUAGE_UNSUPPORTED` | Fails §4.6.2 language check |
+
+#### API-005 `GET /api/ro/v1/resumes`
+- **Purpose:** List the caller's resumes.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-006.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `page` | query | integer | no | ≥ 1, default 1 |
+| `size` | query | integer | no | 1–100, default 20 |
+
+Sorted by `createdAt` desc, then `id` desc. Expired-but-not-yet-deleted rows (`expires_at <= now`) are excluded.
+
+**Response 200** — paginated `ResumeResponse`
+
+```json
+{
+  "items": [
+    {
+      "id": "2b7e1516-28ae-4d2a-a6ab-f7158809cf4f",
+      "filename": "Asha_Resume_2026.pdf",
+      "fileType": "PDF",
+      "fileSizeBytes": 184233,
+      "pageCount": 2,
+      "redactionCount": 3,
+      "analysisCount": 1,
+      "createdAt": "2026-10-16T12:00:10.004Z",
+      "expiresAt": "2026-11-15T12:00:10.004Z"
+    }
+  ],
+  "page": { "number": 1, "size": 20, "totalItems": 1, "totalPages": 1 }
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `page` or `size` out of range or not an integer |
+
+#### API-006 `DELETE /api/ro/v1/resumes/{resumeId}`
+- **Purpose:** Delete a resume and its analyses.
+- **Auth / role:** owner.
+- **Implements:** FR-007.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `resumeId` | path | uuid | yes | UUID |
+
+**Response 204** — no body.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `resumeId` not a UUID |
+| 404 | `RESOURCE_NOT_FOUND` | Missing, expired or not owned |
+| 409 | `ANALYSIS_IN_PROGRESS` | An analysis of this resume is `QUEUED`/`PROCESSING`; `details.analysisId` |
+
+#### API-007 `POST /api/ro/v1/analyses`
+- **Purpose:** Start an analysis.
+- **Auth / role:** any authenticated user with active consent and remaining quota.
+- **Implements:** FR-008, FR-009.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `Idempotency-Key` | header | uuid | yes | UUID; new per user action (§4.7 `/new`) |
+| `resumeId` | body | uuid | yes | UUID of an owned, non-expired resume |
+| `jobRoleId` | body | uuid | yes | UUID of an active job role |
+| `experienceLevel` | body | string | yes | `ENTRY` \| `MID` \| `SENIOR` \| `LEAD` |
+
+```json
+{ "resumeId": "2b7e1516-28ae-4d2a-a6ab-f7158809cf4f", "jobRoleId": "10000000-0000-0000-0000-000000000001", "experienceLevel": "MID" }
+```
+
+**Response 202** (new) or **200** (idempotent replay) — `AnalysisResponse`, header `Location: /api/ro/v1/analyses/{id}`
+
+```json
+{
+  "id": "5e8f2a10-7c3b-4d6e-9f01-2a3b4c5d6e7f",
+  "status": "QUEUED",
+  "failureCode": null,
+  "resume": { "id": "2b7e1516-28ae-4d2a-a6ab-f7158809cf4f", "filename": "Asha_Resume_2026.pdf" },
+  "jobRole": { "id": "10000000-0000-0000-0000-000000000001", "name": "Backend Developer (Java)" },
+  "experienceLevel": "MID",
+  "overallScore": null,
+  "scoreBand": null,
+  "createdAt": "2026-10-16T12:01:00.250Z",
+  "startedAt": null,
+  "completedAt": null,
+  "dimensions": null,
+  "skills": null,
+  "suggestions": null
+}
+```
+
+**Errors** (in the FR-008 order)
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `Idempotency-Key` missing or not a UUID; a body field missing or invalid |
+| 400 | `MALFORMED_REQUEST` | Body not valid JSON, wrong types, or unknown fields |
+| 409 | `IDEMPOTENCY_KEY_CONFLICT` | Key already used with different `resumeId`/`jobRoleId`/`experienceLevel`; `details.analysisId` |
+| 403 | `CONSENT_REQUIRED` | No active consent; `details.currentVersion` |
+| 404 | `RESOURCE_NOT_FOUND` | Resume missing, expired or not owned |
+| 422 | `JOB_ROLE_NOT_AVAILABLE` | Job role missing or inactive |
+| 409 | `ANALYSIS_IN_PROGRESS` | Another analysis of this user is `QUEUED`/`PROCESSING`; `details.analysisId` |
+| 403 | `QUOTA_EXCEEDED` | Monthly limit reached; `details = { "limit": 3, "used": 3, "resetsAt": "2026-10-31T18:30:00.000Z" }` |
+
+#### API-008 `GET /api/ro/v1/analyses`
+- **Purpose:** The caller's analysis history.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-016.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `page` | query | integer | no | ≥ 1, default 1 |
+| `size` | query | integer | no | 1–100, default 20 |
+| `status` | query | string | no | `QUEUED` \| `PROCESSING` \| `COMPLETED` \| `FAILED` |
+
+Sorted by `createdAt` desc, then `id` desc.
+
+**Response 200** — paginated `AnalysisSummary`
+
+```json
+{
+  "items": [
+    {
+      "id": "5e8f2a10-7c3b-4d6e-9f01-2a3b4c5d6e7f",
+      "status": "COMPLETED",
+      "failureCode": null,
+      "resume": { "id": "2b7e1516-28ae-4d2a-a6ab-f7158809cf4f", "filename": "Asha_Resume_2026.pdf" },
+      "jobRole": { "id": "10000000-0000-0000-0000-000000000001", "name": "Backend Developer (Java)" },
+      "experienceLevel": "MID",
+      "overallScore": 73,
+      "scoreBand": "FAIR",
+      "createdAt": "2026-10-16T12:01:00.250Z",
+      "completedAt": "2026-10-16T12:01:41.903Z"
+    }
+  ],
+  "page": { "number": 1, "size": 20, "totalItems": 1, "totalPages": 1 }
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `page`/`size` out of range; `status` not one of the four values |
+
+#### API-009 `GET /api/ro/v1/analyses/{analysisId}`
+- **Purpose:** Status and result of one analysis (polled by the UI).
+- **Auth / role:** owner. Suggestion visibility per the caller's current plan.
+- **Implements:** FR-011, FR-012, FR-013, FR-014, FR-015.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `analysisId` | path | uuid | yes | UUID |
+
+**Response 200** — `AnalysisResponse` (example: FREE user, completed, 7 suggestions kept)
+
+```json
+{
+  "id": "5e8f2a10-7c3b-4d6e-9f01-2a3b4c5d6e7f",
+  "status": "COMPLETED",
+  "failureCode": null,
+  "resume": { "id": "2b7e1516-28ae-4d2a-a6ab-f7158809cf4f", "filename": "Asha_Resume_2026.pdf" },
+  "jobRole": { "id": "10000000-0000-0000-0000-000000000001", "name": "Backend Developer (Java)" },
+  "experienceLevel": "MID",
+  "overallScore": 73,
+  "scoreBand": "FAIR",
+  "createdAt": "2026-10-16T12:01:00.250Z",
+  "startedAt": "2026-10-16T12:01:00.913Z",
+  "completedAt": "2026-10-16T12:01:41.903Z",
+  "dimensions": [
+    { "dimension": "KEYWORD_MATCH", "label": "Keyword match", "weight": 0.30, "score": 74, "rationale": "Strong Java and Spring Boot terms; Kafka and Kubernetes never appear." },
+    { "dimension": "IMPACT", "label": "Quantified impact", "weight": 0.20, "score": 55, "rationale": "Only 2 of 14 bullets show a measurable result." },
+    { "dimension": "STRUCTURE", "label": "Structure and sections", "weight": 0.15, "score": 85, "rationale": "Standard sections in a sensible order with dates." },
+    { "dimension": "READABILITY", "label": "Readability", "weight": 0.15, "score": 78, "rationale": "Concise bullets; a few start with weak verbs such as 'worked on'." },
+    { "dimension": "EXPERIENCE_FIT", "label": "Experience fit", "weight": 0.10, "score": 70, "rationale": "Scope fits mid level; little ownership of design decisions shown." },
+    { "dimension": "ATS_FORMATTING", "label": "ATS-safe formatting", "weight": 0.10, "score": 80, "rationale": "Single column, no tables; one image in the header." }
+  ],
+  "skills": {
+    "matched": [ { "name": "Java", "importance": "REQUIRED" }, { "name": "Spring Boot", "importance": "REQUIRED" } ],
+    "missing": [ { "name": "Microservices", "importance": "REQUIRED" }, { "name": "Kafka", "importance": "PREFERRED" } ]
+  },
+  "suggestions": {
+    "visible": [
+      {
+        "id": "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d",
+        "priority": 1,
+        "dimension": "IMPACT",
+        "originalText": "Worked on payment APIs using Spring Boot.",
+        "suggestedText": "Built 6 Spring Boot payment APIs handling [N] transactions per day with p95 latency under [X] ms.",
+        "reason": "Starts with a strong verb and shows scale and results."
+      }
+    ],
+    "lockedCount": 4,
+    "totalCount": 7
+  }
+}
+```
+
+(The example shows 1 of the 3 visible suggestions and 2 skills per list.) Overall score check per FR-011: 74×0.30 + 55×0.20 + 85×0.15 + 78×0.15 + 70×0.10 + 80×0.10 = 22.2 + 11 + 12.75 + 11.7 + 7 + 8 = 72.65 → `73`, band `FAIR`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `analysisId` not a UUID |
+| 404 | `RESOURCE_NOT_FOUND` | Missing or not owned |
+
+#### API-010 `GET /api/ro/v1/analyses/{analysisId}/report`
+- **Purpose:** Download the analysis as a PDF.
+- **Auth / role:** owner.
+- **Implements:** FR-018, FR-014 (criterion 2).
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `analysisId` | path | uuid | yes | UUID |
+
+**Response 200** — binary PDF; headers `Content-Type: application/pdf`, `Content-Disposition: attachment; filename="surfingbear-resume-analysis-20261016-5e8f2a10.pdf"`, `Cache-Control: no-store`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `analysisId` not a UUID |
+| 404 | `RESOURCE_NOT_FOUND` | Missing or not owned |
+| 409 | `ANALYSIS_NOT_COMPLETED` | Status is not `COMPLETED`; `details.status` |
+
+#### API-011 `DELETE /api/ro/v1/analyses/{analysisId}`
+- **Purpose:** Delete one analysis.
+- **Auth / role:** owner.
+- **Implements:** FR-017.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `analysisId` | path | uuid | yes | UUID |
+
+**Response 204** — no body.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `analysisId` not a UUID |
+| 404 | `RESOURCE_NOT_FOUND` | Missing or not owned |
+| 409 | `ANALYSIS_IN_PROGRESS` | Status `QUEUED`/`PROCESSING`; `details.analysisId` |
+
+#### API-012 `GET /api/ro/v1/me/data-export`
+- **Purpose:** Download all of the caller's data (DPDP right to access).
+- **Auth / role:** any authenticated user. Rate bucket `export`.
+- **Implements:** FR-020, CR-024.
+
+**Request:** no parameters.
+
+**Response 200** — `Content-Type: application/json`, `Content-Disposition: attachment; filename="surfingbear-resume-optimizer-data-20261016.json"`
+
+```json
+{
+  "exportedAt": "2026-10-16T12:10:00.000Z",
+  "userId": "7d0c2f1e-5b8a-4c39-9a51-0f1f2c3d4e5f",
+  "consents": [
+    { "noticeVersion": "2026-10-v1", "acceptedAt": "2026-10-16T11:58:02.511Z", "withdrawnAt": null }
+  ],
+  "resumes": [
+    {
+      "id": "2b7e1516-28ae-4d2a-a6ab-f7158809cf4f",
+      "filename": "Asha_Resume_2026.pdf",
+      "fileType": "PDF",
+      "fileSizeBytes": 184233,
+      "pageCount": 2,
+      "textCharCount": 4312,
+      "imageCount": 1,
+      "tableCount": 0,
+      "redactionCount": 3,
+      "createdAt": "2026-10-16T12:00:10.004Z",
+      "expiresAt": "2026-11-15T12:00:10.004Z",
+      "textRedacted": "Asha K\nBackend Developer\nEmail: [EMAIL] | [PHONE] | [URL]\n…"
+    }
+  ],
+  "analyses": [],
+  "usage": [ { "period": "2026-10", "used": 1 } ]
+}
+```
+
+`analyses[]` items are `AnalysisResponse` objects in which `suggestions.visible` holds **all** suggestions and `lockedCount` is `0` (FR-014 criterion 4). Arrays are sorted by `createdAt` (consents by `acceptedAt`, usage by `period`) ascending.
+
+**Errors:** only the common ones (including `429 RATE_LIMITED` after 5 exports per day).
+
+#### API-013 `DELETE /api/ro/v1/me/data`
+- **Purpose:** Erase all the caller's data and withdraw consent (DPDP right to erasure).
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-021, CR-024.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `confirm` | body | string | yes | Exactly `DELETE_MY_DATA` |
+
+**Response 200**
+
+```json
+{
+  "erasureId": "c4ca4238-a0b9-4382-8dcc-509a6f75849b",
+  "deletedResumeCount": 3,
+  "deletedAnalysisCount": 7,
+  "completedAt": "2026-10-16T12:15:03.770Z"
+}
+```
+
+Calling it with no data left still succeeds with counts `0` and creates a new TBL-010 row.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `confirm` missing or not exactly `DELETE_MY_DATA` |
+| 400 | `MALFORMED_REQUEST` | Body not valid JSON or has unknown fields |
+
+#### API-014 `GET /api/ro/v1/admin/job-roles`
+- **Purpose:** All job roles including inactive ones.
+- **Auth / role:** `ADMIN`.
+- **Implements:** FR-023.
+
+**Request:** no parameters. Not paginated (≤ 200). Sorted by `name` ascending, case-insensitive.
+
+**Response 200**
+
+```json
+{
+  "items": [
+    {
+      "id": "10000000-0000-0000-0000-000000000004",
+      "name": "Data Analyst",
+      "description": "Turns business data into reports, dashboards and insights.",
+      "isActive": true,
+      "skills": [ { "name": "SQL", "importance": "REQUIRED", "displayOrder": 1 } ],
+      "createdAt": "2026-10-16T00:00:00.000Z",
+      "updatedAt": "2026-10-16T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 403 | `FORBIDDEN` | Caller is not `ADMIN` |
+
+#### API-015 `POST /api/ro/v1/admin/job-roles`
+- **Purpose:** Create a job role.
+- **Auth / role:** `ADMIN`.
+- **Implements:** FR-023.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `name` | body | string | yes | Trimmed; 3–100 characters; unique ignoring case |
+| `description` | body | string | no | 0–500 characters; default `""` |
+| `isActive` | body | boolean | no | Default `true` |
+| `skills` | body | array | yes | 1–40 items; at least one `REQUIRED` |
+| `skills[].name` | body | string | yes | Trimmed; 1–60 characters; unique within the list ignoring case |
+| `skills[].importance` | body | string | yes | `REQUIRED` \| `PREFERRED` |
+
+`displayOrder` is not sent: it is the position in `skills` (1-based).
+
+```json
+{
+  "name": "Android Developer",
+  "description": "Builds native Android apps.",
+  "isActive": true,
+  "skills": [ { "name": "Kotlin", "importance": "REQUIRED" }, { "name": "Jetpack Compose", "importance": "PREFERRED" } ]
+}
+```
+
+**Response 201** — `AdminJobRoleResponse`, header `Location: /api/ro/v1/admin/job-roles/{id}`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | Any rule above; duplicate skill names are reported as `fieldErrors[].field = "skills[3].name"`, `code = "INVALID_VALUE"`; no REQUIRED skill → `field = "skills"`, `code = "INVALID_VALUE"` |
+| 400 | `MALFORMED_REQUEST` | Body not valid JSON or has unknown fields |
+| 403 | `FORBIDDEN` | Not `ADMIN` |
+| 409 | `JOB_ROLE_NAME_TAKEN` | Another role has the same name ignoring case |
+| 409 | `JOB_ROLE_LIMIT_REACHED` | 200 roles already exist; `details.maxRoles = 200` |
+
+#### API-016 `PUT /api/ro/v1/admin/job-roles/{jobRoleId}`
+- **Purpose:** Replace a job role (name, description, active flag and the whole skill list).
+- **Auth / role:** `ADMIN`.
+- **Implements:** FR-023.
+
+**Request:** path `jobRoleId` (uuid) plus the same body and rules as API-015, except that **all** fields are required (`description` may be `""`). The name uniqueness check ignores the role itself.
+
+**Response 200** — `AdminJobRoleResponse` after the change.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | As API-015, or `jobRoleId` not a UUID |
+| 400 | `MALFORMED_REQUEST` | As API-015 |
+| 403 | `FORBIDDEN` | Not `ADMIN` |
+| 404 | `RESOURCE_NOT_FOUND` | No role with this id |
+| 409 | `JOB_ROLE_NAME_TAKEN` | Another role has the name |
+
+#### API-017 `POST /api/ro/v1/dev/token`
+- **Purpose:** Local development only — sign in as any test user without the Platform.
+- **Auth / role:** none (exempt from CR-001). The controller and its key exist **only** under the `local` profile (`@Profile("local")`); in every other profile this path answers `404 ENDPOINT_NOT_FOUND`, and application start fails if `local` is combined with `prod`.
+- **Implements:** CR-001 (exception), CR-033.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `userId` | body | uuid | yes | UUID |
+| `plan` | body | string | yes | `FREE` \| `PREMIUM` |
+| `roles` | body | string[] | no | Each `RO_ADMIN`; default `[]` |
+
+**Response 204** — header `Set-Cookie: sb_at=<JWT>; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800`. The JWT is RS256, signed with a 2048-bit RSA key pair generated in memory at start-up (`DevJwtKeyConfig`), with `iss = ro.auth.issuer`, `aud = ["resume-optimizer"]`, `sub = userId`, `sb_plan = plan`, `roles`, `exp = now + 8 h`. Under `local`, the JWT decoder trusts only that in-memory public key.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | Field missing or invalid |
+| 403 | `CSRF_HEADER_MISSING` | Missing `X-Requested-By: ro-web` |
+
+### 6.3 Error code list
+
+`HTTP —` = not an HTTP error: the code is stored in `analyses.failure_code` and returned as `failureCode` of a `FAILED` analysis. Messages are exactly the text the frontend shows (CR-030).
+
+| ID | Code | HTTP | Message | When it happens | `details` keys |
+|---|---|---|---|---|---|
+| ERR-001 | `UNAUTHENTICATED` | 401 | Please sign in again. | Missing, invalid or expired token (CR-001…003) | — |
+| ERR-002 | `FORBIDDEN` | 403 | You do not have permission to do this. | Admin endpoint without `ADMIN` (CR-008) | — |
+| ERR-003 | `CSRF_HEADER_MISSING` | 403 | The request was blocked for security reasons. Please reload the page. | Missing `X-Requested-By` (CR-005) | — |
+| ERR-004 | `VALIDATION_FAILED` | 400 | Some fields are missing or invalid. | Bean-validation failure, bad path/query/header value | — (see `fieldErrors`) |
+| ERR-005 | `MALFORMED_REQUEST` | 400 | The request could not be read. | Invalid JSON, wrong JSON type, unknown property (CR-018) | — |
+| ERR-006 | `RESOURCE_NOT_FOUND` | 404 | We could not find that item. It may have been deleted. | Id missing, expired or not owned (CR-007) | — |
+| ERR-007 | `ENDPOINT_NOT_FOUND` | 404 | This page or action does not exist. | Unknown path | — |
+| ERR-008 | `METHOD_NOT_ALLOWED` | 405 | This action is not supported here. | Wrong HTTP method | `allowed` (string[]) |
+| ERR-009 | `CONSENT_REQUIRED` | 403 | Please accept the privacy notice to continue. | No active consent (CR-023, FR-002) | `currentVersion` |
+| ERR-010 | `CONSENT_VERSION_MISMATCH` | 409 | The privacy notice has changed. Please read the new version. | API-002 with an old version | `currentVersion` |
+| ERR-011 | `FILE_MISSING` | 400 | Please choose a file to upload. | FR-004 check 3 | — |
+| ERR-012 | `FILE_TOO_LARGE` | 413 | The file is larger than 5 MB. | FR-004 check 4 | `maxBytes` |
+| ERR-013 | `UNSUPPORTED_FILE_TYPE` | 415 | Only PDF and DOCX files are supported. | FR-004 check 5 | `allowed` |
+| ERR-014 | `FILE_ENCRYPTED` | 422 | This file is password-protected. Please remove the password and upload it again. | FR-004 check 6 | — |
+| ERR-015 | `FILE_CORRUPT` | 422 | This file could not be opened. It may be damaged. | FR-004 check 7 | — |
+| ERR-016 | `FILE_PROCESSING_TIMEOUT` | 422 | This file took too long to read. Please save it again as a simpler PDF or DOCX. | FR-004 check 8 | — |
+| ERR-017 | `RESUME_TOO_MANY_PAGES` | 422 | Your resume has more than 10 pages. Please shorten it. | FR-004 check 9 | `maxPages`, `pageCount` |
+| ERR-018 | `RESUME_TEXT_TOO_SHORT` | 422 | We could not find enough text in this file. Scanned or image-only resumes are not supported. | FR-004 check 10 | `minChars` |
+| ERR-019 | `RESUME_TEXT_TOO_LONG` | 422 | Your resume has too much text (over 50,000 characters). Please shorten it. | FR-004 check 11 | `maxChars` |
+| ERR-020 | `RESUME_LANGUAGE_UNSUPPORTED` | 422 | Only resumes in English are supported. | FR-004 check 12 | — |
+| ERR-021 | `RESUME_LIMIT_REACHED` | 409 | You can keep up to 20 resumes. Please delete one first. | FR-004 check 2 | `maxResumes` |
+| ERR-022 | `JOB_ROLE_NOT_AVAILABLE` | 422 | This job role is not available. Please choose another. | FR-008 step 6 | — |
+| ERR-023 | `QUOTA_EXCEEDED` | 403 | You have used all your analyses for this month. | FR-009 | `limit`, `used`, `resetsAt` |
+| ERR-024 | `ANALYSIS_IN_PROGRESS` | 409 | An analysis is still running. Please wait for it to finish. | FR-007, FR-008 step 7, FR-017 | `analysisId` |
+| ERR-025 | `IDEMPOTENCY_KEY_CONFLICT` | 409 | This request was already sent with different details. Please start again. | FR-008 step 3 | `analysisId` |
+| ERR-026 | `ANALYSIS_NOT_COMPLETED` | 409 | The report is available once the analysis has finished. | FR-018 | `status` |
+| ERR-027 | `RATE_LIMITED` | 429 | Too many requests. Please wait a moment and try again. | CR-020 | `bucket`, `retryAfterSeconds` |
+| ERR-028 | `JOB_ROLE_NAME_TAKEN` | 409 | A job role with this name already exists. | FR-023 | — |
+| ERR-029 | `INTERNAL_ERROR` | 500 | Something went wrong on our side. Please try again. | Unexpected exception (CR-015) | — |
+| ERR-030 | `SERVICE_UNAVAILABLE` | 503 | The service is temporarily unavailable. Please try again shortly. | Database down; `parse-pool` full (with `Retry-After: 5`) | — |
+| ERR-031 | `AI_UNAVAILABLE` | — | Our analysis service is busy right now. Please try again in a few minutes. This attempt did not use your monthly quota. | FR-019 criterion 1–2 | — |
+| ERR-032 | `AI_INVALID_RESPONSE` | — | We could not complete the analysis. Please try again. This attempt did not use your monthly quota. | FR-010 criterion 3 | — |
+| ERR-033 | `PROCESSING_TIMEOUT` | — | The analysis took too long. Please try again. This attempt did not use your monthly quota. | FR-019 criteria 1, 3, 4 | — |
+| ERR-034 | `AI_REFUSED` | — | We could not analyse this resume. Please check its content and try again. This attempt did not use your monthly quota. | FR-019 criterion 1 (`stop_reason = refusal`) | — |
+| ERR-035 | `JOB_ROLE_LIMIT_REACHED` | 409 | The catalogue already has the maximum of 200 job roles. | FR-023 criterion 4 | `maxRoles` |
 
 ---
 
