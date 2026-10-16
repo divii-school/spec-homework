@@ -1135,7 +1135,384 @@ Dashboards: "RO — API" (traffic, latency, errors per endpoint), "RO — Analys
 
 ## 5. ERD and database design
 
-_Being written._
+PostgreSQL 16, database `resume_optimizer`, one schema `ro`, created by Flyway `V1__create_schema.sql` (tables, constraints, indexes exactly as below) and `V2__seed_job_roles.sql` (§5.6). Configuration: `spring.flyway.schemas=ro`, `spring.flyway.default-schema=ro`, `spring.jpa.properties.hibernate.default_schema=ro`, and both database users have `search_path = ro`. Extension `pgcrypto` is not needed (`gen_random_uuid()` is built in since PostgreSQL 13).
+
+Common rules for every table:
+- Primary keys are `uuid` with default `gen_random_uuid()` unless stated; the application never chooses ids except the fixed seed ids of §5.6.
+- Every `timestamptz` value is written by the application from the injected `Clock` (UTC). The `DEFAULT now()` on some columns is only a safety net for manual SQL.
+- Enum-like values are `varchar` + `CHECK` (not PostgreSQL `ENUM` types), so adding a value is one `ALTER … DROP/ADD CONSTRAINT` in a Flyway migration.
+- `user_id` is the Platform `sub` (A-10). There is **no users table**: users are owned by the Platform.
+- No soft delete anywhere: a delete is a real `DELETE` (DPDP erasure, CR-024).
+
+### 5.1 ERD
+
+```mermaid
+erDiagram
+  RESUMES ||--o{ ANALYSES : "is analysed in (resume_id, SET NULL on delete)"
+  JOB_ROLES ||--o{ ANALYSES : "targets (RESTRICT)"
+  JOB_ROLES ||--|{ JOB_ROLE_SKILLS : "has 1..40 (CASCADE)"
+  ANALYSES ||--o{ ANALYSIS_DIMENSION_SCORES : "has 0 or 6 (CASCADE)"
+  ANALYSES ||--o{ ANALYSIS_SKILLS : "has 0..40 (CASCADE)"
+  ANALYSES ||--o{ ANALYSIS_SUGGESTIONS : "has 0..10 (CASCADE)"
+
+  CONSENTS {
+    uuid id PK
+    uuid user_id
+    varchar notice_version
+    timestamptz accepted_at
+    timestamptz withdrawn_at
+  }
+  RESUMES {
+    uuid id PK
+    uuid user_id
+    varchar original_filename
+    varchar file_type
+    int file_size_bytes
+    smallint page_count
+    text text_redacted
+    int text_char_count
+    int image_count
+    int table_count
+    int redaction_count
+    timestamptz created_at
+    timestamptz expires_at
+  }
+  ANALYSES {
+    uuid id PK
+    uuid user_id
+    uuid resume_id FK
+    varchar resume_filename
+    uuid job_role_id FK
+    varchar job_role_name
+    varchar experience_level
+    varchar status
+    varchar failure_code
+    smallint overall_score
+    varchar plan_at_creation
+    char quota_period
+    uuid idempotency_key
+    smallint attempt_count
+    varchar locked_by
+    timestamptz locked_until
+    varchar ai_model
+    int ai_input_tokens
+    int ai_output_tokens
+    timestamptz created_at
+    timestamptz started_at
+    timestamptz completed_at
+    timestamptz expires_at
+  }
+  ANALYSIS_DIMENSION_SCORES {
+    uuid analysis_id PK,FK
+    varchar dimension PK
+    numeric weight
+    smallint score
+    varchar rationale
+  }
+  ANALYSIS_SKILLS {
+    uuid analysis_id PK,FK
+    smallint display_order PK
+    varchar skill_name
+    varchar importance
+    boolean is_present
+  }
+  ANALYSIS_SUGGESTIONS {
+    uuid id PK
+    uuid analysis_id FK
+    smallint priority
+    varchar dimension
+    varchar original_text
+    varchar suggested_text
+    varchar reason
+  }
+  USAGE_PERIODS {
+    uuid user_id PK
+    char period PK
+    int used_count
+    timestamptz updated_at
+  }
+  JOB_ROLES {
+    uuid id PK
+    varchar name
+    varchar description
+    boolean is_active
+    timestamptz created_at
+    timestamptz updated_at
+    uuid created_by
+    uuid updated_by
+  }
+  JOB_ROLE_SKILLS {
+    uuid job_role_id PK,FK
+    smallint display_order PK
+    varchar name
+    varchar importance
+  }
+  DATA_ERASURE_REQUESTS {
+    uuid id PK
+    uuid user_id
+    timestamptz requested_at
+    timestamptz completed_at
+    int deleted_resume_count
+    int deleted_analysis_count
+    timestamptz expires_at
+  }
+  AUDIT_EVENTS {
+    bigint id PK
+    timestamptz occurred_at
+    uuid actor_user_id
+    varchar action
+    varchar target_type
+    uuid target_id
+    uuid request_id
+    jsonb metadata
+  }
+  SHEDLOCK {
+    varchar name PK
+    timestamp lock_until
+    timestamp locked_at
+    varchar locked_by
+  }
+```
+
+`CONSENTS`, `RESUMES`, `ANALYSES`, `USAGE_PERIODS`, `DATA_ERASURE_REQUESTS` and `AUDIT_EVENTS` are all keyed to the same Platform user through `user_id` / `actor_user_id`; that link is logical (no users table) and is what erasure (FR-021) and export (FR-020) filter on.
+
+### 5.2 Tables
+
+#### TBL-001 `consents`
+Purpose: one row per acceptance of a privacy-notice version (FR-002, CR-023).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK `pk_consents` | `gen_random_uuid()` | |
+| user_id | uuid | NO | | — | Platform `sub` |
+| notice_version | varchar(20) | NO | | — | e.g. `2026-10-v1` (`CONSENT_NOTICE_VERSION`) |
+| accepted_at | timestamptz | NO | | `now()` | |
+| withdrawn_at | timestamptz | YES | | `NULL` | Set by FR-021. `ck_consents_withdrawn_after_accepted`: `withdrawn_at IS NULL OR withdrawn_at >= accepted_at` |
+
+"Active consent" = a row with `withdrawn_at IS NULL` and `notice_version = CONSENT_NOTICE_VERSION`. At most one active row per user and version (`ux_consents_user_id_notice_version_active`).
+
+#### TBL-002 `resumes`
+Purpose: one uploaded resume, stored only as redacted text plus metadata (FR-004, FR-005).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK `pk_resumes` | `gen_random_uuid()` | |
+| user_id | uuid | NO | | — | Owner |
+| original_filename | varchar(255) | NO | | — | Cleaned per FR-004 criterion 14. `ck_resumes_filename_not_blank`: `char_length(btrim(original_filename)) >= 1` |
+| file_type | varchar(4) | NO | | — | `ck_resumes_file_type`: `IN ('PDF','DOCX')` |
+| file_size_bytes | integer | NO | | — | `ck_resumes_file_size`: `BETWEEN 1 AND 5242880` (`MAX_FILE_BYTES`) |
+| page_count | smallint | YES | | `NULL` | `ck_resumes_page_count`: `(file_type = 'PDF' AND page_count BETWEEN 1 AND 10) OR (file_type = 'DOCX' AND page_count IS NULL)` |
+| text_redacted | text | NO | | — | Normalised, redacted text (§4.6.2–4.6.3). `ck_resumes_text_length`: `char_length(text_redacted) BETWEEN 1 AND 60000` (redaction tokens may make it slightly longer than `MAX_TEXT_CHARS`) |
+| text_char_count | integer | NO | | — | Code points of the normalised text **before** redaction. `ck_resumes_text_char_count`: `BETWEEN 300 AND 50000` |
+| image_count | integer | NO | | `0` | `ck_resumes_image_count`: `>= 0` |
+| table_count | integer | NO | | `0` | `ck_resumes_table_count`: `>= 0` |
+| redaction_count | integer | NO | | `0` | `ck_resumes_redaction_count`: `>= 0` |
+| created_at | timestamptz | NO | | `now()` | |
+| expires_at | timestamptz | NO | | — | `created_at + RESUME_RETENTION`. `ck_resumes_expiry`: `expires_at > created_at` |
+
+#### TBL-003 `analyses`
+Purpose: one analysis, its result header, and its queue state (FR-008…019).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK `pk_analyses` | `gen_random_uuid()` | |
+| user_id | uuid | NO | | — | Owner |
+| resume_id | uuid | YES | FK `fk_analyses_resume_id` → `resumes(id)` `ON DELETE SET NULL` | — | Null once the resume has expired (FR-022) |
+| resume_filename | varchar(255) | NO | | — | Copy of `resumes.original_filename` at creation |
+| job_role_id | uuid | NO | FK `fk_analyses_job_role_id` → `job_roles(id)` `ON DELETE RESTRICT` | — | |
+| job_role_name | varchar(100) | NO | | — | Copy of `job_roles.name` at creation |
+| experience_level | varchar(10) | NO | | — | `ck_analyses_experience_level`: `IN ('ENTRY','MID','SENIOR','LEAD')` |
+| status | varchar(12) | NO | | `'QUEUED'` | `ck_analyses_status`: `IN ('QUEUED','PROCESSING','COMPLETED','FAILED')` |
+| failure_code | varchar(30) | YES | | `NULL` | `ck_analyses_failure_code`: `failure_code IS NULL OR failure_code IN ('AI_UNAVAILABLE','AI_INVALID_RESPONSE','AI_REFUSED','PROCESSING_TIMEOUT')`; `ck_analyses_failure_code_iff_failed`: `(status = 'FAILED') = (failure_code IS NOT NULL)` |
+| overall_score | smallint | YES | | `NULL` | `ck_analyses_score_range`: `overall_score IS NULL OR overall_score BETWEEN 0 AND 100`; `ck_analyses_score_iff_completed`: `(status = 'COMPLETED') = (overall_score IS NOT NULL)` |
+| plan_at_creation | varchar(7) | NO | | — | `ck_analyses_plan`: `IN ('FREE','PREMIUM')`. Recorded for support and metrics; visibility uses the current plan (FR-014) |
+| quota_period | char(7) | NO | | — | `YYYY-MM` in `Asia/Kolkata` (FR-009). `ck_analyses_quota_period`: `quota_period ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'` |
+| idempotency_key | uuid | NO | | — | From header `Idempotency-Key`. Unique per user (`ux_analyses_user_id_idempotency_key`) |
+| attempt_count | smallint | NO | | `0` | `ck_analyses_attempt_count`: `BETWEEN 0 AND 10` |
+| locked_by | varchar(100) | YES | | `NULL` | Worker instance id holding the lease |
+| locked_until | timestamptz | YES | | `NULL` | Lease end. `ck_analyses_lease_iff_processing`: `(status = 'PROCESSING') = (locked_until IS NOT NULL AND locked_by IS NOT NULL)` — the `COMPLETED`, `FAILED` and release updates all set both to `NULL` |
+| ai_model | varchar(64) | YES | | `NULL` | Model id actually used (`AI_MODEL` at processing time) |
+| ai_input_tokens | integer | YES | | `NULL` | Sum over the AI calls of this analysis. `ck_analyses_ai_input_tokens`: `IS NULL OR >= 0` |
+| ai_output_tokens | integer | YES | | `NULL` | Same. `ck_analyses_ai_output_tokens`: `IS NULL OR >= 0` |
+| created_at | timestamptz | NO | | `now()` | |
+| started_at | timestamptz | YES | | `NULL` | First claim |
+| completed_at | timestamptz | YES | | `NULL` | `ck_analyses_completed_at`: `(status IN ('COMPLETED','FAILED')) = (completed_at IS NOT NULL)` |
+| expires_at | timestamptz | NO | | — | `created_at + ANALYSIS_RETENTION`. `ck_analyses_expiry`: `expires_at > created_at` |
+
+#### TBL-004 `analysis_dimension_scores`
+Purpose: the six dimension scores of a completed analysis (FR-011).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| analysis_id | uuid | NO | PK part 1 `pk_analysis_dimension_scores`; FK `fk_analysis_dimension_scores_analysis_id` → `analyses(id)` `ON DELETE CASCADE` | — | |
+| dimension | varchar(20) | NO | PK part 2 | — | `ck_analysis_dimension_scores_dimension`: `IN ('KEYWORD_MATCH','IMPACT','STRUCTURE','READABILITY','EXPERIENCE_FIT','ATS_FORMATTING')` |
+| weight | numeric(3,2) | NO | | — | Copy of the §4.6.4 weight used. `ck_analysis_dimension_scores_weight`: `weight > 0 AND weight <= 1` |
+| score | smallint | NO | | — | `ck_analysis_dimension_scores_score`: `BETWEEN 0 AND 100` |
+| rationale | varchar(300) | NO | | — | After rule V1a |
+
+#### TBL-005 `analysis_skills`
+Purpose: a snapshot of every catalogue skill of the job role at completion time, with whether the resume shows it (FR-012).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| analysis_id | uuid | NO | PK part 1 `pk_analysis_skills`; FK `fk_analysis_skills_analysis_id` → `analyses(id)` `ON DELETE CASCADE` | — | |
+| display_order | smallint | NO | PK part 2 | — | The catalogue skill's `display_order`. `ck_analysis_skills_display_order`: `BETWEEN 1 AND 40` |
+| skill_name | varchar(60) | NO | | — | Catalogue spelling |
+| importance | varchar(9) | NO | | — | `ck_analysis_skills_importance`: `IN ('REQUIRED','PREFERRED')` |
+| is_present | boolean | NO | | — | `true` = matched, `false` = missing |
+
+#### TBL-006 `analysis_suggestions`
+Purpose: the kept rewrite suggestions of a completed analysis (FR-013, FR-014).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK `pk_analysis_suggestions` | `gen_random_uuid()` | Returned in the API |
+| analysis_id | uuid | NO | FK `fk_analysis_suggestions_analysis_id` → `analyses(id)` `ON DELETE CASCADE` | — | |
+| priority | smallint | NO | | — | 1 = most impactful. `ck_analysis_suggestions_priority`: `BETWEEN 1 AND 10`; `ux_analysis_suggestions_analysis_id_priority` |
+| dimension | varchar(20) | NO | | — | Same `CHECK` list as TBL-004 (`ck_analysis_suggestions_dimension`) |
+| original_text | varchar(300) | NO | | — | |
+| suggested_text | varchar(300) | NO | | — | |
+| reason | varchar(200) | NO | | — | |
+
+#### TBL-007 `usage_periods`
+Purpose: the monthly quota counter per user (FR-009). Kept after erasure (FR-009 criterion 7).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| user_id | uuid | NO | PK part 1 `pk_usage_periods` | — | |
+| period | char(7) | NO | PK part 2 | — | `YYYY-MM`, `Asia/Kolkata`. `ck_usage_periods_period`: same regex as `analyses.quota_period` |
+| used_count | integer | NO | | `0` | Units reserved and not refunded. `ck_usage_periods_used_count`: `used_count >= 0` |
+| updated_at | timestamptz | NO | | `now()` | |
+
+The limit is **not** stored: it depends on the plan in the token at creation time (FR-009 criterion 3).
+
+#### TBL-008 `job_roles`
+Purpose: the job-role catalogue (FR-003, FR-023).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK `pk_job_roles` | `gen_random_uuid()` | Seed rows use the fixed ids of §5.6 |
+| name | varchar(100) | NO | | — | `ck_job_roles_name_length`: `char_length(btrim(name)) BETWEEN 3 AND 100`; unique ignoring case (`ux_job_roles_lower_name`) |
+| description | varchar(500) | NO | | `''` | Sent to the AI as `<role_description>` |
+| is_active | boolean | NO | | `true` | Inactive roles are hidden from users (FR-003) |
+| created_at | timestamptz | NO | | `now()` | |
+| updated_at | timestamptz | NO | | `now()` | |
+| created_by | uuid | NO | | — | Admin `sub`; seed rows use `00000000-0000-0000-0000-000000000000` |
+| updated_by | uuid | NO | | — | Same |
+
+#### TBL-009 `job_role_skills`
+Purpose: the skills of a job role, in display order (FR-003, FR-012, FR-023).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| job_role_id | uuid | NO | PK part 1 `pk_job_role_skills`; FK `fk_job_role_skills_job_role_id` → `job_roles(id)` `ON DELETE CASCADE` | — | |
+| display_order | smallint | NO | PK part 2 | — | 1…n without gaps, in the order given by the admin. `ck_job_role_skills_display_order`: `BETWEEN 1 AND 40` |
+| name | varchar(60) | NO | | — | `ck_job_role_skills_name_length`: `char_length(btrim(name)) BETWEEN 1 AND 60`; unique per role ignoring case (`ux_job_role_skills_job_role_id_lower_name`) |
+| importance | varchar(9) | NO | | — | `ck_job_role_skills_importance`: `IN ('REQUIRED','PREFERRED')` |
+
+API-016 replaces the skill list by deleting all rows of the role and inserting the new list in the same transaction.
+
+#### TBL-010 `data_erasure_requests`
+Purpose: proof that an erasure happened, without keeping the erased data (FR-021, CR-024).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK `pk_data_erasure_requests` | `gen_random_uuid()` | Returned as `erasureId` |
+| user_id | uuid | NO | | — | |
+| requested_at | timestamptz | NO | | `now()` | |
+| completed_at | timestamptz | NO | | — | Same transaction, so equal to or just after `requested_at` |
+| deleted_resume_count | integer | NO | | — | `ck_data_erasure_requests_counts`: `deleted_resume_count >= 0 AND deleted_analysis_count >= 0` |
+| deleted_analysis_count | integer | NO | | — | |
+| expires_at | timestamptz | NO | | — | `requested_at + AUDIT_RETENTION` |
+
+#### TBL-011 `audit_events`
+Purpose: append-only audit trail of the actions in CR-040. Never contains personal data.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | bigint | NO | PK `pk_audit_events` | `GENERATED ALWAYS AS IDENTITY` | |
+| occurred_at | timestamptz | NO | | `now()` | |
+| actor_user_id | uuid | NO | | — | Who did it |
+| action | varchar(30) | NO | | — | `ck_audit_events_action`: `IN ('CONSENT_ACCEPTED','CONSENT_WITHDRAWN','DATA_EXPORTED','DATA_ERASED','JOB_ROLE_CREATED','JOB_ROLE_UPDATED')` |
+| target_type | varchar(20) | NO | | — | `ck_audit_events_target_type`: `IN ('CONSENT','USER_DATA','JOB_ROLE')` |
+| target_id | uuid | YES | | `NULL` | Consent id, erasure id or job-role id; `NULL` for `DATA_EXPORTED` |
+| request_id | uuid | YES | | `NULL` | CR-011 request id |
+| metadata | jsonb | NO | | `'{}'::jsonb` | Only ids, counts, enum values and version strings, e.g. `{"noticeVersion":"2026-10-v1"}`, `{"deletedResumeCount":3,"deletedAnalysisCount":7}`, `{"skillCount":14,"isActive":true}` |
+
+#### TBL-012 `shedlock`
+Purpose: ShedLock's lock table for the retention job (CMP-015). Standard ShedLock schema; the lock provider is configured with `usingDbTime()`.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| name | varchar(64) | NO | PK `pk_shedlock` | — | Lock name, here `retentionJob` |
+| lock_until | timestamp | NO | | — | |
+| locked_at | timestamp | NO | | — | |
+| locked_by | varchar(255) | NO | | — | |
+
+### 5.3 Indexes
+
+| Table | Index | Columns | Why (query it serves) |
+|---|---|---|---|
+| consents | `ux_consents_user_id_notice_version_active` (unique, partial `WHERE withdrawn_at IS NULL`) | `user_id, notice_version` | Consent check on every upload/analysis: `SELECT 1 FROM consents WHERE user_id = ? AND notice_version = ? AND withdrawn_at IS NULL`; also makes API-002 idempotent under concurrency |
+| consents | `ix_consents_withdrawn_at` (partial `WHERE withdrawn_at IS NOT NULL`) | `withdrawn_at` | Retention: delete consents withdrawn more than `AUDIT_RETENTION` ago |
+| resumes | `ix_resumes_user_id_created_at_id` | `user_id, created_at DESC, id DESC` | API-005 list (sort + paging) and the `MAX_STORED_RESUMES` count; FR-021 delete by user |
+| resumes | `ix_resumes_expires_at` | `expires_at` | Retention: `WHERE expires_at <= :now` |
+| analyses | `ux_analyses_user_id_idempotency_key` (unique) | `user_id, idempotency_key` | FR-008 replay lookup and the race-free guarantee |
+| analyses | `ux_analyses_user_id_in_progress` (unique, partial `WHERE status IN ('QUEUED','PROCESSING')`) | `user_id` | Enforces `MAX_IN_PROGRESS_PER_USER = 1` (FR-008 step 7) in the database; also serves the in-progress check |
+| analyses | `ix_analyses_user_id_created_at_id` | `user_id, created_at DESC, id DESC` | API-008 history list, sort and paging; FR-021 delete by user |
+| analyses | `ix_analyses_queue` (partial `WHERE status IN ('QUEUED','PROCESSING')`) | `created_at` | Worker claim `ORDER BY created_at` over the few non-terminal rows; stale-queue and lease-expiry scans; `ro_analysis_queue_depth` |
+| analyses | `ix_analyses_resume_id` | `resume_id` | FR-007 delete of a resume's analyses, the "in-progress analysis for this resume" check, `analysisCount` in API-005, and the `ON DELETE SET NULL` action |
+| analyses | `ix_analyses_job_role_id` | `job_role_id` | FK check when an admin updates a role (`RESTRICT`); avoids a sequential scan |
+| analyses | `ix_analyses_expires_at` | `expires_at` | Retention |
+| analysis_suggestions | `ux_analysis_suggestions_analysis_id_priority` (unique) | `analysis_id, priority` | Read suggestions of an analysis in priority order; FK cascade lookups |
+| job_roles | `ux_job_roles_lower_name` (unique) | `lower(name)` | FR-023 name uniqueness ignoring case |
+| job_role_skills | `ux_job_role_skills_job_role_id_lower_name` (unique) | `job_role_id, lower(name)` | FR-023 skill uniqueness within a role |
+| data_erasure_requests | `ix_data_erasure_requests_expires_at` | `expires_at` | Retention |
+| audit_events | `ix_audit_events_occurred_at` | `occurred_at` | Retention; reading recent events |
+| audit_events | `ix_audit_events_actor_user_id_occurred_at` | `actor_user_id, occurred_at DESC` | Support/compliance lookup of a user's actions |
+
+Primary keys provide the remaining lookups: `analysis_dimension_scores` and `analysis_skills` by `analysis_id` (PK prefix), `usage_periods` by `(user_id, period)`, `job_role_skills` by `job_role_id`.
+
+### 5.4 Relationships and delete rules
+
+| From | To | Cardinality | On delete | Why |
+|---|---|---|---|---|
+| `analyses.resume_id` | `resumes.id` | many analyses to 0..1 resume | `SET NULL` | A resume expires after 30 days but its analyses live 180 days (the analysis keeps `resume_filename`). A **user** deleting a resume deletes its analyses explicitly first (FR-007), because they quote it. |
+| `analyses.job_role_id` | `job_roles.id` | many to 1 | `RESTRICT` | Roles are deactivated, never deleted (FR-023). |
+| `job_role_skills.job_role_id` | `job_roles.id` | 1..40 to 1 | `CASCADE` | Skills have no meaning without their role. |
+| `analysis_dimension_scores.analysis_id` | `analyses.id` | 0 or 6 to 1 | `CASCADE` | Part of the analysis. |
+| `analysis_skills.analysis_id` | `analyses.id` | 0..40 to 1 | `CASCADE` | Part of the analysis. |
+| `analysis_suggestions.analysis_id` | `analyses.id` | 0..10 to 1 | `CASCADE` | Part of the analysis. |
+| `consents`, `resumes`, `analyses`, `usage_periods`, `data_erasure_requests` `.user_id`; `audit_events.actor_user_id` | Platform user (no table) | many to 1 (logical) | — | Erasure (FR-021) deletes `analyses` (cascading to children) and `resumes`, sets `consents.withdrawn_at`, and keeps `usage_periods`, `data_erasure_requests` and `audit_events`, which hold no resume content and are needed to enforce the quota and prove compliance; they expire per CR-022. |
+
+### 5.5 Data volume estimate
+
+| Table | Rows per day at NFR-006 peak | Rows held at steady state | Average row size |
+|---|---|---|---|
+| resumes | ~1,000 | ~30,000 (30 days) | ~12 KB (text) |
+| analyses | ~2,000 | ~360,000 (180 days) | ~0.5 KB |
+| analysis_suggestions | ~16,000 | ~2.9 M | ~0.8 KB |
+| analysis_skills | ~28,000 | ~5 M | ~0.1 KB |
+| analysis_dimension_scores | ~12,000 | ~2.2 M | ~0.3 KB |
+
+Total ≈ 6 GB including indexes; RDS starts at 50 GB gp3 storage with autoscaling on.
+
+### 5.6 Seed data (`V2__seed_job_roles.sql`)
+
+Ten active roles, `created_by = updated_by = 00000000-0000-0000-0000-000000000000`. Skills get `display_order` 1…14 in the order listed: the 8 REQUIRED first, then the 6 PREFERRED.
+
+| Fixed id | Name | Description | REQUIRED skills (1–8) | PREFERRED skills (9–14) |
+|---|---|---|---|---|
+| `10000000-0000-0000-0000-000000000001` | Backend Developer (Java) | Builds and maintains server-side applications and APIs in Java. | Java, Spring Boot, REST APIs, SQL, Git, Microservices, Unit Testing, Maven | Docker, Kubernetes, AWS, Kafka, Redis, CI/CD |
+| `10000000-0000-0000-0000-000000000002` | Frontend Developer | Builds responsive, accessible web user interfaces. | JavaScript, TypeScript, React, HTML, CSS, Responsive Design, Git, REST APIs | Next.js, Redux, Jest, Web Accessibility, Tailwind CSS, Webpack |
+| `10000000-0000-0000-0000-000000000003` | Full Stack Developer | Builds web applications end to end, from database to user interface. | JavaScript, TypeScript, React, Node.js, REST APIs, SQL, Git, HTML | Next.js, MongoDB, Docker, AWS, GraphQL, CI/CD |
+| `10000000-0000-0000-0000-000000000004` | Data Analyst | Turns business data into reports, dashboards and insights. | SQL, Excel, Python, Data Visualization, Statistics, Power BI, Data Cleaning, Dashboards | Tableau, Pandas, A/B Testing, Google Analytics, R, ETL |
+| `10000000-0000-0000-0000-000000000005` | Data Scientist | Builds statistical and machine-learning models to solve business problems. | Python, Machine Learning, Statistics, SQL, Pandas, Scikit-learn, Data Visualization, Feature Engineering | Deep Learning, TensorFlow, PyTorch, NLP, Apache Spark, MLOps |
+| `10000000-0000-0000-0000-000000000006` | DevOps Engineer | Automates build, deployment and operation of cloud infrastructure. | Linux, Docker, Kubernetes, CI/CD, AWS, Terraform, Git, Bash | Ansible, Prometheus, Grafana, Jenkins, Helm, Python |
+| `10000000-0000-0000-0000-000000000007` | QA Engineer | Plans and runs manual and automated tests to ensure software quality. | Manual Testing, Test Case Design, Selenium, API Testing, Bug Tracking, SQL, Regression Testing, Agile | Cypress, Playwright, Postman, JMeter, Java, CI/CD |
+| `10000000-0000-0000-0000-000000000008` | Product Manager | Defines what to build and why, and leads delivery with engineering and design. | Product Roadmap, User Research, Stakeholder Management, Agile, Requirements Writing, Prioritization, Data Analysis, Go-to-Market | SQL, A/B Testing, Jira, Wireframing, OKRs, Pricing Strategy |
+| `10000000-0000-0000-0000-000000000009` | UI/UX Designer | Researches users and designs usable, attractive digital products. | Figma, User Research, Wireframing, Prototyping, Visual Design, Interaction Design, Usability Testing, Design Systems | Adobe XD, Web Accessibility, HTML, CSS, Motion Design, Information Architecture |
+| `10000000-0000-0000-0000-000000000010` | Business Analyst | Captures business needs and turns them into clear requirements and process improvements. | Requirements Gathering, Process Mapping, SQL, Excel, Stakeholder Management, User Stories, Documentation, Gap Analysis | Power BI, Jira, BPMN, UML, Tableau, Agile |
 
 ---
 
