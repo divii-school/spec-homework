@@ -219,7 +219,163 @@ Retention (CR-022). All periods are in §3.4:
 
 ## 2. Coding conventions
 
-_Being written._
+### 2.1 Naming
+
+| Item | Convention | Example |
+|---|---|---|
+| Java base package | `com.surfingbear.resumeoptimizer` | `com.surfingbear.resumeoptimizer.analysis` |
+| Java packages | lower case, one word per feature | `resume`, `jobrole`, `analysis` |
+| Classes | `PascalCase`, noun; role suffix for Spring beans | `AnalysisService`, `ResumeController`, `AnalysisRepository`, `AnthropicAiClient` |
+| JPA entities | `PascalCase` singular noun, **no** suffix | `Analysis`, `Resume`, `JobRole` |
+| Request / response DTOs | Java `record`, `<Action><Thing>Request` / `<Thing>Response` | `CreateAnalysisRequest`, `AnalysisResponse` |
+| Interfaces | `PascalCase`, no `I` prefix; implementation named by technology | `AiClient` → `AnthropicAiClient`, `StubAiClient` |
+| Methods and variables | `camelCase`, methods start with a verb | `claimNextBatch()`, `remainingQuota` |
+| Constants | `UPPER_SNAKE_CASE`, `static final` | `MAX_SUGGESTIONS` |
+| Enums | type `PascalCase`, constants `UPPER_SNAKE_CASE`; serialised to JSON and DB as the constant name | `AnalysisStatus.PROCESSING` → `"PROCESSING"` |
+| Test classes | `<ClassUnderTest>Test` (unit, Surefire), `<Feature>IT` (integration, Failsafe) | `ScoreCalculatorTest`, `CreateAnalysisIT` |
+| Test methods | `<method>_<condition>_<expected>` | `create_quotaUsedUp_throwsQuotaExceeded` |
+| DB tables | `snake_case`, plural | `analyses`, `job_role_skills` |
+| DB columns | `snake_case`; PK `id`; FK `<singular>_id`; time `<verb>_at`; boolean `is_<adjective>`; count `<thing>_count` | `resume_id`, `completed_at`, `is_active`, `attempt_count` |
+| DB constraints and indexes | `pk_<table>`, `fk_<table>_<column>`, `ux_<table>_<cols>` (unique), `ix_<table>_<cols>`, `ck_<table>_<rule>` | `ux_analyses_user_id_idempotency_key`, `ck_analyses_score_range` |
+| Flyway files | `V<n>__<snake_case_description>.sql`, `n` increments by 1 | `V1__create_schema.sql`, `V2__seed_job_roles.sql` |
+| API paths | `/api/ro/v1/` + plural kebab-case nouns; ids as path variables in `camelCase` | `/api/ro/v1/job-roles`, `/api/ro/v1/analyses/{analysisId}/report` |
+| JSON properties and query parameters | `camelCase` | `experienceLevel`, `?page=2&size=20` |
+| Error codes | `UPPER_SNAKE_CASE` | `QUOTA_EXCEEDED` |
+| Config properties | `ro.<area>.<kebab-name>` | `ro.quota.free-monthly-analyses` |
+| Environment variables | `RO_<AREA>_<NAME>` | `RO_AI_API_KEY`, `RO_DB_PASSWORD` |
+| Metrics | `ro_<noun>_<unit or total>`, snake_case | `ro_analysis_duration_seconds` |
+| Frontend components | `PascalCase.tsx`, one exported component per file | `ResumeUploadForm.tsx` |
+| Frontend hooks | `use<Thing>.ts` | `useAnalysisPolling.ts` |
+| Frontend routes (folders) | kebab-case | `app/analyses/[analysisId]/page.tsx` |
+| Frontend message keys | `<area>.<camelCaseKey>` | `upload.dropHint`, `errors.FILE_TOO_LARGE` |
+
+### 2.2 Folder / module structure
+
+One Git repository, `surfingbear-resume-optimizer`, with two deployables:
+
+```text
+surfingbear-resume-optimizer/
+├── backend/
+│   ├── pom.xml
+│   ├── mvnw, mvnw.cmd, .mvn/
+│   ├── checkstyle.xml
+│   └── src/
+│       ├── main/java/com/surfingbear/resumeoptimizer/
+│       │   ├── ResumeOptimizerApplication.java
+│       │   ├── common/
+│       │   │   ├── config/       # Clock, Jackson, scheduling, ShedLock, Resilience4j beans
+│       │   │   ├── error/        # ErrorCode enum (§6.3), ApiException, GlobalExceptionHandler, ErrorResponse
+│       │   │   ├── security/     # SecurityConfig, JwtConfig, CurrentUser, RoleMapper, CsrfHeaderFilter
+│       │   │   ├── web/          # RequestIdFilter, SecurityHeadersFilter, PageResponse, PageRequestParams
+│       │   │   ├── ratelimit/    # RateLimitFilter, RateLimitBucket
+│       │   │   └── time/         # QuotaPeriod (Asia/Kolkata month logic)
+│       │   ├── consent/          # ConsentController, ConsentService, Consent, ConsentRepository, dto/
+│       │   ├── jobrole/          # JobRoleController, AdminJobRoleController, JobRoleService, JobRole, JobRoleSkill, repositories, dto/
+│       │   ├── resume/
+│       │   │   ├── ResumeController, ResumeService, Resume, ResumeRepository, dto/
+│       │   │   └── parsing/      # FileTypeDetector, PdfTextExtractor, DocxTextExtractor, TextNormaliser,
+│       │   │                     # PiiRedactor, LanguageDetector, ParsedResume
+│       │   ├── analysis/
+│       │   │   ├── AnalysisController, AnalysisService, Analysis, child entities, repositories, dto/
+│       │   │   ├── worker/       # AnalysisWorker, AnalysisClaimer, AnalysisProcessor
+│       │   │   └── scoring/      # ScoreCalculator, AiOutputValidator, ScoreBand
+│       │   ├── ai/               # AiClient, AnthropicAiClient, StubAiClient, PromptBuilder, AiAnalysisOutput, AiFailure
+│       │   ├── usage/            # QuotaService, UsagePeriod, UsagePeriodRepository
+│       │   ├── report/           # ReportController, ReportService, PdfRenderer
+│       │   ├── privacy/          # PrivacyController, DataExportService, DataErasureService, RetentionJob, DataErasureRequest
+│       │   ├── audit/            # AuditService, AuditEvent, AuditEventRepository
+│       │   └── dev/              # DevTokenController, DevJwtKeyConfig  (@Profile("local") only)
+│       ├── main/resources/
+│       │   ├── application.yml, application-local.yml, application-dev.yml,
+│       │   │   application-staging.yml, application-prod.yml
+│       │   ├── logback-spring.xml
+│       │   ├── db/migration/     # V1__create_schema.sql, V2__seed_job_roles.sql
+│       │   ├── prompts/analysis-system-prompt.txt   # §4.6.4, byte-for-byte
+│       │   ├── templates/report/analysis-report.html # Thymeleaf, §4.8
+│       │   └── fonts/NotoSans-Regular.ttf, NotoSans-Bold.ttf
+│       └── test/
+│           ├── java/com/surfingbear/resumeoptimizer/   # mirrors main; a test sits in its subject's package
+│           └── resources/fixtures/                      # synthetic resumes, §2.6
+├── frontend/
+│   ├── package.json, next.config.ts, tsconfig.json, eslint.config.mjs, .prettierrc.json
+│   ├── messages/en-IN.json
+│   ├── src/
+│   │   ├── app/          # routes, §4.7 (basePath /resume-optimizer)
+│   │   ├── components/   # shared UI components
+│   │   ├── features/     # consent/, upload/, analysis/, history/, privacy/, admin/ — screen-specific components + hooks
+│   │   ├── lib/          # apiClient.ts, errors.ts, formatDate.ts, queryClient.ts
+│   │   └── types/        # api.ts — TypeScript types matching §6 exactly
+│   └── tests/            # Vitest unit tests, Playwright e2e in tests/e2e
+├── docker-compose.yml    # local PostgreSQL 16 + Redis 7
+├── docs/runbooks/
+└── .github/workflows/ci.yml, cd.yml
+```
+
+Layering rules (backend):
+
+| Rule | Checked by |
+|---|---|
+| Controllers call services only; they never call repositories, `AiClient` or other controllers. | ArchUnit test `LayeringArchTest`. |
+| `@Transactional` is placed on service methods only; read-only methods use `@Transactional(readOnly = true)`. | ArchUnit test. |
+| Entities never leave the service layer; controllers return DTO records only. Mapping is manual in the service (no MapStruct). | ArchUnit test: no controller method returns a type annotated `@Entity`. |
+| A feature package may call another feature's **service**, never its repository. `common` must not import any feature package. | ArchUnit test. |
+| Services throw `ApiException(ErrorCode, details)`; only `GlobalExceptionHandler` builds error responses. No `try/catch` that swallows an exception. | Code review; ArchUnit forbids `ResponseEntity` construction in services. |
+| Time is read only from an injected `java.time.Clock` (bean `Clock.systemUTC()`), never `Instant.now()` without it, so tests can fix time. | Checkstyle `RegexpSinglelineJava` forbidding `Instant.now()` and `LocalDateTime.now()` outside `common/config`. |
+| Constructor injection only; no field `@Autowired`. | Checkstyle rule. |
+| Logging via SLF4J `private static final Logger log = LoggerFactory.getLogger(X.class);`; no `System.out`/`printStackTrace`. | Checkstyle rule. |
+
+Frontend rules: server state only through TanStack Query hooks in `features/*/`; all HTTP calls only through `lib/apiClient.ts` (which adds `X-Requested-By: ro-web` to non-GET requests, sends `credentials: "same-origin"`, parses the §1.4 error format and performs the CR-004 redirect on 401); no `any` (`@typescript-eslint/no-explicit-any: error`).
+
+### 2.3 Branching and commits
+
+- Trunk-based: `main` is always deployable. Work happens on short-lived branches cut from `main`, merged within 3 working days.
+- Branch names: `<type>/<ID>-<short-kebab-description>`, where `<type>` is `feature`, `fix`, `chore`, `docs` or `refactor`, and `<ID>` is the FR/NFR/ERR/CR id the change is for. Examples: `feature/FR-004-resume-upload`, `fix/ERR-015-corrupt-docx`, `chore/CR-028-bump-pdfbox`.
+- Commit messages follow Conventional Commits: `<type>(<scope>): <subject>`.
+  - `type` ∈ `feat`, `fix`, `docs`, `refactor`, `test`, `perf`, `build`, `ci`, `chore`.
+  - `scope` = backend feature package or frontend feature folder (`analysis`, `resume`, `upload`, `ci`…).
+  - `subject`: imperative, lower case, no full stop, at most 72 characters.
+  - Footer `Refs: FR-008, ERR-024` lists the affected ids.
+  - Example: `feat(analysis): reserve quota inside the creation transaction` / `Refs: FR-009`.
+- Pull requests are **squash-merged** into `main`; the PR title must itself be a valid commit message (checked by the `commitlint` job). `main` is protected: no direct pushes, no force pushes, linear history.
+- Releases are tags `vMAJOR.MINOR.PATCH` on `main` (SemVer: MAJOR = breaking API change, MINOR = new feature, PATCH = fix).
+
+### 2.4 Code review rules
+
+| Rule | Detail |
+|---|---|
+| Approvals | 1 approval from a team member other than the author. **2** approvals when the PR touches `common/security/`, `privacy/`, `ai/`, or `db/migration/`. |
+| Green CI | All CR-035 jobs green; reviewers do not review a red PR. |
+| Size | A PR SHOULD change at most 400 lines (excluding generated files and fixtures); larger PRs explain why in the description. |
+| Response time | First review within 1 working day. |
+| Description | States the ids it implements (`Implements: FR-008`), how it was tested, and any change to §3.4 constants, API contract or schema. |
+| Spec first | A change that alters behaviour described in this spec updates this spec in the same PR (and adds a §8 change-log row). |
+| Checklist the reviewer ticks | (1) every new endpoint is in §6 and the traceability matrix; (2) every new error uses a §6.3 code; (3) no personal data logged (CR-010); (4) ownership checked in the query (CR-007); (5) new columns are nullable or defaulted (CR-038); (6) tests cover the acceptance criteria named in the PR. |
+
+### 2.5 Lint and format
+
+| Tool | Scope | Config | When it runs | Fails the build when |
+|---|---|---|---|---|
+| Spotless `2.44.x` with google-java-format (AOSP style: 4-space indent, 100 columns) | backend `*.java` | `pom.xml` `<spotless>` block | `./mvnw spotless:apply` locally; `spotless:check` in `verify` (CI) | Any file is not formatted |
+| Checkstyle `10.x` (`maven-checkstyle-plugin`) | backend | `backend/checkstyle.xml`: no star imports, no unused imports, no `System.out`/`System.err`, no `printStackTrace`, no field `@Autowired`, `Instant.now()` ban (§2.2), method length ≤ 60 lines, max 7 parameters | `validate` phase (CI and local `verify`) | Any violation (severity `error`) |
+| ArchUnit `1.3.x` | backend | `LayeringArchTest` | `test` phase | Any rule in §2.2 is broken |
+| JaCoCo `0.8.x` | backend | `pom.xml` | `verify` | Line coverage < 80%, measured over classes whose names end in `Service`, `Processor`, `Calculator`, `Validator`, `Redactor`, `Detector` or `Extractor` (NFR-014) |
+| ESLint 9 (flat config, `eslint-config-next`, `@typescript-eslint`, `eslint-plugin-i18next`) | frontend `src/**/*.{ts,tsx}` | `frontend/eslint.config.mjs` | `npm run lint` (CI) and lint-staged pre-commit | Any error |
+| Prettier 3 | frontend | `.prettierrc.json`: `{"printWidth":100,"singleQuote":true,"trailingComma":"all","semi":true}` | lint-staged pre-commit; `prettier --check` in CI | Any file not formatted |
+| TypeScript `strict: true` | frontend | `tsconfig.json` | `npm run typecheck` (`tsc --noEmit`) | Any type error |
+| Husky + lint-staged | frontend | `package.json` | `git commit` | Pre-commit lint/format fails |
+| markdownlint | `docs/**`, this spec | `.markdownlint.json` (MD013 off) | CI | Any error |
+
+### 2.6 Testing conventions
+
+| Level | Tooling | What it covers | Where |
+|---|---|---|---|
+| Unit | JUnit 5, AssertJ, Mockito | Pure logic: parsing, redaction, language detection, score calculation, AI-output validation, quota period maths, role mapping | `backend/src/test/java/**/*Test.java` |
+| Integration | Spring Boot Test, MockMvc, Testcontainers (`postgres:16`, `redis:7`), WireMock for the Anthropic HTTP API | Every endpoint's happy path and every error row of §6.2; worker; retention; security | `**/*IT.java`, run by Failsafe in `verify` |
+| Frontend unit | Vitest + React Testing Library | Components and hooks, including every error code mapping | `frontend/tests/**/*.test.tsx` |
+| End-to-end | Playwright against `docker compose` + backend `local` profile + stub AI | The journeys in §4.3 | `frontend/tests/e2e/` |
+| AI quality | Script `backend/src/test/eval/run-eval.sh` against the live model (manual, before changing the prompt or model) | NFR-017 consistency | Not in CI (costs money) |
+
+Fixtures are synthetic and committed under `backend/src/test/resources/fixtures/`: `valid-2page.pdf`, `valid.docx`, `scanned-image-only.pdf` (no text layer), `encrypted.pdf` (password `test`), `corrupt.pdf` (truncated), `eleven-pages.pdf`, `hindi.pdf` (Devanagari text), `tiny.pdf` (< 300 characters), `huge-text.docx` (> 50,000 characters), `zip-bomb.docx`, `png-renamed.docx`, `legacy.doc`. No fixture contains a real person's data.
 
 ---
 
