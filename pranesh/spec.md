@@ -402,7 +402,7 @@ Priorities: **Must** = needed for go-live; **Should** = planned for go-live, may
 | FR-013 | Rewrite suggestions | The analysis suggests better wording for weak resume lines. | Must | 1. The AI returns 0–10 suggestions ordered by impact. 2. The backend keeps a suggestion only if it passes every rule V3 in §4.6.5 (its `originalText` really occurs in the resume, it differs from `suggestedText`, lengths within limits, not a duplicate). 3. Kept suggestions get `priority` 1, 2, 3… in the AI's order. 4. Zero suggestions is a valid result; the UI then shows "No rewrites needed — your lines are already strong." (key `analysis.noSuggestions`). |
 | FR-014 | Plan-based suggestion visibility | Free users see only some suggestions. | Must | 1. Visibility uses the plan in the token **at read time**, so an upgrade unlocks old analyses at once. 2. FREE: `suggestions.visible` holds those with `priority ≤ FREE_VISIBLE_SUGGESTIONS`; `suggestions.lockedCount = total − visible`. The text of locked suggestions is never sent to a FREE user (not in API-009, not in API-010, not in API-008). 3. PREMIUM: all suggestions visible, `lockedCount = 0`. 4. The data export (FR-020) always contains all suggestions, because it is the user's own data (CR-024). |
 | FR-015 | View an analysis | The user watches the analysis progress and reads the result. | Must | 1. API-009 returns the analysis in any status; result fields (`overallScore`, `scoreBand`, `dimensions`, `skills`, `suggestions`) are `null` unless `status = COMPLETED`; `failureCode` is non-null only when `FAILED`. 2. The frontend polls API-009 every `CLIENT_POLL_INTERVAL` while the status is `QUEUED` or `PROCESSING`; after 120 s it shows "This is taking longer than usual. You can leave this page — the result will appear in your history." (key `analysis.slow`) and polls every 10 s. Polling stops at `COMPLETED` or `FAILED` or when the user leaves the page. 3. A `FAILED` analysis shows the text for its `failureCode` (§6.3) and a "Try again" button that starts FR-008 with a **new** idempotency key and the same inputs. |
-| FR-016 | Analysis history | The user sees all their analyses. | Must | 1. API-008 returns the caller's analyses sorted by `createdAt` descending then `id` descending, paginated (§6.1). 2. Optional filter `status` (one of the four statuses). 3. Each item has `id`, `status`, `failureCode`, `resumeId` (null after the resume expired), `resumeFilename`, `jobRole {id, name}`, `experienceLevel`, `overallScore`, `scoreBand`, `createdAt`, `completedAt`; no suggestion text. |
+| FR-016 | Analysis history | The user sees all their analyses. | Must | 1. API-008 returns the caller's analyses sorted by `createdAt` descending then `id` descending, paginated (§6.1). 2. Optional filter `status` (one of the four statuses). 3. Each item is an `AnalysisSummary` (§6.1): `id`, `status`, `failureCode`, `resume {id, filename}` (`id` is null after the resume expired), `jobRole {id, name}`, `experienceLevel`, `overallScore`, `scoreBand`, `createdAt`, `completedAt`; no suggestion text. |
 | FR-017 | Delete an analysis | The user deletes one analysis. | Must | 1. API-011 deletes the analysis and its child rows and returns `204`. 2. `QUEUED` or `PROCESSING` → `409 ANALYSIS_IN_PROGRESS`. 3. Missing or not owned → `404 RESOURCE_NOT_FOUND`. 4. No quota is given back. |
 | FR-018 | Download PDF report | The user downloads a completed analysis as a PDF. | Must | 1. API-010 returns `200`, `Content-Type: application/pdf`, `Content-Disposition: attachment; filename="surfingbear-resume-analysis-<yyyyMMdd>-<first 8 chars of id>.pdf"` (date = `createdAt` in `Asia/Kolkata`). 2. Status not `COMPLETED` → `409 ANALYSIS_NOT_COMPLETED` (ERR-026). 3. Content and layout follow §4.8; a FREE user's report contains only visible suggestions plus the locked-count notice. 4. The PDF is generated on each request and never stored. 5. A report for an analysis with 10 suggestions is generated in under 3 s at p95 (NFR-004). |
 | FR-019 | Failure handling | AI errors, timeouts and crashes never leave an analysis stuck and never cost the user quota. | Must | 1. AI call failures map to failure codes per §4.4: provider unavailable / rate-limited / timeout after the SDK retry → `AI_UNAVAILABLE` (ERR-031); invalid output twice → `AI_INVALID_RESPONSE` (ERR-032); `stop_reason = refusal` → `AI_REFUSED` (ERR-034), not retried; processing past `PROCESSING_DEADLINE` → `PROCESSING_TIMEOUT` (ERR-033). 2. While the circuit breaker (§4.4) is open, analyses fail at once with `AI_UNAVAILABLE`. 3. A lease that expires (worker crash) makes the analysis claimable again; on the claim that would be attempt `MAX_ATTEMPTS + 1`, it is set `FAILED` / `PROCESSING_TIMEOUT` instead. 4. A `QUEUED` analysis older than `MAX_QUEUE_AGE` is set `FAILED` / `PROCESSING_TIMEOUT` when the claimer sees it. 5. Every transition to `FAILED` gives the quota unit back (FR-009 criterion 5) and sets `completed_at`. 6. No analysis stays in `QUEUED` or `PROCESSING` longer than `MAX_QUEUE_AGE + MAX_ATTEMPTS × LEASE_DURATION` (26 minutes) (NFR-011). |
@@ -2053,7 +2053,7 @@ Sorted by `createdAt` desc, then `id` desc.
 }
 ```
 
-`analyses[]` items are `AnalysisResponse` objects in which `suggestions.visible` holds **all** suggestions and `lockedCount` is `0` (FR-014 criterion 4). Arrays are sorted by `createdAt` (consents by `acceptedAt`, usage by `period`) ascending.
+`analyses[]` (shown empty above for brevity) holds `AnalysisResponse` objects in which `suggestions.visible` holds **all** suggestions and `lockedCount` is `0` (FR-014 criterion 4). Arrays are sorted by `createdAt` (consents by `acceptedAt`, usage by `period`) ascending.
 
 **Errors:** only the common ones (including `429 RATE_LIMITED` after 5 exports per day).
 
@@ -2245,10 +2245,99 @@ Calling it with no data left still succeeds with counts `0` and creates a new TB
 
 ## 7. Traceability matrix
 
-_Being written._
+Every FR and NFR appears here. `—` is used only where the item genuinely has no element of that kind, and the reason is given in brackets. Test class names are the ones the build must create (§2.6).
+
+### 7.1 Requirements → design
+
+| Requirement | Component(s) | Table(s) | API(s) | Verified by |
+|---|---|---|---|---|
+| FR-001 | CMP-003, CMP-004, CMP-009 | TBL-001, TBL-007 | API-001 | `MeIT`: FREE/PREMIUM limits, no-row usage = 0, `resetsAt` for period `2026-10` = `2026-10-31T18:30:00.000Z`, works without consent (AC 1–4) |
+| FR-002 | CMP-001 (`/consent`), CMP-004, CMP-017 | TBL-001, TBL-011 | API-001, API-002, API-004, API-007 | `ConsentIT`: accept, idempotent re-accept, old version → `CONSENT_VERSION_MISMATCH`, upload/analysis without consent → `CONSENT_REQUIRED`, audit row (AC 1–6) |
+| FR-003 | CMP-005 | TBL-008, TBL-009 | API-003 | `JobRoleIT`: only active roles, name order, skill order; `SeedDataIT`: 10 roles × 14 skills after migration (AC 1–4) |
+| FR-004 | CMP-006, CMP-007, CMP-016 | TBL-001, TBL-002 | API-004 | `UploadIT`: one test per check 1–15 using the §2.6 fixtures, including the exact 5,242,880-byte boundary and "nothing stored on failure" |
+| FR-005 | CMP-007 | TBL-002 | API-004 | `TextNormaliserTest`, `LanguageDetectorTest`, `PiiRedactorTest` (every §4.6.3 row + the example), `PdfTextExtractorTest`, `DocxTextExtractorTest` (signals) |
+| FR-006 | CMP-006 | TBL-002, TBL-003 | API-005 | `ResumeListIT`: ownership, order, paging, expired excluded, `analysisCount` (AC 1–4) |
+| FR-007 | CMP-006 | TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-007 | API-006 | `ResumeDeleteIT`: cascade of analyses, 409 when in progress, 404 for others, quota unchanged (AC 1–4) |
+| FR-008 | CMP-004, CMP-005, CMP-008, CMP-009 | TBL-001, TBL-002, TBL-003, TBL-007, TBL-008 | API-007 | `CreateAnalysisIT`: one test per step 1–9 in order; `ConcurrentCreateIT`: 20 parallel requests with distinct keys → exactly 1 created, 19 × `ANALYSIS_IN_PROGRESS` (AC 10) |
+| FR-009 | CMP-008, CMP-009, CMP-010 | TBL-003, TBL-007 | API-001, API-007 | `QuotaIT`: FREE 4th → `QUOTA_EXCEEDED` with details; period at `2026-10-31T18:29:59Z` vs `18:30:00Z`; refund on FAILED; no refund on delete/erasure; downgrade case (AC 1–8) |
+| FR-010 | CMP-010, CMP-011, CMP-012 | TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-008, TBL-009 | — (background worker; the result is read through API-009) | `WorkerIT` (stub AI and WireMock'd Anthropic): claim order, child rows, token counts, invalid-then-valid retry, discard when the analysis was erased (AC 1–5) |
+| FR-011 | CMP-012 | TBL-003, TBL-004 | API-008, API-009, API-010 | `ScoreCalculatorTest`: the FR-011 example (75), the API-009 example (73), rounding at .5, band edges 49/50/74/75/89/90 |
+| FR-012 | CMP-010, CMP-012 | TBL-005, TBL-009 | API-009, API-010 | `SkillDerivationTest`: case-insensitive match, unknown names dropped, REQUIRED-first order; `CatalogueSnapshotIT`: editing a role does not change an old analysis |
+| FR-013 | CMP-012 | TBL-006 | API-009 | `AiOutputValidatorTest`: every V3/V4 row (not in text, equal to suggested, too long, duplicate, > 10), priorities 1…n, zero suggestions |
+| FR-014 | CMP-008, CMP-013, CMP-014 | TBL-006 | API-009, API-010, API-012 | `SuggestionVisibilityIT`: FREE sees priorities 1–3 and `lockedCount`, locked text absent from API-009 JSON and from the PDF text, PREMIUM sees all, export has all, upgrade takes effect on next read |
+| FR-015 | CMP-001, CMP-008 | TBL-003, TBL-004, TBL-005, TBL-006 | API-009 | `AnalysisReadIT`: null result fields until COMPLETED, `failureCode` only when FAILED; Playwright `analysis-polling.spec.ts`: 3 s polling, slow message after 120 s, "Try again" sends a new key |
+| FR-016 | CMP-008 | TBL-003 | API-008 | `AnalysisListIT`: order, paging, status filter, no suggestion text, `resume.id` null after expiry |
+| FR-017 | CMP-008 | TBL-003, TBL-004, TBL-005, TBL-006, TBL-007 | API-011 | `AnalysisDeleteIT`: children removed, 409 in progress, 404 not owned, quota unchanged |
+| FR-018 | CMP-008, CMP-013 | TBL-003, TBL-004, TBL-005, TBL-006 | API-010 | `ReportIT`: headers and filename, 409 when not completed, PDF text (read back with PDFBox) contains the §4.8 sections; FREE PDF lacks locked suggestions |
+| FR-019 | CMP-009, CMP-010, CMP-011 | TBL-003, TBL-007 | API-009 (`failureCode`) | `WorkerFailureIT` (WireMock 503 ×2, timeout, `stop_reason: refusal`, circuit open, deadline via `STUB-SLOW-400`); `WorkerRecoveryIT` (expired lease → attempt 2 → FAILED on attempt 3; stale queue); each asserts the refund |
+| FR-020 | CMP-014, CMP-017 | TBL-001, TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-011 | API-012 | `DataExportIT`: every section present, all suggestions included for FREE, filename, audit row, 6th export in a day → 429 |
+| FR-021 | CMP-010, CMP-014, CMP-017 | TBL-001, TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-010, TBL-011 | API-001, API-013 | `DataErasureIT`: confirm phrase, all rows gone incl. in-progress, consent withdrawn, usage kept, TBL-010 + audit rows, then API-001 `accepted = false` |
+| FR-022 | CMP-015 | TBL-001, TBL-002, TBL-003, TBL-007, TBL-010, TBL-011, TBL-012 | — (scheduled job, no endpoint) | `RetentionJobIT` with a fixed `Clock`: each table's boundary, resume with in-progress analysis skipped, `resume_id` set to NULL on surviving analyses, ShedLock prevents a parallel run |
+| FR-023 | CMP-005, CMP-017 | TBL-008, TBL-009, TBL-011 | API-014, API-015, API-016 | `AdminJobRoleIT`: each validation rule, name taken (case-insensitive), 201st role, inactive role hidden from API-003, FREE → 403, audit rows |
+| FR-024 | CMP-001, CMP-008 | TBL-006, TBL-007 | API-001, API-007, API-009 | Playwright `upgrade-prompt.spec.ts`: locked-count banner and quota message link to `UPGRADE_URL` for FREE; absent for PREMIUM |
+| NFR-001 | CMP-006, CMP-007 | TBL-002 | API-004 | k6 `upload.js` in staging: p95 ≤ 3 s, p99 ≤ 5 s |
+| NFR-002 | CMP-003, CMP-004, CMP-005, CMP-006, CMP-008 | TBL-001, TBL-002, TBL-003, TBL-007, TBL-008, TBL-009 (via §5.3 indexes) | API-001, API-003, API-005, API-008, API-009 | k6 `read-mix.js`; prod `http_server_requests_seconds` |
+| NFR-003 | CMP-010, CMP-011, CMP-012 | TBL-003 | API-007, API-009 | `ro_analysis_duration_seconds`; staging eval run with the live model |
+| NFR-004 | CMP-013 | TBL-003, TBL-004, TBL-005, TBL-006 | API-010 | k6 `report.js` |
+| NFR-005 | CMP-002, CMP-003, CMP-019, CMP-020 | All tables (availability of the database) | All of API-001…016 | Monthly CloudWatch availability report |
+| NFR-006 | CMP-010, CMP-019, CMP-020 | TBL-003 (`ix_analyses_queue`), TBL-007 | API-007, API-009 | k6 `peak.js` (300 analyses/hour, stub AI with 20 s latency); autoscaling policy review |
+| NFR-007 | CMP-003, CMP-016, CMP-018 | — (a code and configuration property, no table) | All of API-001…017 | CI `dependency-check-maven` and `npm audit`; ZAP baseline scan |
+| NFR-008 | CMP-007, CMP-015 and all logging | TBL-002, TBL-003, TBL-007, TBL-010, TBL-011 | API-004 | `NoPersonalDataInLogsIT`, `PiiRedactorTest`, `RetentionJobIT`, weekly prod expiry query |
+| NFR-009 | CMP-014 | TBL-001, TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-010 | API-013 | `DataErasureIT` with 20 resumes + 300 analyses, timed |
+| NFR-010 | CMP-003, CMP-023 | — (metrics and logs, no table) | All (`X-Request-Id`) | `ObservabilityIT` (metric names on `/actuator/prometheus`); staging alert test |
+| NFR-011 | CMP-010 | TBL-003 | API-009 | `WorkerRecoveryIT`; prod alert `ro_analysis_stuck` |
+| NFR-012 | CMP-019 | All tables | — (infrastructure property, no endpoint) | 6-monthly restore drill |
+| NFR-013 | CMP-011 | TBL-003 (`ai_input_tokens`, `ai_output_tokens`) | — (cost is measured from metrics, no endpoint) | Monthly cost review; cost alert (§4.9) |
+| NFR-014 | All backend components (CMP-003…018) | — (code-quality property) | — (code-quality property) | `./mvnw verify` in CI (JaCoCo, ArchUnit, Checkstyle) |
+| NFR-015 | CMP-001 | — (frontend property) | — (frontend property) | `@axe-core/playwright` on every §4.7 route |
+| NFR-016 | CMP-001 | — (frontend property) | — (frontend property) | Playwright projects Chromium/Firefox/WebKit at 360 px and 1280 px |
+| NFR-017 | CMP-011, CMP-012 | TBL-004 | API-009 | `run-eval.sh` (20 resumes × 3 runs) attached to any PR changing `AI_MODEL`, `AI_EFFORT` or the prompt |
+
+### 7.2 Endpoints → requirements (reverse check)
+
+| API | Requirements |
+|---|---|
+| API-001 `GET /me` | FR-001, FR-002, FR-021, FR-024 |
+| API-002 `POST /me/consent` | FR-002 |
+| API-003 `GET /job-roles` | FR-003 |
+| API-004 `POST /resumes` | FR-002, FR-004, FR-005 |
+| API-005 `GET /resumes` | FR-006 |
+| API-006 `DELETE /resumes/{resumeId}` | FR-007 |
+| API-007 `POST /analyses` | FR-002, FR-008, FR-009, FR-024 |
+| API-008 `GET /analyses` | FR-011, FR-016 |
+| API-009 `GET /analyses/{analysisId}` | FR-011, FR-012, FR-013, FR-014, FR-015, FR-019, FR-024 |
+| API-010 `GET /analyses/{analysisId}/report` | FR-011, FR-012, FR-014, FR-018 |
+| API-011 `DELETE /analyses/{analysisId}` | FR-017 |
+| API-012 `GET /me/data-export` | FR-014, FR-020 |
+| API-013 `DELETE /me/data` | FR-021 |
+| API-014 `GET /admin/job-roles` | FR-023 |
+| API-015 `POST /admin/job-roles` | FR-023 |
+| API-016 `PUT /admin/job-roles/{jobRoleId}` | FR-023 |
+| API-017 `POST /dev/token` | CR-001 (local-only exception), CR-033 |
+
+### 7.3 Tables → requirements (reverse check)
+
+| Table | Requirements |
+|---|---|
+| TBL-001 `consents` | FR-001, FR-002, FR-004, FR-008, FR-020, FR-021, FR-022 |
+| TBL-002 `resumes` | FR-004, FR-005, FR-006, FR-007, FR-008, FR-010, FR-020, FR-021, FR-022 |
+| TBL-003 `analyses` | FR-008…FR-011, FR-015…FR-022 |
+| TBL-004 `analysis_dimension_scores` | FR-010, FR-011, FR-015, FR-018, FR-020 |
+| TBL-005 `analysis_skills` | FR-010, FR-012, FR-015, FR-018, FR-020 |
+| TBL-006 `analysis_suggestions` | FR-010, FR-013, FR-014, FR-015, FR-018, FR-020, FR-024 |
+| TBL-007 `usage_periods` | FR-001, FR-009, FR-019, FR-020, FR-021, FR-022 |
+| TBL-008 `job_roles` | FR-003, FR-008, FR-010, FR-023 |
+| TBL-009 `job_role_skills` | FR-003, FR-010, FR-012, FR-023 |
+| TBL-010 `data_erasure_requests` | FR-021, FR-022 |
+| TBL-011 `audit_events` | CR-040, FR-002, FR-020, FR-021, FR-022, FR-023 |
+| TBL-012 `shedlock` | FR-022 |
 
 ---
 
 ## 8. Change log
 
-_Being written._
+| Version | Date | Author | What changed | Why | Affected IDs |
+|---|---|---|---|---|---|
+| v1.0 | 2026-10-16 | Pranesh Ghosh | Initial version: sections 1–8 | Round 1 submission | All: CR-001…040, FR-001…024, NFR-001…017, CMP-001…023, TBL-001…012, API-001…017, ERR-001…035, A-01…10, OOS-01…10 |
+
+Rules for later entries: a new version is added for every change to behaviour, data or API; existing IDs are never renumbered; a removed requirement keeps its row and is marked **Deprecated** with the version that deprecated it; the "Affected IDs" column lists every FR, NFR, CMP, TBL, API and ERR that changed, and each of those places in the document is updated in the same commit.
