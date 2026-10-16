@@ -19,6 +19,12 @@ No code is written in this repo. Only Markdown.
 | Kakali | [`kakali/`](kakali/) |
 | Vaishali | [`vaishali/`](vaishali/) |
 | Neeraj | [`neeraj/`](neeraj/) |
+| Bilal | [`bilal/`](bilal/) |
+| Madhurima | [`madhurima/`](madhurima/) |
+| Nikky | [`nikky/`](nikky/) |
+| Pranesh | [`pranesh/`](pranesh/) |
+| Pratiksha | [`pratiksha/`](pratiksha/) |
+| Sachin | [`sachin/`](sachin/) |
 
 Each folder has:
 - `spec.md` — your spec. It starts as a copy of [`TEMPLATE.md`](TEMPLATE.md); fill it in.
@@ -26,14 +32,17 @@ Each folder has:
 
 ## Timeline
 
-| Step | Date |
-|---|---|
-| Kickoff (brief, system to specify, scoring rubric) | Wed, Oct 14 |
-| Round 1: write your spec | Wed, Oct 14 – Tue, Oct 20 |
-| Holiday | Wed, Oct 21 |
-| Round 2: requirement change, update your spec | Thu, Oct 22 – Fri, Oct 23 |
-| Build test | Mon, Oct 26 |
-| Scoring and review | Tue, Oct 27 |
+Group A: Saswat, Sovan, Sandip, Kakali, Vaishali, Neeraj
+Group B (joined Oct 16): Bilal, Madhurima, Nikky, Pranesh, Pratiksha, Sachin
+
+| Step | Group A | Group B |
+|---|---|---|
+| Start | Wed, Oct 14 | Fri, Oct 16 |
+| Round 1 deadline | Tue, Oct 20, 23:59 IST | Thu, Oct 22, 23:59 IST |
+| Holiday | Wed, Oct 21 | Wed, Oct 21 |
+| Round 2: requirement change | Thu, Oct 22 – Fri, Oct 23, 23:59 IST | Fri, Oct 23 – Mon, Oct 26, 23:59 IST |
+| Build test | Mon, Oct 26 | Tue, Oct 27 |
+| Scores and review (everyone) | Wed, Oct 28 | Wed, Oct 28 |
 
 **Start here:** read [`BRIEF.md`](BRIEF.md) (the system to specify and the rules) and [`RUBRIC.md`](RUBRIC.md) (how you are scored).
 

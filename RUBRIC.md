@@ -92,7 +92,7 @@ Each area is scored at one of four levels, as a share of its points:
 
 ## G. Build test — 15 points
 
-On Oct 26 each spec is given to Claude Code **with no other context**, with the instruction to build the system and **log every place it had to guess or assume** something the spec did not say.
+On the build-test day each spec is given to Claude Code **with no other context**, with the instruction to build the system and **log every place it had to guess or assume** something the spec did not say.
 
 | Guesses logged | Points |
 |---|---|
@@ -106,7 +106,7 @@ The same prompt and the same model are used for every spec. The guess log is sha
 
 ## H. Round 2 change handling — 10 points
 
-A new requirement is announced on Oct 22. The updated spec is checked for:
+A new requirement is announced at the start of round 2 (see `BRIEF.md`). The updated spec is checked for:
 
 | Check | Points |
 |---|---|
@@ -130,7 +130,7 @@ Existing IDs must not be renumbered. A removed requirement is marked **Deprecate
 
 ## Rules for scoring
 
-- **Late submission:** commits after the deadline (round 1: Tue Oct 20, 23:59 IST; round 2: Fri Oct 23, 23:59 IST) are not counted for that round.
+- **Late submission:** commits after your group's deadline are not counted for that round (see the timeline in `BRIEF.md`).
 - **Copying:** specs that are substantially the same as another participant's, or as existing internal documents, score 0 in the affected areas.
 - **Coordinator's own spec:** Saswat's spec is scored by a different reviewer.
-- **Feedback:** every participant receives their scores per area with short comments on Tue, Oct 27.
+- **Feedback:** every participant receives their scores per area with short comments on Wed, Oct 28.
