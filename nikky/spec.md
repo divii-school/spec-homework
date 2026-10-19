@@ -1177,3 +1177,551 @@ Seed rows: `('free', 3, 3, 2)`, `('pro', 50, NULL, NULL)`.
 
 ---
 
+## 6. API design
+
+### 6.1 Common rules
+
+- **Base path:** `/api/v1/resume-optimizer`. All paths below are relative to it. `GET /health` and `GET /metrics` are served at the root (`/health`, `/metrics`), the latter only on the internal port 9090.
+- **Auth:** cookie `sb_session` or `Authorization: Bearer <jwt>` (1.1). Internal endpoints use HMAC headers (CR-003). `GET /health` is public.
+- **Content type:** `application/json; charset=utf-8` for bodies, except `POST /resumes` (`multipart/form-data`), `GET /analyses/{id}/report.pdf` (`application/pdf`) and `GET /me/data-export` (`application/json` attachment).
+- **Success envelope:** `{ "data": ... }`. Lists: `{ "data": [...], "page": { "page": 1, "page_size": 20, "total": 57, "total_pages": 3 } }`.
+- **Pagination:** query `page` (int ≥ 1, default 1) and `page_size` (int 1–100, default 20). Out-of-range → `400 VALIDATION_ERROR`. Sorting is fixed per endpoint (stated in each block).
+- **IDs:** UUID v4 strings. Path IDs that are not valid UUIDs → `400 VALIDATION_ERROR`.
+- **Date / time:** ISO 8601 with milliseconds in UTC, e.g. `2026-10-19T09:30:00.000Z`. Exception: `usage.resets_at` is given with the IST offset (`+05:30`) because it is a calendar boundary.
+- **Standard error format:** section 1.4. Every error below is listed in 6.3.
+- **Common errors on every authenticated endpoint** (not repeated in each block): `401 UNAUTHENTICATED`, `403 FORBIDDEN` (role), `429 RATE_LIMITED`, `500 INTERNAL_ERROR`, `503 AUTH_UNAVAILABLE`.
+- **Headers on every response:** `X-Request-Id`, security headers from 1.5.
+- **Idempotency:** `POST /consents` and the internal webhooks are idempotent by design. `POST /analyses` is not; the duplicate guard (FR-007 rule 4) prevents double runs.
+
+Shared schemas used below:
+
+```jsonc
+// Resume
+{
+  "id": "uuid",
+  "status": "READY" | "PURGED",
+  "original_filename": "string",
+  "mime_type": "application/pdf" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "size_bytes": 123456,
+  "page_count": 2 | null,
+  "text_char_count": 3400,
+  "purge_at": "2026-11-18T09:30:00.000Z",
+  "purged_at": "..." | null,
+  "created_at": "2026-10-19T09:30:00.000Z"
+}
+
+// AnalysisSummary
+{
+  "id": "uuid",
+  "resume_id": "uuid",
+  "job_role": { "slug": "backend-engineer-go", "title": "Backend Engineer (Go)" },
+  "experience_level": "entry" | "mid" | "senior" | "lead",
+  "status": "QUEUED" | "PROCESSING" | "COMPLETED" | "FAILED",
+  "overall_score": 72 | null,
+  "error_code": "AI_UNAVAILABLE" | "AI_INVALID_RESPONSE" | null,
+  "created_at": "...", "started_at": "..." | null, "completed_at": "..." | null
+}
+
+// Analysis (full) = AnalysisSummary plus:
+{
+  "resume": { "id": "uuid", "status": "READY" | "PURGED", "original_filename": "string" },
+  "dimension_scores": [ { "dimension": "keyword_match", "score": 72, "weight": 30, "feedback": "..." }, ... 6 ] | null,
+  "missing_skills": [ { "rank": 1, "name": "Kubernetes", "importance": "required" } ] | null,
+  "missing_skills_total": 7,
+  "missing_skills_locked": 4,
+  "rewrite_suggestions": [ { "rank": 1, "section": "experience", "original_line": "...", "suggested_line": "...", "reason": "..." } ] | null,
+  "rewrite_suggestions_total": 6,
+  "rewrite_suggestions_locked": 4,
+  "plan_gated": true,
+  "upgrade_url": "https://www.surfingbear.com/pricing" | null,
+  "ai_model": "claude-sonnet-5-5" | null
+}
+```
+
+### 6.2 Endpoints
+
+#### API-001 `GET /me`
+- **Purpose:** Current user's plan, quota usage, consent status and limits, for the dashboard.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-001 (status), FR-013, FR-014
+
+**Request** — no parameters.
+
+**Response 200**
+
+```json
+{
+  "data": {
+    "user_id": "6f1c2a3e-1b2c-4d5e-8f90-123456789abc",
+    "plan": "free",
+    "role": "user",
+    "consent": { "status": "active", "version": "v1", "required_version": "v1", "accepted_at": "2026-10-19T09:00:00.000Z" },
+    "usage": { "period": "2026-10", "used": 1, "limit": 3, "remaining": 2, "resets_at": "2026-11-01T00:00:00.000+05:30" },
+    "limits": { "analyses_per_month": 3, "visible_missing_skills": 3, "visible_rewrite_suggestions": 2, "max_resumes": 10, "max_file_bytes": 5242880 },
+    "upgrade_url": "https://www.surfingbear.com/pricing"
+  }
+}
+```
+
+`consent.status` is `active` or `required`; `version` and `accepted_at` are null when required. `upgrade_url` is null for `pro`.
+
+**Errors** — common only.
+
+#### API-002 `POST /consents`
+- **Purpose:** Record DPDP consent for the current consent text version.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-001
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| version | body | string | yes | Must equal the current version (`v1`); otherwise `400 VALIDATION_ERROR` with `details[0].field = "version"` |
+
+**Response 201** (200 if the same active consent already exists)
+
+```json
+{ "data": { "id": "uuid", "version": "v1", "accepted_at": "2026-10-19T09:00:00.000Z" } }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | missing or unsupported version |
+
+#### API-003 `GET /job-roles`
+- **Purpose:** List active job roles.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-006
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| page, page_size | query | int | no | 6.1 |
+| category | query | string | no | one of TBL-003 categories |
+
+Sorted by `title ASC`.
+
+**Response 200**
+
+```json
+{ "data": [ { "slug": "backend-engineer-go", "title": "Backend Engineer (Go)", "category": "engineering" } ],
+  "page": { "page": 1, "page_size": 20, "total": 10, "total_pages": 1 } }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | bad pagination or category |
+
+#### API-004 `GET /job-roles/{slug}/skills`
+- **Purpose:** Skills expected for a role at a level.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-006
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| slug | path | string | yes | `^[a-z0-9-]{2,64}$` |
+| level | query | string | yes | `entry` \| `mid` \| `senior` \| `lead` |
+
+**Response 200**
+
+```json
+{ "data": { "job_role": { "slug": "backend-engineer-go", "title": "Backend Engineer (Go)" }, "experience_level": "mid",
+  "skills": [ { "name": "Go", "importance": "required", "min_level": "entry" }, { "name": "gRPC", "importance": "preferred", "min_level": "mid" } ] } }
+```
+
+Order: `required` first, then `preferred`; within each by `sort_order`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | missing or invalid level |
+| 404 | NOT_FOUND | unknown or inactive slug |
+
+#### API-005 `POST /resumes`
+- **Purpose:** Upload a resume.
+- **Auth / role:** `user`, `admin`; active consent required
+- **Implements:** FR-001, FR-002, FR-003
+
+**Request** — `multipart/form-data`
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| file | body (part) | file | yes | Exactly one part named `file`; FR-002 rules 1–7 |
+
+**Response 201**
+
+```json
+{ "data": { "id": "9b2f...", "status": "READY", "original_filename": "Nikky_Resume.pdf", "mime_type": "application/pdf",
+  "size_bytes": 184320, "page_count": 2, "text_char_count": 3410, "purge_at": "2026-11-18T09:30:00.000Z", "purged_at": null,
+  "created_at": "2026-10-19T09:30:00.000Z", "duplicate_of": null } }
+```
+
+`duplicate_of` is the id of an existing READY resume of the same user with the same `sha256`, else null (informational; the upload is still stored).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | no `file` part, more than one part, empty file |
+| 403 | CONSENT_REQUIRED | no active consent |
+| 409 | RESUME_LIMIT_REACHED | user already has 10 READY resumes |
+| 413 | FILE_TOO_LARGE | > 5,242,880 bytes |
+| 415 | INVALID_FILE_TYPE | content type or magic bytes not PDF/DOCX |
+| 422 | TOO_MANY_PAGES | PDF > 10 pages |
+| 422 | RESUME_UNREADABLE | extraction failed or < 200 chars |
+| 422 | RESUME_TOO_LONG | > 30,000 chars |
+| 429 | RATE_LIMITED | > 10 uploads per 60 min |
+
+#### API-006 `GET /resumes`
+- **Purpose:** List own resumes.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-004
+
+**Request:** `page`, `page_size`. Sorted `created_at DESC`. Only `status = READY`.
+
+**Response 200:** `{ "data": [ Resume, ... ], "page": {...} }`
+
+**Errors:** `400 VALIDATION_ERROR` on pagination.
+
+#### API-007 `GET /resumes/{id}`
+- **Purpose:** Get one resume's metadata.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-004
+
+**Request:** `id` path UUID.
+
+**Response 200:** `{ "data": Resume }` (own purged resumes are returned with `status: "PURGED"` and `purged_at`; this is the one place a purged resume is visible, so an analysis page can explain why re-running is impossible).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | id not a UUID |
+| 404 | NOT_FOUND | not found or not owned |
+
+#### API-008 `DELETE /resumes/{id}`
+- **Purpose:** Delete the file and text of a resume.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-005
+
+**Response 204** — empty body.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | id not a UUID |
+| 404 | NOT_FOUND | not found, not owned, or already PURGED |
+| 409 | RESUME_IN_USE | an analysis of this resume is QUEUED or PROCESSING |
+
+#### API-009 `POST /analyses`
+- **Purpose:** Start an analysis.
+- **Auth / role:** `user`, `admin`; active consent required
+- **Implements:** FR-007, FR-013
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| resume_id | body | string (UUID) | yes | own resume, status READY |
+| job_role_slug | body | string | yes | active role |
+| experience_level | body | string | yes | `entry` \| `mid` \| `senior` \| `lead` |
+
+**Response 202**
+
+```json
+{ "data": { "id": "c3d4...", "resume_id": "9b2f...", "job_role": { "slug": "backend-engineer-go", "title": "Backend Engineer (Go)" },
+  "experience_level": "mid", "status": "QUEUED", "overall_score": null, "error_code": null,
+  "created_at": "2026-10-19T09:31:00.000Z", "started_at": null, "completed_at": null,
+  "usage": { "period": "2026-10", "used": 2, "limit": 3, "remaining": 1, "resets_at": "2026-11-01T00:00:00.000+05:30" } } }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | missing/invalid fields |
+| 403 | CONSENT_REQUIRED | no active consent |
+| 404 | NOT_FOUND | resume not owned/unknown, or role unknown/inactive |
+| 409 | ANALYSIS_IN_PROGRESS | same resume+role+level already QUEUED/PROCESSING; `details[0] = { "field": "analysis_id", "issue": "<existing id>" }` |
+| 410 | RESUME_PURGED | resume status PURGED |
+| 429 | QUOTA_EXCEEDED | monthly limit reached; header `X-Quota-Reset: <ISO 8601 +05:30>` |
+
+#### API-010 `GET /analyses`
+- **Purpose:** List own analyses.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-016, FR-012
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| page, page_size | query | int | no | 6.1 |
+| status | query | string | no | one of the four statuses |
+| resume_id | query | UUID | no | |
+
+Sorted `created_at DESC`.
+
+**Response 200:** `{ "data": [ AnalysisSummary, ... ], "page": {...} }`
+
+**Errors:** `400 VALIDATION_ERROR`.
+
+#### API-011 `GET /analyses/{id}`
+- **Purpose:** Get one analysis with results (gated by plan).
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-009, FR-010, FR-011, FR-012, FR-014, FR-016
+
+**Request:** `id` path UUID.
+
+**Response 200** (free user, completed)
+
+```json
+{ "data": {
+  "id": "c3d4...", "resume_id": "9b2f...", "resume": { "id": "9b2f...", "status": "READY", "original_filename": "Nikky_Resume.pdf" },
+  "job_role": { "slug": "backend-engineer-go", "title": "Backend Engineer (Go)" }, "experience_level": "mid",
+  "status": "COMPLETED", "overall_score": 72, "error_code": null,
+  "dimension_scores": [
+    { "dimension": "keyword_match", "score": 80, "weight": 30, "feedback": "Most core Go and database terms are present." },
+    { "dimension": "impact_quantification", "score": 60, "weight": 20, "feedback": "Only two bullets contain numbers." },
+    { "dimension": "section_completeness", "score": 70, "weight": 15, "feedback": "No summary section." },
+    { "dimension": "length_relevance", "score": 90, "weight": 15, "feedback": "Two pages suits a mid-level profile." },
+    { "dimension": "formatting", "score": 50, "weight": 10, "feedback": "Mixed bullet styles and inconsistent dates." },
+    { "dimension": "readability", "score": 70, "weight": 10, "feedback": "Some sentences exceed 30 words." }
+  ],
+  "missing_skills": [
+    { "rank": 1, "name": "Redis", "importance": "required" },
+    { "rank": 2, "name": "Message queues", "importance": "required" },
+    { "rank": 3, "name": "Concurrency patterns", "importance": "required" }
+  ],
+  "missing_skills_total": 5, "missing_skills_locked": 2,
+  "rewrite_suggestions": [
+    { "rank": 1, "section": "experience", "original_line": "Worked on backend services.", "suggested_line": "Built 4 Go microservices handling 2M requests/day, cutting p95 latency by 35%.", "reason": "Adds scope, scale and a measurable outcome." },
+    { "rank": 2, "section": "summary", "original_line": "Hardworking developer looking for opportunities.", "suggested_line": "Backend engineer with 3 years of Go and PostgreSQL experience building payment APIs.", "reason": "Replaces a generic statement with role-specific facts." }
+  ],
+  "rewrite_suggestions_total": 6, "rewrite_suggestions_locked": 4,
+  "plan_gated": true, "upgrade_url": "https://www.surfingbear.com/pricing",
+  "ai_model": "claude-sonnet-5-5",
+  "created_at": "2026-10-19T09:31:00.000Z", "started_at": "2026-10-19T09:31:02.000Z", "completed_at": "2026-10-19T09:31:31.000Z" } }
+```
+
+While `QUEUED`/`PROCESSING`: `dimension_scores`, `missing_skills`, `rewrite_suggestions` are `null`, totals and locked counts are `0`, `plan_gated` is `false`. When `FAILED`: same, plus `error_code`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | id not a UUID |
+| 404 | NOT_FOUND | not found or not owned |
+
+#### API-012 `GET /analyses/{id}/report.pdf`
+- **Purpose:** Download the PDF report.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-015, FR-014
+
+**Request:** `id` path UUID.
+
+**Response 200:** `Content-Type: application/pdf`, `Content-Disposition: attachment; filename="resume-analysis-c3d4e5f6.pdf"`, binary body.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | id not a UUID |
+| 404 | NOT_FOUND | not found or not owned |
+| 409 | ANALYSIS_NOT_READY | status is not COMPLETED |
+| 500 | REPORT_GENERATION_FAILED | PDF rendering error |
+
+#### API-013 `DELETE /analyses/{id}`
+- **Purpose:** Delete an analysis and its results.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-016
+
+**Response 204**
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | id not a UUID |
+| 404 | NOT_FOUND | not found or not owned |
+| 409 | ANALYSIS_IN_PROGRESS | status QUEUED or PROCESSING |
+
+#### API-014 `GET /me/data-export`
+- **Purpose:** Export all module data of the current user (DPDP right of access).
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-018
+
+**Response 200:** `Content-Disposition: attachment; filename="resume-optimizer-export.json"`
+
+```json
+{ "exported_at": "2026-10-19T10:00:00.000Z", "user": { "id": "...", "plan": "free", "created_at": "..." },
+  "consents": [ { "version": "v1", "accepted_at": "...", "withdrawn_at": null } ],
+  "resumes": [ { "id": "...", "status": "READY", "original_filename": "...", "mime_type": "...", "size_bytes": 1, "page_count": 2, "created_at": "...", "purge_at": "...", "extracted_text": "full text" } ],
+  "analyses": [ "Analysis (full, ungated, without plan_gated/upgrade_url)" ],
+  "audit_logs": [ { "action": "RESUME_UPLOADED", "entity_id": "...", "metadata": {}, "created_at": "..." } ] }
+```
+
+Audit row `DATA_EXPORTED` is written. The body is not wrapped in `data` because it is a file download.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 429 | RATE_LIMITED | more than 1 export per 10 minutes (`Retry-After` set) |
+
+#### API-015 `DELETE /me/data`
+- **Purpose:** Erase all module data of the current user (DPDP right of erasure) and withdraw consent.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-018
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| confirm | body | string | yes | must equal `"DELETE"` |
+
+**Response 204**
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | `confirm` missing or wrong |
+
+#### API-016 `GET /health`
+- **Purpose:** Liveness and readiness for the load balancer and uptime monitor.
+- **Auth / role:** none
+- **Implements:** NFR-005
+
+**Response 200:** `{ "data": { "status": "ok", "version": "<git sha>", "checks": { "postgres": "ok", "redis": "ok" } } }`
+**Response 503:** same body with `"status": "degraded"` and the failing check `"error"`; body still uses the `data` envelope (it is not an application error).
+
+#### API-017 `POST /admin/job-roles`
+- **Purpose:** Create a job role with skills.
+- **Auth / role:** `admin`
+- **Implements:** FR-020
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| slug | body | string | yes | `^[a-z0-9-]{2,64}$`, unique |
+| title | body | string | yes | 2–100 chars |
+| category | body | string | yes | TBL-003 categories |
+| is_active | body | boolean | no (default true) | |
+| skills | body | array | yes | 1–100 items of `{ name (1–80), importance (required/preferred), min_level (enum), sort_order (int ≥ 0) }`; names unique case-insensitively |
+
+**Response 201:** `{ "data": { "slug": "...", "title": "...", "category": "...", "is_active": true, "skills": [...] } }`
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | any field rule |
+| 403 | FORBIDDEN | role is not admin |
+| 409 | CONFLICT | slug exists |
+
+#### API-018 `PUT /admin/job-roles/{slug}`
+- **Purpose:** Replace a role's title, category, active flag and full skill list.
+- **Auth / role:** `admin`
+- **Implements:** FR-020
+
+**Request:** same body as API-017 without `slug`.
+
+**Response 200:** same shape as API-017.
+
+**Errors:** `400 VALIDATION_ERROR`, `403 FORBIDDEN`, `404 NOT_FOUND`.
+
+#### API-019 `PUT /admin/plan-limits/{plan}`
+- **Purpose:** Change limits of a plan.
+- **Auth / role:** `admin`
+- **Implements:** FR-020, FR-013, FR-014
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| plan | path | string | yes | `free` \| `pro` |
+| analyses_per_month | body | int | yes | 1–1000 |
+| visible_missing_skills | body | int \| null | yes | 0–100 or null |
+| visible_rewrite_suggestions | body | int \| null | yes | 0–100 or null |
+
+**Response 200:** `{ "data": { "plan": "free", "analyses_per_month": 3, "visible_missing_skills": 3, "visible_rewrite_suggestions": 2, "updated_at": "..." } }`
+
+**Errors:** `400 VALIDATION_ERROR`, `403 FORBIDDEN`, `404 NOT_FOUND` (unknown plan).
+
+#### API-020 `POST /internal/users/{id}/plan`
+- **Purpose:** Platform notifies a plan change.
+- **Auth / role:** HMAC (CR-003)
+- **Implements:** FR-019
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| id | path | UUID | yes | |
+| plan | body | string | yes | `free` \| `pro` |
+| changed_at | body | string (ISO 8601) | yes | ignored if older than `users.plan_updated_at` (out-of-order delivery) |
+
+**Response 204**
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | body rules |
+| 401 | INVALID_SIGNATURE | bad or stale signature |
+
+#### API-021 `POST /internal/users/{id}/deleted`
+- **Purpose:** Platform notifies account deletion; the module erases the user's data.
+- **Auth / role:** HMAC (CR-003)
+- **Implements:** FR-021
+
+**Request:** `id` path UUID; empty body `{}`.
+
+**Response 204** (also for unknown users).
+
+**Errors:** `400 VALIDATION_ERROR` (bad UUID), `401 INVALID_SIGNATURE`.
+
+### 6.3 Error code list
+
+| ID | Code | HTTP | Message (template) | When it happens |
+|---|---|---|---|---|
+| ERR-001 | VALIDATION_ERROR | 400 | "Request validation failed." + `details` | Any field, path or query rule in section 6 or CR-012 |
+| ERR-002 | UNAUTHENTICATED | 401 | "Missing or invalid session token." | CR-001 |
+| ERR-003 | INVALID_SIGNATURE | 401 | "Webhook signature invalid or expired." | CR-003 |
+| ERR-004 | FORBIDDEN | 403 | "You do not have permission for this action." | Role check (1.2) |
+| ERR-005 | CONSENT_REQUIRED | 403 | "Consent to resume processing (version v1) is required." | FR-001 |
+| ERR-006 | NOT_FOUND | 404 | "Resource not found." | Unknown or not-owned id, unknown route, inactive role |
+| ERR-007 | METHOD_NOT_ALLOWED | 405 | "Method not allowed." | Known path, wrong method (CR-008) |
+| ERR-008 | CONFLICT | 409 | "Resource already exists." | Duplicate role slug (API-017) |
+| ERR-009 | ANALYSIS_IN_PROGRESS | 409 | "An analysis for this resume, role and level is already running." | FR-007 rule 4, FR-016 rule 3 |
+| ERR-010 | RESUME_IN_USE | 409 | "This resume is being analysed; try again when it finishes." | FR-005 rule 3 |
+| ERR-011 | RESUME_LIMIT_REACHED | 409 | "You can keep at most 10 resumes. Delete one to upload another." | FR-002 rule 7 |
+| ERR-012 | ANALYSIS_NOT_READY | 409 | "The analysis has not completed yet." | FR-012 rule 5 |
+| ERR-013 | RESUME_PURGED | 410 | "This resume file was deleted (30-day retention or user deletion). Upload it again." | FR-007 rule 1 |
+| ERR-014 | FILE_TOO_LARGE | 413 | "File exceeds the 5 MiB limit." | FR-002 rule 3 |
+| ERR-015 | INVALID_FILE_TYPE | 415 | "Only PDF and DOCX files are accepted." | FR-002 rules 1–2 |
+| ERR-016 | TOO_MANY_PAGES | 422 | "PDF has more than 10 pages." | FR-002 rule 4 |
+| ERR-017 | RESUME_UNREADABLE | 422 | "No readable text found. Scanned images are not supported; upload a text-based PDF or DOCX." | FR-002 rule 5, FR-003 |
+| ERR-018 | RESUME_TOO_LONG | 422 | "Resume text exceeds 30,000 characters." | FR-002 rule 6 |
+| ERR-019 | QUOTA_EXCEEDED | 429 | "Monthly analysis limit of {limit} reached. Resets on {resets_at}." | FR-013 |
+| ERR-020 | RATE_LIMITED | 429 | "Too many requests. Retry after {seconds} seconds." | CR-013, API-014 cool-down |
+| ERR-021 | INTERNAL_ERROR | 500 | "Unexpected error. Reference: {request_id}." | Panic, DB or S3 failure not covered elsewhere |
+| ERR-022 | REPORT_GENERATION_FAILED | 500 | "The PDF could not be generated. Try again." | FR-015 rule 6 |
+| ERR-023 | AUTH_UNAVAILABLE | 503 | "Authentication service unavailable." | JWKS unreachable with empty cache (4.4) |
+| ERR-024 | AI_UNAVAILABLE | — (stored in `analyses.error_code`, never an HTTP status) | "The AI service was unavailable. Your quota was not used." | FR-008 rule 5 |
+| ERR-025 | AI_INVALID_RESPONSE | — (stored in `analyses.error_code`) | "The AI returned an unusable result. Your quota was not used." | FR-008 rule 5 |
+
+Frontend mapping: `messages/en.json` has a key `errors.<CODE>` for every row; `AI_UNAVAILABLE` and `AI_INVALID_RESPONSE` are shown on the analysis page with a retry button.
+
+---
+
