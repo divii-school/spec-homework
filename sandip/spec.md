@@ -272,13 +272,13 @@ Everything else below is engineering design. Where a requirement rests on an ass
 | ID | Title | Description | Priority | Acceptance criteria |
 |---|---|---|---|---|
 | FR-001 | List job roles and experience levels | Any logged-in user can fetch the catalogue of target roles (`job_roles`, TBL-001) and the fixed experience levels `entry, mid, senior, lead` `[A-05]`. | Must | 1. `GET` returns only roles with `is_active = true`, sorted by `family` then `title`. 2. Each role carries `id, slug, title, family`. 3. Levels are returned with their year bands (`entry 0–2`, `mid 2–5`, `senior 5–10`, `lead 10+`). 4. Response is cacheable for 10 min (`Cache-Control: private, max-age=600`). |
-| FR-002 | Show plan and quota | A user can see their plan (`free`/`premium`, from the platform token `[A-01]`), analyses used and remaining in the current period, and when the period resets. | Must | 1. Free: `limit = FREE_MONTHLY_ANALYSES`, `used` counts analyses with status ≠ `failed` created in the current calendar month in `QUOTA_TIMEZONE` (BR-003). 2. Premium: `limit = PREMIUM_DAILY_CAP` per calendar day, `periodType = day`. 3. `resetsAt` is the first instant of the next period, ISO-8601 UTC. 4. Values come from `usage_counters` (TBL-010), not from Redis (BR-004). |
+| FR-002 | Show plan and quota | A user can see their plan (`free`/`premium`, from the platform token `[A-01]`), analyses used and remaining in the current period, and when the period resets. | Must | 1. Free: `limit = FREE_MONTHLY_ANALYSES`, `used = usage_counters.count` for the current calendar month in `QUOTA_TIMEZONE` (BR-003) — incremented on every start, decremented only by a refund (BR-007). 2. Premium: `limit = PREMIUM_DAILY_CAP` per calendar day, `periodType = day`. 3. `resetsAt` is the first instant of the next period, ISO-8601 UTC. 4. Values come from `usage_counters` (TBL-010), not from Redis (BR-004). |
 | FR-003 | Record consent before processing | Before the first upload, and again whenever `CONSENT_VERSION` changes, the user must accept the DPDP notice (purpose, data, third-party AI processing, retention, rights). The acceptance is stored with version, time, IP and user agent. | Must | 1. Upload (FR-004) and analysis (FR-008) return 403 `ERR-006` when no consent row exists for the current `CONSENT_VERSION`. 2. Accepting creates a `consents` row (TBL-003) and an audit row `consent.accepted`. 3. `GET /consents/current` tells the client whether acceptance is needed and returns the notice text version. 4. Consent can be withdrawn by the erase-all flow (FR-022); withdrawal is recorded as `consent.withdrawn`. |
 | FR-004 | Upload a resume file | A user uploads one resume as `multipart/form-data` field `file`. The API accepts only PDF and DOCX and only up to `MAX_FILE_BYTES` (5 MiB) `[A-02]`. | Must | 1. Declared `Content-Type` ∉ {`application/pdf`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`} → 415 `ERR-011`. 2. Size > `MAX_FILE_BYTES` → 413 `ERR-010`; the limit is enforced by the multipart parser before buffering the whole body. 3. Size = 0 → 422 `ERR-013`. 4. Success → 201 with `resumeId`, `status = uploaded`, and the file stored per FR-007. 5. Rate limit `RATE_LIMIT_UPLOAD` = 10 uploads/hour/user → 429 `ERR-005`. 6. User with a pending erase request (FR-022) → 409 `ERR-025`. |
 | FR-005 | Validate file integrity | After the size/type check the API validates the file signature and structure before it is stored or parsed. | Must | 1. PDF must start with bytes `%PDF-`; DOCX must be a ZIP (`PK\x03\x04`) containing `word/document.xml`; mismatch with the declared type → 415 `ERR-012`. 2. Encrypted PDF (`/Encrypt` in trailer) or password-protected DOCX → 422 `ERR-014`. 3. PDF with > `MAX_PAGES` (10) pages → 422 `ERR-016`. 4. Structurally unreadable file (parser throws) → 422 `ERR-015`. 5. A rejected file is never written to object storage; nothing persists except an audit row `resume.rejected` with the error code. 6. Validation runs on a stream with a hard 10 s CPU budget; exceeding it counts as `ERR-015`. |
 | FR-006 | Extract resume text | The worker extracts plain text from the stored file (PDF via `pdf-parse`, DOCX via `mammoth`) `[A-03]`, normalises whitespace, and stores it on the resume. | Must | 1. Extraction runs in the worker (CMP-003), not in the HTTP request; resume status moves `uploaded → extracting → ready`. 2. Extracted text < `MIN_EXTRACTED_CHARS` (200) → status `extraction_failed`, `failureCode = TEXT_TOO_SHORT` (ERR-017) — covers scanned/image-only PDFs; OCR is out of scope `[A-04]`. 3. Extracted text > `MAX_EXTRACTED_CHARS` (60 000) → `extraction_failed`, `ERR-018`. 4. Parser exception → `extraction_failed`, `ERR-015`. 5. Text is stored as `extracted_text` (PII, TBL-004) with `extracted_at`; the original byte stream is never loaded into memory beyond the streaming parser. 6. Control characters except `\n` and `\t` are stripped; the text is NFC-normalised. |
 | FR-007 | Secure temporary storage and cleanup | Uploaded files are stored privately in object storage under a per-user key, encrypted at rest, and deleted automatically after use. | Must | 1. Key format `resumes/{env}/{userId}/{resumeId}.{pdf\|docx}`; bucket is private; SSE-KMS (CR-026). 2. The API streams the validated file to storage; no file is written to local disk except an OS temp file that is unlinked in a `finally` block. 3. The original file is deleted `RESUME_FILE_RETENTION_HOURS` (24) after the last analysis on it reaches a terminal state, by the purge job (FR-023); `resumes.file_deleted_at` is set. 4. Storage write failure → 503 `ERR-034`, nothing persisted. 5. Users can delete the file earlier via FR-021. |
-| FR-008 | Start an analysis | The user starts an analysis of a ready resume for one `roleId` and one `experienceLevel`. | Must | 1. Body `{ resumeId, roleId, experienceLevel }`; unknown/inactive role → 422 `ERR-023`; level ∉ enum → 400 `ERR-001`. 2. Resume must belong to the user and be `ready`; `uploaded/extracting` → 409 `ERR-019`; `extraction_failed` → 422 with the resume's failure code. 3. Quota and concurrency are checked atomically (FR-009). 4. On success an `analyses` row (TBL-005) with status `queued` is created and job `run-analysis` is enqueued in the same transaction boundary (BR-006); response 202 `{ analysisId, status: queued }`. 5. Consent gate per FR-003. |
+| FR-008 | Start an analysis | The user starts an analysis of a ready resume for one `roleId` and one `experienceLevel`. | Must | 1. Body `{ resumeId, roleId, experienceLevel }`; unknown/inactive role → 422 `ERR-023`; level ∉ enum → 400 `ERR-001`. 2. Resume must belong to the user, be `ready`, and still hold `extracted_text`; `uploaded/extracting` → 409 `ERR-019` (`details.reason = "processing"`); text purged by FR-023 → 409 `ERR-019` (`details.reason = "text_expired"`, UI asks for a re-upload); `extraction_failed` → 422 with the resume's failure code. 3. Quota and concurrency are checked atomically (FR-009). 4. On success an `analyses` row (TBL-005) with status `queued` is created and job `run-analysis` is enqueued in the same transaction boundary (BR-006); response 202 `{ analysisId, status: queued }`. 5. Consent gate per FR-003. |
 | FR-009 | Enforce quota and concurrency | Free users get `FREE_MONTHLY_ANALYSES` (3) analyses per calendar month `[A-06]`; premium users `PREMIUM_DAILY_CAP` (20) per day as fair use `[A-07]`. At most `MAX_INFLIGHT_PER_USER` (1) analysis may be `queued/running` per user `[A-08]`. | Must | 1. The counter of record is `usage_counters` (TBL-010), incremented inside the same DB transaction that inserts the analysis, with `SELECT … FOR UPDATE` on the user's period row (BR-004). 2. Redis key `ro:{env}:quota:user:{userId}:{period}` is a fast-path cache of the counter with TTL to period end; a miss or Redis outage falls back to the DB (BR-005). 3. Exceeding the limit → 402 `ERR-020` with `details { limit, used, resetsAt, plan }`. 4. A second concurrent start while one is in flight → 409 `ERR-021` with `details.analysisId`; enforced by the partial unique index `uq_analyses_user_inflight` (IDX-05). 5. Analyses that end `failed` for a system reason (`AI_*`, `INTERNAL`) are refunded: the counter is decremented in the failure transaction (BR-007). 6. Two simultaneous requests with one quota left: exactly one succeeds (TC-041). |
 | FR-010 | Run the analysis asynchronously and expose status | The worker runs parse-check → AI scoring → validation → persistence; the client polls status. | Must | 1. Status values: `queued → running → completed \| failed`; `failed` carries `failureCode` from ERR-040…ERR-047 and `userMessage`. 2. `GET /analyses/{id}` returns status within 300 ms p95 (NFR-003); clients poll every 2 s with `Retry-After: 2` hint while non-terminal. 3. A job is processed at most once at a time (BullMQ job id = `analysisId`); a retried job after a worker crash resumes idempotently: if the analysis is already terminal it exits without side effects (BR-008). 4. Job attempts: `JOB_MAX_ATTEMPTS` (3), exponential backoff 10 s; after the last attempt the analysis is marked `failed` with the last failure code. 5. End-to-end time from `queued` to terminal state p95 < 45 s (NFR-002). |
 | FR-011 | Score the resume on ATS dimensions | The AI scores six dimensions, each 0–100; the system computes the overall score as the weighted sum with weights that total exactly 100 % `[A-09]`. | Must | 1. Dimensions and weights: `keyword_match` 30 % · `experience_relevance` 20 % · `formatting_parseability` 15 % · `impact_quantification` 15 % · `section_completeness` 10 % · `clarity_language` 10 % (= 100 %). 2. `overallScore = round(Σ(weight_i × score_i) / 100)` using round-half-up to an integer 0–100; computed by the system, never taken from the AI. 3. Each dimension score is stored with a ≤ 300-char `rationale` and up to 5 `evidence` quotes that must be verbatim substrings of the extracted text (BR-010). 4. A dimension the AI reports as `null` (insufficient information) is scored 0 and flagged `insufficientData = true`; the response explains which dimension lacked data. 5. Score bands shown in UI: 0–49 "Needs work", 50–74 "Fair", 75–89 "Strong", 90–100 "Excellent". |
@@ -335,7 +335,7 @@ Upload PDF/DOCX · choose role and experience level · AI score /100 on several 
 
 | ID | Assumption | Reason | Needs confirmation from |
 |---|---|---|---|
-| A-01 | The platform session is a JWT (RS256) verifiable via a JWKS URL, carrying `sub` (user id, UUID), `plan` (`free`/`premium`), `role` (`user`/`admin`), `exp`. | The brief says users are already logged in; a signed token is the standard way a module verifies that without a call per request. If the platform instead offers an introspection endpoint, only `JwtAuthGuard` changes. | Platform team |
+| A-01 | The platform session is a JWT (RS256) verifiable via a JWKS URL, carrying `sub` (user id, UUID), `plan` (`free`/`premium`), `role` (exactly one of `user`/`admin`; ops staff use separate admin accounts, and an `admin` token cannot call user endpoints), `exp`. | The brief says users are already logged in; a signed token is the standard way a module verifies that without a call per request. If the platform instead offers an introspection endpoint, only `JwtAuthGuard` changes. | Platform team |
 | A-02 | Max upload 5 MiB, max 10 pages. | Resumes are 1–3 pages; 5 MiB covers image-heavy PDFs while bounding parse time and storage. | Product |
 | A-03 | Text extraction is done server-side with open-source parsers, not by sending the file to the AI provider. | Keeps the raw file (full PII) out of the third-party processor; enables masking (BR-011) and size control. | Product / DPO |
 | A-04 | Scanned image-only PDFs are rejected (no OCR). | OCR adds a dependency and cost; ATS systems also fail on image-only resumes, so rejection with guidance is the honest result. | Product |
@@ -602,11 +602,16 @@ sequenceDiagram
     W-->>Q: ack, no-op
   end
   W->>P: UPDATE status=running, attempts=n, started_at
-  alt resume.extracted_text missing (extract-text job not finished)
-    W->>S: GET file ; W->>W: extract text (pdf-parse / mammoth)
-    alt parser error / text < 200 chars / > 60 000 chars
-      W->>P: UPDATE resume extraction_failed; analysis failed {PARSE_FAILED | TEXT_TOO_SHORT}; audit
-      Note over W: no quota refund (user-caused, BR-007)
+  alt resume.extracted_text missing (defensive: text purged between start and run)
+    alt file still in storage
+      W->>S: GET file ; W->>W: re-extract text (pdf-parse / mammoth)
+      alt parser error / text < 200 chars / > 60 000 chars
+        W->>P: analysis failed {PARSE_FAILED | TEXT_TOO_SHORT}; audit
+        Note over W: no quota refund (user-caused, BR-007)
+        W-->>Q: ack
+      end
+    else file already purged
+      W->>P: analysis failed INTERNAL; refund (BR-007); audit
       W-->>Q: ack
     end
   end
@@ -815,35 +820,455 @@ sequenceDiagram
 ---
 ## 5. ERD and database design
 
+**Standards applied.** PostgreSQL 16. Primary keys `uuid DEFAULT gen_random_uuid()`. Every mutable table has `created_at timestamptz NOT NULL DEFAULT now()` and `updated_at timestamptz NOT NULL DEFAULT now()` maintained by a trigger; append-only tables (`audit_logs`, `ai_calls`) have `created_at` only. Enumerations are `text` columns with `CHECK` constraints (values `lower_snake`) so a new value is one migration. There is **no `users` table**: `user_id` is the platform subject (`sub` claim, UUID) and is never a foreign key; ownership checks compare it to the token (CR-007). Columns flagged **PII** are the ones nulled by deletion (BR-014) and purge (FR-023). Money is not stored. All instants are `timestamptz`.
+
 ### 5.1 ERD
 
 ```mermaid
 erDiagram
-  USER ||--o{ ORDER : places
+  job_roles ||--o{ role_skills : "has"
+  job_roles ||--o{ analyses : "target of"
+  resumes ||--o{ analyses : "analysed by"
+  analyses ||--o{ analysis_dimension_scores : "scored on"
+  analyses ||--o{ missing_skills : "lacks"
+  analyses ||--o{ suggestions : "rewrites"
+  analyses ||--o| reports : "rendered as"
+  analyses ||--o{ ai_calls : "made"
+  role_skills ||--o{ missing_skills : "snapshot of"
+
+  job_roles {
+    uuid id PK
+    citext slug UK
+    text title
+    text family
+    boolean is_active
+  }
+  role_skills {
+    uuid id PK
+    uuid role_id FK
+    text skill
+    text_array aliases
+    text importance
+    text level_min
+    int rank
+  }
+  resumes {
+    uuid id PK
+    uuid user_id "platform sub"
+    text original_filename "PII"
+    text content_type
+    int size_bytes
+    char64 sha256
+    text storage_key
+    int page_count
+    text status
+    text failure_code
+    text extracted_text "PII"
+    int extracted_chars
+    timestamptz extracted_at
+    timestamptz last_terminal_at
+    timestamptz file_deleted_at
+    timestamptz deleted_at
+  }
+  analyses {
+    uuid id PK
+    uuid user_id
+    uuid resume_id FK
+    uuid role_id FK
+    text experience_level
+    text status
+    text failure_code
+    smallint attempts
+    smallint overall_score
+    text model
+    text prompt_version
+    text usage_period_type
+    text usage_period_key
+    boolean refunded
+    int validation_dropped
+    timestamptz started_at
+    timestamptz completed_at
+    timestamptz failed_at
+    timestamptz deleted_at
+  }
+  analysis_dimension_scores {
+    uuid id PK
+    uuid analysis_id FK
+    text dimension
+    smallint weight
+    smallint score
+    boolean insufficient_data
+    text rationale
+    jsonb evidence
+  }
+  missing_skills {
+    uuid id PK
+    uuid analysis_id FK
+    uuid role_skill_id FK
+    text skill
+    text importance
+    text why
+    int rank
+  }
+  suggestions {
+    uuid id PK
+    uuid analysis_id FK
+    int position
+    text original_text "PII"
+    text rewritten_text "PII"
+    text reason
+    text severity
+    int rank
+  }
+  reports {
+    uuid id PK
+    uuid analysis_id FK_UK
+    uuid user_id
+    text status
+    text storage_key
+    text filename
+    int size_bytes
+    smallint page_count
+    smallint failures
+    text last_error
+    timestamptz blocked_until
+    timestamptz ready_at
+    timestamptz deleted_at
+  }
+  usage_counters {
+    uuid id PK
+    uuid user_id
+    text period_type
+    text period_key
+    text plan
+    int count
+    int limit_snapshot
+  }
+  consents {
+    uuid id PK
+    uuid user_id
+    text consent_version
+    timestamptz accepted_at
+    inet ip
+    text user_agent
+    timestamptz withdrawn_at
+  }
+  deletion_requests {
+    uuid id PK
+    uuid user_id
+    text requested_by
+    uuid requested_by_admin_id
+    text status
+    smallint attempts
+    text last_error
+    timestamptz completed_at
+  }
+  ai_calls {
+    uuid id PK
+    uuid analysis_id FK
+    text provider
+    text model
+    smallint attempt
+    text status
+    smallint http_status
+    int latency_ms
+    int input_tokens
+    int output_tokens
+    text error_code
+    text request_id
+    timestamptz created_at
+  }
+  audit_logs {
+    uuid id PK
+    text actor_type
+    uuid actor_id
+    uuid user_id
+    text action
+    text entity_type
+    uuid entity_id
+    jsonb details
+    text request_id
+    inet ip
+    timestamptz created_at
+  }
 ```
 
-### 5.2 Tables
-One block per table.
+(`consents`, `usage_counters`, `deletion_requests` and `audit_logs` key on `user_id` only; they have no FK because users live in the platform.)
 
-#### TBL-001 `<table_name>`
-Purpose: <one line>
+### 5.2 Tables
+
+One block per table. `Null` = nullable. `Key` = PK / FK / UK. `created_at`/`updated_at` per the standard above are listed only where they differ.
+
+#### TBL-001 `job_roles`
+Purpose: catalogue of target roles a user can choose (FR-001); seeded by migration (A-16).
 
 | Column | Type | Null | Key | Default | Constraint / note |
 |---|---|---|---|---|---|
 | id | uuid | NO | PK | gen_random_uuid() | |
+| slug | citext | NO | UK | | `uq_job_roles_slug`; `^[a-z0-9-]{3,60}$` |
+| title | text | NO | | | 1–80 chars |
+| family | text | NO | | | `ck_job_roles_family IN ('software','data','product','design','marketing','operations')` |
+| description | text | YES | | | ≤ 500 chars; shown in the picker |
+| is_active | boolean | NO | | true | inactive roles are hidden and rejected (ERR-023) |
+
+#### TBL-002 `role_skills`
+Purpose: ground truth of skills per role and minimum level (BR-013).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| role_id | uuid | NO | FK → job_roles(id) | | `ON DELETE RESTRICT` |
+| skill | text | NO | | | canonical display name, 1–60 chars; `uq_role_skills_role_skill (role_id, skill)` |
+| aliases | text[] | NO | | '{}' | lower-case match terms incl. the skill itself; `ck cardinality ≤ 20` |
+| importance | text | NO | | | `ck IN ('core','preferred')` |
+| level_min | text | NO | | 'entry' | `ck IN ('entry','mid','senior','lead')`; skill applies from this level up |
+| rank | int | NO | | | ordering within the role; `ck rank BETWEEN 1 AND 100` |
+
+#### TBL-003 `consents`
+Purpose: proof of DPDP notice acceptance per version (FR-003).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | | | platform `sub`; `uq_consents_user_version (user_id, consent_version)` |
+| consent_version | text | NO | | | equals `CONSENT_VERSION` at acceptance |
+| accepted_at | timestamptz | NO | | now() | |
+| ip | inet | YES | | | request IP (PII-adjacent; purged with erasure) |
+| user_agent | text | YES | | | ≤ 300 chars |
+| withdrawn_at | timestamptz | YES | | | set by erasure (FR-022) |
+
+#### TBL-004 `resumes`
+Purpose: one uploaded file and its extracted text (FR-004–FR-007).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | | | owner |
+| original_filename | text | YES | | | **PII**; ≤ 255 chars; nulled on delete/erasure |
+| content_type | text | NO | | | `ck IN ('application/pdf','application/vnd.openxmlformats-officedocument.wordprocessingml.document')` |
+| size_bytes | int | NO | | | `ck size_bytes BETWEEN 1 AND 5242880` |
+| sha256 | char(64) | NO | | | hash of the stored bytes; dedup hint only |
+| storage_key | text | YES | UK | | `uq_resumes_storage_key`; null after file deletion |
+| page_count | smallint | YES | | | PDF only; `ck page_count BETWEEN 1 AND 10` |
+| status | text | NO | | 'uploaded' | `ck IN ('uploaded','extracting','ready','extraction_failed','deleted')` (BR-009) |
+| failure_code | text | YES | | | set when `extraction_failed`; one of ERR-015/017/018/041 codes |
+| extracted_text | text | YES | | | **PII**; `ck length ≤ 60000`; nulled after 30 d or on delete |
+| extracted_chars | int | YES | | | length at extraction (kept after text is purged, for metrics) |
+| extracted_at | timestamptz | YES | | | |
+| last_terminal_at | timestamptz | YES | | | max(`analyses.completed_at/failed_at`) for this resume; drives file purge |
+| file_deleted_at | timestamptz | YES | | | set by purge/delete when the object is gone |
+| deleted_at | timestamptz | YES | | | soft delete (BR-014) |
+
+#### TBL-005 `analyses`
+Purpose: one analysis run of one resume for one role/level (FR-008–FR-014).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | also the BullMQ job id |
+| user_id | uuid | NO | | | owner (denormalised for ownership queries) |
+| resume_id | uuid | NO | FK → resumes(id) | | `ON DELETE RESTRICT` |
+| role_id | uuid | NO | FK → job_roles(id) | | `ON DELETE RESTRICT` |
+| experience_level | text | NO | | | `ck IN ('entry','mid','senior','lead')` |
+| status | text | NO | | 'queued' | `ck IN ('queued','running','completed','failed')` (BR-009) |
+| failure_code | text | YES | | | `ck (status = 'failed') = (failure_code IS NOT NULL)`; values ERR-040…047 + `TEXT_TOO_SHORT` |
+| attempts | smallint | NO | | 0 | job attempts consumed |
+| overall_score | smallint | YES | | | `ck overall_score BETWEEN 0 AND 100`; `ck (status='completed') = (overall_score IS NOT NULL)` |
+| model | text | YES | | | provider model id actually used |
+| prompt_version | text | NO | | | e.g. `v1`; allows re-scoring comparisons |
+| usage_period_type | text | NO | | | `ck IN ('month','day')` — which counter was charged |
+| usage_period_key | text | NO | | | e.g. `2026-10` / `2026-10-19` (BR-003) |
+| refunded | boolean | NO | | false | BR-007 applied |
+| validation_dropped | int | NO | | 0 | items dropped by FR-014 |
+| started_at | timestamptz | YES | | | |
+| completed_at | timestamptz | YES | | | |
+| failed_at | timestamptz | YES | | | |
+| deleted_at | timestamptz | YES | | | |
+
+#### TBL-006 `analysis_dimension_scores`
+Purpose: the six dimension scores with rationale and evidence (FR-011).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| analysis_id | uuid | NO | FK → analyses(id) | | `ON DELETE CASCADE`; `uq_dimension_scores_analysis_dimension (analysis_id, dimension)` |
+| dimension | text | NO | | | `ck IN ('keyword_match','experience_relevance','formatting_parseability','impact_quantification','section_completeness','clarity_language')` |
+| weight | smallint | NO | | | `ck weight BETWEEN 1 AND 100`; snapshot of the weight used |
+| score | smallint | NO | | | `ck score BETWEEN 0 AND 100`; 0 when `insufficient_data` |
+| insufficient_data | boolean | NO | | false | |
+| rationale | text | NO | | | `ck length ≤ 300` |
+| evidence | jsonb | NO | | '[]' | array of ≤ 5 strings, each a verbatim substring (BR-010); **PII** (resume quotes) — nulled to `[]` on erasure |
+
+#### TBL-007 `missing_skills`
+Purpose: role skills not evidenced in the resume (FR-015).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| analysis_id | uuid | NO | FK → analyses(id) | | `ON DELETE CASCADE`; `uq_missing_skills_analysis_skill (analysis_id, role_skill_id)` |
+| role_skill_id | uuid | NO | FK → role_skills(id) | | `ON DELETE RESTRICT` (catalogue rows are deactivated, not deleted) |
+| skill | text | NO | | | snapshot of `role_skills.skill` at analysis time |
+| importance | text | NO | | | snapshot; `ck IN ('core','preferred')` |
+| why | text | NO | | | `ck length ≤ 200`; AI text, validated |
+| rank | int | NO | | | display order (core first, then role rank) |
+
+#### TBL-008 `suggestions`
+Purpose: weak lines and proposed rewrites (FR-016).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| analysis_id | uuid | NO | FK → analyses(id) | | `ON DELETE CASCADE` |
+| position | int | NO | | | char offset of `original_text` in `extracted_text` (normalised); `ck position ≥ 0` |
+| original_text | text | NO | | | **PII**; `ck length ≤ 600`; verbatim substring (BR-010) |
+| rewritten_text | text | NO | | | **PII**; `ck length ≤ 400`; passed BR-012 |
+| reason | text | NO | | | `ck length ≤ 200` |
+| severity | text | NO | | | `ck IN ('high','medium','low')` |
+| rank | int | NO | | | display order |
+
+#### TBL-009 `reports`
+Purpose: PDF report per analysis (FR-019, FR-020).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | also the BullMQ job id |
+| analysis_id | uuid | NO | FK → analyses(id), UK | | `ON DELETE CASCADE`; `uq_reports_analysis` — one report per analysis |
+| user_id | uuid | NO | | | owner |
+| status | text | NO | | 'generating' | `ck IN ('generating','ready','failed')` |
+| storage_key | text | YES | UK | | `uq_reports_storage_key`; null until ready / after purge |
+| filename | text | NO | | | `ck filename ~ '^[a-z0-9-]+\.pdf$'` |
+| size_bytes | int | YES | | | `ck size_bytes ≤ 2097152` |
+| page_count | smallint | YES | | | `ck page_count ≤ 6` |
+| failures | smallint | NO | | 0 | consecutive render failures |
+| last_error | text | YES | | | error code only |
+| blocked_until | timestamptz | YES | | | set after 3 failures (FR-019 AC-6) |
+| ready_at | timestamptz | YES | | | |
+| deleted_at | timestamptz | YES | | | |
+
+#### TBL-010 `usage_counters`
+Purpose: authoritative quota counter per user and period (FR-009, BR-004).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | | | `uq_usage_counters_user_period (user_id, period_type, period_key)` |
+| period_type | text | NO | | | `ck IN ('month','day')` |
+| period_key | text | NO | | | `YYYY-MM` or `YYYY-MM-DD` in `QUOTA_TIMEZONE` |
+| plan | text | NO | | | `ck IN ('free','premium')`; plan at first use in the period |
+| count | int | NO | | 0 | `ck count ≥ 0` |
+| limit_snapshot | int | NO | | | limit applied in this period (for the entitlements view) |
+
+#### TBL-011 `ai_calls` (append-only)
+Purpose: per-attempt metrics for cost, latency and failure analysis (FR-012, NFR-012). Contains no prompt or response text.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| analysis_id | uuid | YES | FK → analyses(id) | | `ON DELETE SET NULL` (metrics survive analysis purge) |
+| provider | text | NO | | | `anthropic` |
+| model | text | NO | | | |
+| attempt | smallint | NO | | | 1–3 |
+| status | text | NO | | | `ck IN ('success','timeout','rate_limited','provider_error','malformed','refused')` |
+| http_status | smallint | YES | | | |
+| latency_ms | int | NO | | | |
+| input_tokens | int | YES | | | |
+| output_tokens | int | YES | | | |
+| error_code | text | YES | | | ERR code |
+| request_id | text | NO | | | originating API `requestId` |
+| created_at | timestamptz | NO | | now() | |
+
+#### TBL-012 `deletion_requests`
+Purpose: right-to-erasure requests and their completion (FR-022).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | also the BullMQ job id |
+| user_id | uuid | NO | | | `uq_deletion_requests_user_pending (user_id) WHERE status = 'pending'` |
+| requested_by | text | NO | | | `ck IN ('user','admin')` |
+| requested_by_admin_id | uuid | YES | | | `ck (requested_by='admin') = (requested_by_admin_id IS NOT NULL)` |
+| status | text | NO | | 'pending' | `ck IN ('pending','completed','failed')` |
+| attempts | smallint | NO | | 0 | |
+| last_error | text | YES | | | error code |
+| completed_at | timestamptz | YES | | | |
+
+#### TBL-013 `audit_logs` (append-only)
+Purpose: who did what to which entity (CR-012, FR-024). The app DB role has INSERT and SELECT only.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| actor_type | text | NO | | | `ck IN ('user','admin','system')` |
+| actor_id | uuid | YES | | | null for `system` |
+| user_id | uuid | YES | | | data subject the action concerns |
+| action | text | NO | | | dotted verb, e.g. `resume.uploaded`, `analysis.failed`, `report.downloaded`, `erasure.completed`, `admin.viewed_usage`, `consent.accepted` |
+| entity_type | text | YES | | | table name |
+| entity_id | uuid | YES | | | |
+| details | jsonb | YES | | | codes, counts, sizes only — never text or names (CR-010) |
+| request_id | text | NO | | | |
+| ip | inet | YES | | | user actions only |
+| created_at | timestamptz | NO | | now() | |
 
 ### 5.3 Indexes
 
-| Table | Index | Columns | Why |
-|---|---|---|---|
+| ID | Table | Index | Columns | Why |
+|---|---|---|---|---|
+| IDX-01 | job_roles | `uq_job_roles_slug` | (slug) UNIQUE | lookup by slug in seeds/admin |
+| IDX-02 | role_skills | `idx_role_skills_role_level` | (role_id, level_min) | BR-013 candidate set per analysis |
+| IDX-03 | consents | `uq_consents_user_version` | (user_id, consent_version) UNIQUE | consent gate on every upload/start (FR-003) |
+| IDX-04 | resumes | `idx_resumes_user_created` | (user_id, created_at DESC) WHERE deleted_at IS NULL | user's resume list / ownership checks |
+| IDX-05 | analyses | `uq_analyses_user_inflight` | (user_id) UNIQUE WHERE status IN ('queued','running') | enforces `MAX_INFLIGHT_PER_USER = 1` (FR-009) |
+| IDX-06 | analyses | `idx_analyses_user_created` | (user_id, created_at DESC) WHERE deleted_at IS NULL | history list (FR-018) |
+| IDX-07 | analyses | `idx_analyses_status_created` | (status, created_at) | reconcile orphaned `queued` rows (BR-006); purge by age |
+| IDX-08 | analyses | `idx_analyses_resume` | (resume_id) | cascade/cancel on resume delete; `last_terminal_at` maintenance |
+| IDX-09 | resumes | `idx_resumes_purge_file` | (last_terminal_at) WHERE file_deleted_at IS NULL AND storage_key IS NOT NULL | hourly file purge (FR-023) |
+| IDX-10 | resumes | `idx_resumes_purge_text` | (extracted_at) WHERE extracted_text IS NOT NULL | hourly text purge |
+| IDX-11 | usage_counters | `uq_usage_counters_user_period` | (user_id, period_type, period_key) UNIQUE | row lock target of the quota transaction (BR-004) |
+| IDX-12 | reports | `uq_reports_analysis` | (analysis_id) UNIQUE | one report per analysis; idempotent request |
+| IDX-13 | reports | `idx_reports_purge` | (ready_at) WHERE storage_key IS NOT NULL | report purge after 30 d |
+| IDX-14 | deletion_requests | `uq_deletion_requests_user_pending` | (user_id) UNIQUE WHERE status = 'pending' | one pending erasure per user; upload gate (ERR-025) |
+| IDX-15 | ai_calls | `idx_ai_calls_created` | (created_at) | cost/latency dashboards (NFR-012) |
+| IDX-16 | ai_calls | `idx_ai_calls_analysis` | (analysis_id) | per-analysis attempt history in admin view |
+| IDX-17 | audit_logs | `idx_audit_user_created` | (user_id, created_at DESC) | admin audit query by user (FR-025) |
+| IDX-18 | audit_logs | `idx_audit_action_created` | (action, created_at DESC) | compliance reporting by action |
+| IDX-19 | analysis_dimension_scores | `uq_dimension_scores_analysis_dimension` | (analysis_id, dimension) UNIQUE | exactly one row per dimension; result read |
+| IDX-20 | missing_skills | `uq_missing_skills_analysis_skill` | (analysis_id, role_skill_id) UNIQUE | no duplicate skill per analysis; result read |
+| IDX-21 | suggestions | `idx_suggestions_analysis_rank` | (analysis_id, rank) | ordered result read |
+
+All foreign keys not listed above are covered by an index named `idx_<table>_<fk>`.
 
 ### 5.4 Relationships and delete rules
 
 | From | To | Cardinality | On delete |
 |---|---|---|---|
+| role_skills.role_id | job_roles.id | N : 1 | RESTRICT — roles are deactivated (`is_active = false`), never deleted |
+| analyses.resume_id | resumes.id | N : 1 | RESTRICT — resumes are soft-deleted; hard delete only by purge after analyses are purged |
+| analyses.role_id | job_roles.id | N : 1 | RESTRICT |
+| analysis_dimension_scores.analysis_id | analyses.id | N : 1 | CASCADE |
+| missing_skills.analysis_id | analyses.id | N : 1 | CASCADE |
+| missing_skills.role_skill_id | role_skills.id | N : 1 | RESTRICT |
+| suggestions.analysis_id | analyses.id | N : 1 | CASCADE |
+| reports.analysis_id | analyses.id | 1 : 0..1 | CASCADE (object deleted by the same job before the row) |
+| ai_calls.analysis_id | analyses.id | N : 0..1 | SET NULL — metrics outlive the analysis |
+| consents / usage_counters / deletion_requests / audit_logs.user_id | platform user | N : 1 (logical) | no FK; see erasure below |
+
+**What happens when a user asks to delete their data (FR-021, FR-022, BR-014):**
+
+| Data | User deletes one resume/analysis | User requests erasure of everything |
+|---|---|---|
+| Resume file in storage | deleted immediately; `storage_key = NULL`, `file_deleted_at` set | all objects under `resumes/{env}/{userId}/` deleted |
+| `resumes.original_filename`, `extracted_text` | set NULL; `deleted_at` set | set NULL on all rows; `deleted_at` set |
+| Analyses of that resume | `deleted_at` set; in-flight job cancelled (`failed`/`CANCELLED`) | same for all analyses |
+| `suggestions.original_text/rewritten_text`, `dimension_scores.evidence` | set NULL / `[]` immediately | same for all |
+| `missing_skills`, dimension scores (numbers), `overall_score` | kept until retention purge (365 d); not PII | kept until purge; not PII (no link to a person once PII is nulled and the platform account is gone) |
+| Reports | object deleted; row `deleted_at` | all `reports/{env}/{userId}/` deleted |
+| `consents` | unchanged | `withdrawn_at` set; `ip`, `user_agent` set NULL |
+| `usage_counters` | unchanged | unchanged for the current period (quota integrity); older periods deleted |
+| `ai_calls` | unchanged (no PII) | unchanged |
+| `audit_logs` | new rows added; existing rows never changed | new rows added; existing rows kept (record of compliance) |
+| `deletion_requests` | — | row kept with `completed_at` |
+
+Hard deletion of remaining rows happens by the retention purge (FR-023), which is the only path that issues `DELETE` on `analyses`; cascades then remove scores, skills, suggestions and reports.
 
 ---
-
 ## 6. API design
 
 ### 6.1 Common rules
