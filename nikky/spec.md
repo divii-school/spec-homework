@@ -496,3 +496,314 @@ resume-optimizer-web/
 
 ---
 
+## 4. Architecture
+
+### 4.1 Component diagram
+
+```mermaid
+flowchart LR
+  subgraph Browser
+    WEB[CMP-001 Web client<br/>Next.js]
+  end
+
+  subgraph Platform["SurfingBear platform (external)"]
+    AUTH[CMP-013 Auth / JWKS]
+    BILL[Billing webhooks]
+  end
+
+  subgraph Module["Resume Optimizer (AWS ap-south-1)"]
+    API[CMP-002 API server<br/>Go / Gin]
+    MW[CMP-003 Auth middleware]
+    RS[CMP-004 Resume service]
+    AS[CMP-005 Analysis service]
+    RP[CMP-008 Report service]
+    PV[CMP-014 Privacy service]
+    WK[CMP-006 Analysis worker]
+    AI[CMP-007 AI client]
+    SC[CMP-009 Retention scheduler]
+    PG[(CMP-010 PostgreSQL 16)]
+    RD[(CMP-011 Redis 7)]
+    S3[(CMP-012 Object storage S3)]
+  end
+
+  ANTH[Anthropic Messages API]
+
+  WEB -- HTTPS JSON, cookie sb_session --> API
+  API --> MW
+  MW -- JWKS fetch, cached --> AUTH
+  BILL -- HMAC webhooks --> API
+  API --> RS & AS & RP & PV
+  RS --> S3 & PG
+  AS --> PG
+  AS -- enqueue analysis:run --> RD
+  WK -- dequeue --> RD
+  WK --> PG
+  WK --> AI --> ANTH
+  RP --> PG
+  PV --> PG & S3
+  SC --> PG & S3
+  MW -- rate limit, JWKS cache --> RD
+```
+
+### 4.2 Components
+
+| ID | Component | Responsibility | Technology |
+|---|---|---|---|
+| CMP-001 | Web client | Pages in 4.7: consent dialog, upload, role/level pick, polling result view, PDF download link, privacy page. Talks only to the module API. | Next.js 15 (App Router), TypeScript, TanStack Query 5, Tailwind CSS |
+| CMP-002 | API server | HTTP routing, request validation, response envelope, error mapping, `/health`, `/metrics`. Process `cmd/server`. | Go 1.23, Gin 1.10 |
+| CMP-003 | Auth middleware | JWT verification against platform JWKS, user row upsert and plan mirror, role/consent checks, rate limiting, request id, logging, CORS, recovery. | Go, `golang-jwt/jwt/v5`, `lestrrat-go/jwx` for JWKS |
+| CMP-004 | Resume service | Upload validation (FR-002), extraction (FR-003), encryption, S3 put/delete, resume CRUD. | Go, poppler `pdftotext`/`pdfinfo` via `os/exec`, `archive/zip` + `encoding/xml`, AWS SDK v2 |
+| CMP-005 | Analysis service | Consent and quota checks, analysis creation and enqueue (FR-007, FR-013), read with plan gating (FR-014), list and delete (FR-016). | Go, GORM, `hibiken/asynq` client |
+| CMP-006 | Analysis worker | Consumes `analysis:run`, orchestrates CMP-007, validates and persists results, handles retries, refunds quota (FR-008). Process `cmd/worker`. | Go, `hibiken/asynq` server, concurrency 20 per task |
+| CMP-007 | AI client | Builds the prompt (4.6), calls Anthropic Messages API, parses and validates JSON, counts tokens. `fake` implementation for local and tests. | Go, `anthropic-sdk-go` |
+| CMP-008 | Report service | Renders the PDF report (FR-015) from the gated analysis view. | Go, `go-pdf/fpdf` |
+| CMP-009 | Retention scheduler | Daily purge (FR-017). Process `cmd/scheduler`, single replica. | Go, `robfig/cron/v3` with TZ `Asia/Kolkata` |
+| CMP-010 | PostgreSQL | System of record for all tables in section 5. | PostgreSQL 16 (RDS) |
+| CMP-011 | Redis | Job queue (asynq), rate-limit windows, JWKS cache, export cool-down key. No data is only in Redis; losing Redis loses queued jobs, which stay `QUEUED` in PostgreSQL and are re-enqueued by the worker's startup sweep (4.3, flow F). | Redis 7 (ElastiCache) |
+| CMP-012 | Object storage | Resume binaries under `resumes/{user_id}/{resume_id}.{ext}`; private bucket, SSE-KMS, region ap-south-1. | AWS S3 (MinIO locally) |
+| CMP-013 | Platform integration | Inbound: JWKS endpoint for JWT verification; plan and deletion webhooks (FR-019, FR-021). Outbound: none except the upgrade link. | HTTPS, HMAC-SHA256 |
+| CMP-014 | Privacy service | Data export and erasure (FR-018), audit log writes. | Go |
+
+### 4.3 Main flows
+
+**Flow A — Upload a resume (FR-001, FR-002, FR-003)**
+
+```mermaid
+sequenceDiagram
+  participant U as User (Web)
+  participant A as API (CMP-002/003)
+  participant R as Resume service (CMP-004)
+  participant S as S3 (CMP-012)
+  participant D as PostgreSQL (CMP-010)
+  U->>A: POST /resumes (multipart file)
+  A->>A: verify JWT, rate limit, consent active?
+  alt no consent
+    A-->>U: 403 CONSENT_REQUIRED
+  end
+  A->>R: Upload(userID, file)
+  R->>R: size <= 5 MiB? extension + magic bytes?
+  alt invalid
+    R-->>U: 413 FILE_TOO_LARGE / 415 INVALID_FILE_TYPE
+  end
+  R->>R: pdfinfo pages <= 10? pdftotext / docx parse (10 s timeout)
+  alt unreadable / too long / too many pages
+    R-->>U: 422 RESUME_UNREADABLE / RESUME_TOO_LONG / TOO_MANY_PAGES
+  end
+  R->>D: count READY resumes < 10?
+  alt limit
+    R-->>U: 409 RESUME_LIMIT_REACHED
+  end
+  R->>S: PutObject resumes/{user}/{id}.pdf
+  R->>D: INSERT resumes (text encrypted), audit RESUME_UPLOADED
+  alt S3 or DB error
+    R->>S: DeleteObject (best effort)
+    R-->>U: 500 INTERNAL_ERROR
+  end
+  R-->>U: 201 { data: resume }
+```
+
+**Flow B — Create and run an analysis, success and failure paths (FR-007, FR-008, FR-009–FR-013)**
+
+```mermaid
+sequenceDiagram
+  participant U as User (Web)
+  participant A as API + Analysis service (CMP-002/005)
+  participant D as PostgreSQL
+  participant Q as Redis / asynq (CMP-011)
+  participant W as Worker (CMP-006)
+  participant AI as AI client (CMP-007)
+  participant P as Anthropic API
+  U->>A: POST /analyses {resume_id, job_role_slug, experience_level}
+  A->>D: load resume (own, READY), role (active), plan limit
+  alt resume purged / not found / role unknown
+    A-->>U: 410 RESUME_PURGED / 404 NOT_FOUND
+  end
+  A->>D: BEGIN; same combo QUEUED/PROCESSING?
+  alt yes
+    A-->>U: 409 ANALYSIS_IN_PROGRESS
+  end
+  A->>D: usage_counters upsert +1 WHERE count < limit
+  alt no row returned
+    A-->>U: 429 QUOTA_EXCEEDED (X-Quota-Reset)
+  end
+  A->>D: INSERT analyses (QUEUED); audit; COMMIT
+  A->>Q: Enqueue analysis:run {analysis_id}
+  A-->>U: 202 { data: analysis(QUEUED) }
+  loop every 2 s (max 150 s)
+    U->>A: GET /analyses/{id}
+    A-->>U: 200 status
+  end
+  W->>Q: Dequeue
+  W->>D: UPDATE status=PROCESSING WHERE status=QUEUED
+  alt 0 rows (deleted or already handled)
+    W-->>Q: ack, drop
+  end
+  W->>D: load decrypted text, role skills for level
+  W->>AI: Analyse(text, role, level, skills)
+  AI->>P: POST /v1/messages (timeout 60 s, max_tokens 4096)
+  alt 429 / 5xx / timeout
+    P-->>AI: error
+    AI-->>W: ErrProvider
+    W-->>Q: retry (attempt 2 after 5 s, attempt 3 after 15 s)
+  end
+  alt invalid JSON / schema
+    AI->>P: retry once immediately
+    P-->>AI: still invalid
+    AI-->>W: ErrInvalidResponse
+    W-->>Q: retry as above
+  end
+  alt all 3 attempts failed
+    W->>D: UPDATE status=FAILED, error_code, completed_at; usage_counters -1; quota_refunded=true
+  else success
+    P-->>AI: JSON result
+    AI->>AI: validate, drop unknown skills / unmatched lines, cap 10
+    AI-->>W: result
+    W->>W: overall = weighted average (FR-009)
+    W->>D: INSERT scores(6), missing_skills, suggestions; UPDATE COMPLETED
+  end
+  U->>A: GET /analyses/{id}
+  A->>D: load analysis + children; plan limits
+  A->>A: gate lists for free plan (FR-014)
+  A-->>U: 200 { data: analysis(COMPLETED, gated) }
+```
+
+**Flow C — Download the PDF (FR-015)**
+
+```mermaid
+sequenceDiagram
+  participant U as User (Web)
+  participant A as API
+  participant R as Report service (CMP-008)
+  participant D as PostgreSQL
+  U->>A: GET /analyses/{id}/report.pdf
+  A->>D: load analysis (own)
+  alt not COMPLETED
+    A-->>U: 409 ANALYSIS_NOT_READY
+  end
+  A->>A: build gated view (FR-014)
+  A->>R: Render(view)
+  alt render error
+    R-->>U: 500 REPORT_GENERATION_FAILED
+  end
+  R-->>A: PDF bytes
+  A->>D: audit REPORT_DOWNLOADED
+  A-->>U: 200 application/pdf (attachment)
+```
+
+**Flow D — Erase my data (FR-018, FR-021)**
+
+```mermaid
+sequenceDiagram
+  participant U as User (Web) or Platform webhook
+  participant A as API
+  participant V as Privacy service (CMP-014)
+  participant S as S3
+  participant D as PostgreSQL
+  participant Q as Redis
+  U->>A: DELETE /me/data  (or POST /internal/users/{id}/deleted)
+  A->>V: Erase(userID, actor)
+  V->>D: SELECT storage keys of user's resumes
+  V->>S: DeleteObjects(keys) (batch of 1000)
+  V->>D: BEGIN; DELETE analyses (cascade); DELETE resumes; DELETE usage_counters;
+  V->>D: UPDATE consents SET withdrawn_at=now(); UPDATE users SET erased_at=now(); INSERT audit DATA_ERASED; COMMIT
+  Note over Q: queued jobs for deleted analyses are dropped by the worker (0 rows updated)
+  V-->>U: 204
+```
+
+**Flow E — Platform plan change (FR-019)**
+
+```mermaid
+sequenceDiagram
+  participant B as Platform billing
+  participant A as API (HMAC middleware)
+  participant D as PostgreSQL
+  B->>A: POST /internal/users/{id}/plan {plan, changed_at} + signature headers
+  A->>A: timestamp within 300 s? HMAC matches?
+  alt no
+    A-->>B: 401 INVALID_SIGNATURE
+  end
+  A->>D: UPSERT users.plan, plan_updated_at; audit PLAN_CHANGED
+  A-->>B: 204
+```
+
+**Flow F — Worker startup sweep (resilience)**
+
+On start, and every 5 minutes, the worker selects analyses with `status = 'QUEUED'` and `created_at < now() − 2 min` that have no pending asynq task (checked with the asynq inspector by task id `analysis:{id}`) and re-enqueues them. Analyses `PROCESSING` for more than 10 minutes are marked `FAILED` with `error_code = AI_UNAVAILABLE` and refunded. This covers Redis restarts and worker crashes.
+
+### 4.4 External integrations
+
+| System | Purpose | Protocol / auth | Failure handling |
+|---|---|---|---|
+| SurfingBear platform auth (JWKS) | Verify user JWTs | HTTPS GET `PLATFORM_JWKS_URL`; public, cached in Redis 1 h | If JWKS cannot be fetched and the cache is empty: `503 AUTH_UNAVAILABLE`, alert. If the cache exists, keep using it up to 24 h. **Fallback if the platform cannot add `plan`/`role` claims:** treat missing claims as `free`/`user` and rely solely on the webhooks (FR-019) for plan. |
+| SurfingBear platform billing / accounts | Plan changes, account deletion | Inbound HTTPS webhooks with HMAC-SHA256 (CR-003) | The platform retries on non-2xx with exponential backoff (platform's responsibility). Handlers are idempotent. |
+| Anthropic Messages API | Resume scoring, missing skills, rewrites | HTTPS POST `https://api.anthropic.com/v1/messages`, header `x-api-key`, `anthropic-version: 2023-06-01`; model `AI_MODEL`; timeout 60 s | 429/5xx/timeout → retried per FR-008; after 3 attempts the analysis is `FAILED (AI_UNAVAILABLE)` and quota refunded; the user sees "AI service busy, try again" with a retry button. Metric `analysis_total{status="FAILED"}` alerts at > 10 % over 10 min. |
+| AWS S3 (MinIO locally) | Store resume binaries | AWS SDK v2, IAM task role (local: access keys), SSE-KMS | Put failure on upload → `500 INTERNAL_ERROR`, nothing persisted. Delete failure during purge → `purge_error = true`, retried next scheduler run (FR-017 rule 2). Delete failure during erasure → `500 INTERNAL_ERROR`, the user retries; rows are deleted only after S3 succeeds. |
+| poppler-utils (`pdftotext`, `pdfinfo`) | PDF text and page count | Local binary in the API container, `os/exec` with 10 s timeout | Timeout or non-zero exit → `422 RESUME_UNREADABLE`. |
+| CloudWatch Logs / Prometheus / Grafana | Logs, metrics, alerts | stdout → CloudWatch; `/metrics` scraped by Prometheus (AMP) | Observability outage does not affect user traffic. |
+
+### 4.5 Tech stack and reasons
+
+| Layer | Choice | Why this choice |
+|---|---|---|
+| Backend language | Go 1.23 | The author's main stack; a single static binary runs as API, worker and scheduler; goroutines make 20 parallel AI calls per task cheap; the GoTalk layout and conventions are reused. |
+| HTTP framework | Gin 1.10 | Already used in GoTalk; fast router, middleware chain fits CR-006–CR-013; `multipart` handling for uploads. |
+| ORM / DB access | GORM 1.25 + `pgx` driver | Used in GoTalk; migrations are still plain SQL via `golang-migrate` so the schema in section 5 is the source of truth. Raw SQL is used for the quota upsert (FR-013). |
+| Job queue | `hibiken/asynq` on Redis | Gives retries with backoff, unique task ids, an inspector for the startup sweep, and a queue-size metric for autoscaling, without adding a broker. |
+| Database | PostgreSQL 16 | Required by the brief; `uuid`, `jsonb` for audit metadata, `CHECK` constraints, transactional quota reservation. |
+| Cache / queue | Redis 7 | Required by the brief; used for asynq, rate limiting and JWKS cache only, so a Redis loss is recoverable (4.3 flow F). |
+| File storage | AWS S3, ap-south-1 | Keeps resumes in India (DPDP), SSE-KMS, lifecycle rules as a second safety net for the 30-day purge. MinIO locally uses the same API. |
+| AI provider | Anthropic Claude (`claude-sonnet-5-5`) | Reliable JSON output for the fixed schema in 4.6, large context for long resumes, zero-data-retention configuration. Behind an interface for substitution. |
+| PDF extraction | poppler `pdftotext` | Mature, handles most PDF generators; pure-Go PDF text extraction is unreliable on multi-column resumes. |
+| DOCX extraction | `archive/zip` + `encoding/xml` (stdlib) | DOCX text lives in `word/document.xml`; no external dependency needed. |
+| PDF generation | `go-pdf/fpdf` | Pure Go, no browser; the report is text and tables only. |
+| Frontend | Next.js 15 + TypeScript + TanStack Query | Required by the brief; TanStack Query gives polling (`refetchInterval`) and cache invalidation for the analysis flow with little code. |
+| Styling | Tailwind CSS | Matches the platform's existing frontend conventions. |
+| Hosting | AWS ECS Fargate + RDS + ElastiCache, ap-south-1 | Managed services in the Mumbai region; separate services for API, worker and scheduler allow independent scaling. |
+| CI/CD | GitHub Actions | Repo is on GitHub; manual approval gates for staging and prod. |
+
+### 4.6 AI prompt contract
+
+The worker sends one request per attempt:
+
+- `model`: `AI_MODEL`; `max_tokens`: 4096; `temperature`: 0.2.
+- `system` (fixed text in `utils/ai/prompt.go`): "You are an ATS (applicant tracking system) resume evaluator. Return only JSON matching the schema. Score each dimension 0–100 using these definitions: keyword_match = presence of the role's skills and terminology; impact_quantification = achievements stated with numbers and outcomes; section_completeness = presence of summary, experience, education, skills (and projects for entry level); length_relevance = length and content appropriate for the level (entry 1 page, mid 1–2, senior/lead 2–3); formatting = consistent structure, bullet usage, no tables or images implied by the text; readability = clear, active, concise sentences. Missing skills must be chosen only from the provided skill list. Rewrite suggestions must quote lines exactly as they appear in the resume."
+- `messages[0].content`: a JSON object as text: `{ "job_role": "<title>", "experience_level": "<level>", "skills": [{"name": "...", "importance": "required|preferred"}, ...], "resume_text": "<normalised text>" }`.
+
+Required response schema (validated by the worker; anything else is `AI_INVALID_RESPONSE`):
+
+```json
+{
+  "dimension_scores": [
+    { "dimension": "keyword_match", "score": 72, "feedback": "..." },
+    { "dimension": "impact_quantification", "score": 55, "feedback": "..." },
+    { "dimension": "section_completeness", "score": 80, "feedback": "..." },
+    { "dimension": "length_relevance", "score": 90, "feedback": "..." },
+    { "dimension": "formatting", "score": 65, "feedback": "..." },
+    { "dimension": "readability", "score": 70, "feedback": "..." }
+  ],
+  "missing_skills": ["Kubernetes", "Terraform"],
+  "rewrite_suggestions": [
+    {
+      "section": "experience",
+      "original_line": "Worked on backend services.",
+      "suggested_line": "Built 4 Go microservices handling 2M requests/day, cutting p95 latency by 35%.",
+      "reason": "Adds scope, scale and a measurable outcome."
+    }
+  ]
+}
+```
+
+Validation rules: exactly the six dimensions, each once; `score` integer 0–100; `feedback` 1–400 chars; `missing_skills` array of strings (filtered to the catalogue, FR-010); `rewrite_suggestions` 0–10 items (FR-011). The worker strips markdown code fences if the model wraps the JSON.
+
+### 4.7 Web client pages
+
+| Route | Purpose | APIs used | Notes |
+|---|---|---|---|
+| `/resume-optimizer` | Dashboard: usage banner, list of analyses, "New analysis" button | API-001, API-010 | If `consent.status = required`, the consent dialog opens before anything else. |
+| `/resume-optimizer/new` | Upload or pick an existing resume, choose role and level, start | API-001, API-003, API-004, API-006, API-005, API-009 | On `202` redirect to the analysis page. On `429 QUOTA_EXCEEDED` show the reset date and the upgrade link. |
+| `/resume-optimizer/analyses/[id]` | Poll until final; show gauge, dimensions, missing skills, suggestions, locked block, PDF button | API-011, API-012, API-013 | Polling: `refetchInterval` 2000 ms while `QUEUED`/`PROCESSING`, stop after 150 s. |
+| `/resume-optimizer/resumes` | List resumes with purge date; delete | API-006, API-008 | |
+| `/resume-optimizer/privacy` | Consent status, export button, erase button with confirmation | API-001, API-014, API-015 | Erase requires typing `DELETE`. |
+
+---
+
