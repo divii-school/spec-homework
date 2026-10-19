@@ -300,14 +300,14 @@ A PR is approved only if all of these are true (checklist in the PR template):
 | FR-008 | Asynchronous processing and status | The worker processes the analysis; the frontend polls for the result. | Must | 1. Status moves only `queued → processing → completed` or `queued/processing → failed`; any other transition is rejected by the service (and a DB CHECK on allowed values). 2. API-010 returns the current status; the frontend polls every 2 s and stops after 120 s, then shows "still working, check history later". 3. `started_at`, `completed_at` are set on the matching transitions. 4. Recovery job runs every 5 minutes: analyses `queued` for > 5 minutes are re-enqueued; analyses `processing` for > 10 minutes are set back to `queued` (attempts +1) or to `failed` with `INTERNAL_ERROR` if `attempts` ≥ 3. 5. The worker handles a task only if it can move the row from `queued` to `processing` with `UPDATE … WHERE status = 'queued'` (no double processing). |
 | FR-009 | ATS score | The system scores the resume out of 100 on six fixed ATS dimensions. | Must | 1. Each dimension in the table in 3.4 gets an integer 0–100 and a rationale of 1–300 characters. 2. `overallScore = round(Σ(score × weight) / 100)`, computed by the backend, never taken from the AI. 3. Exactly six dimension rows are stored (TBL-007); a response missing a dimension or with a value out of range is invalid (FR-019). 4. The same resume, role and level with the same prompt version and model gives scores within ±5 points per dimension in ≥ 90% of reruns (temperature 0; checked by the evaluation set in NFR-012). 5. `prompt_version` and `ai_model` are stored on TBL-006. |
 | FR-010 | Missing skills | The system lists skills important for the chosen role that the resume does not show. | Must | 1. The AI receives the role's skill list (TBL-004) and may return only skills from that list; any other skill is dropped by the backend. 2. Max 15 skills, each with importance `critical`, `important` or `nice_to_have` taken from TBL-004, not from the AI. 3. Ordered by importance (critical first), then by the skill's `display_order` in TBL-004. 4. An empty list is valid (resume already covers all skills). 5. Missing skills are shown to free and pro users alike. |
-| FR-011 | Rewrite suggestions | The system suggests rewrites for weak resume lines. | Must | 1. Each suggestion has `originalText` (5–500 chars), `suggestedText` (5–600 chars), `reason` (1–300 chars), `dimension` (one of the six) and `severity` (`high`, `medium`, `low`). 2. `originalText` must appear in the extracted resume text (exact match after whitespace normalisation); suggestions that do not match are dropped. 3. Max 20 suggestions; ordered by severity (high → low), then by first position of `originalText` in the resume; this order is stored as `display_order` 1…n. 4. Suggestions must not invent facts: the prompt forbids adding numbers, employers, dates or skills that are not in the original line, and placeholders like `[X%]` are used when a metric is recommended. 5. Zero suggestions is valid. |
+| FR-011 | Rewrite suggestions | The system suggests rewrites for weak resume lines. | Must | 1. Each suggestion has `originalText` (5–500 chars), `suggestedText` (5–600 chars), `reason` (1–300 chars), `dimension` (one of the six) and `severity` (`high`, `medium`, `low`). 2. `originalText` must appear in the redacted resume text that was sent to the AI (exact match after whitespace normalisation, see 4.6); suggestions that do not match are dropped. 3. Max 20 suggestions; ordered by severity (high → low), then by first position of `originalText` in the resume; this order is stored as `display_order` 1…n. 4. Suggestions must not invent facts: the prompt forbids adding numbers, employers, dates or skills that are not in the original line, and placeholders like `[X%]` are used when a metric is recommended. 5. Zero suggestions is valid. |
 | FR-012 | Plan-based visibility | Free users see only part of the suggestions. | Must | 1. For an analysis with `plan_at_creation = free` **and** current token plan `free`, API-010 and API-011 return only suggestions with `display_order` ≤ 3, plus `lockedSuggestionCount` = total − returned. 2. If the user is `pro` now, all suggestions of all their analyses are returned (upgrade unlocks history). 3. Locked suggestion text never leaves the server (not in API, not in the PDF, not in logs). 4. Scores and missing skills are always fully visible. |
 | FR-013 | Monthly quota | Each plan has a monthly analysis limit (section 0). | Must | 1. Limit is checked when creating an analysis using `usage_counters` for the current IST month, with `SELECT … FOR UPDATE`; `used ≥ limit` → 403 `QUOTA_EXCEEDED` with `details` containing `limit`, `used`, `resetsAt` (first day of next month 00:00 IST, as UTC). 2. A failed analysis gives the quota back (FR-019). 3. API-001 shows `quota.limit`, `quota.used`, `quota.remaining`, `quota.resetsAt`. 4. A downgrade from pro to free with `used` > 3 leaves `remaining = 0` (never negative). 5. Counters are never reset by a job; a new month simply uses a new row. |
 | FR-014 | Analysis history | A user sees a list of their past analyses. | Must | 1. API-009 returns the caller's analyses, newest first, paginated, with `id`, `status`, `overallScore`, `jobRole`, `experienceLevel`, `resume.originalFilename` (or `null` if the resume was deleted/expired), `createdAt`. 2. Filter `status` (optional, one of the four statuses). 3. Analyses older than 365 days are not present (FR-018). |
 | FR-015 | Download PDF report | A user downloads a completed analysis as a PDF. | Must | 1. API-011 returns `application/pdf`, A4, with `Content-Disposition: attachment; filename="surfingbear-ats-report-<YYYY-MM-DD>.pdf"` (date of analysis in IST; no personal data in the file name). 2. Content: title, analysis date (IST), job role, level, overall score, table of six dimensions with score and rationale, missing skills with importance, visible suggestions (FR-012), for free users a line "N more suggestions available with SurfingBear Pro", footer with analysis ID and "Generated by SurfingBear Resume Optimizer". 3. Not completed → 409 `ANALYSIS_NOT_READY`. 4. The PDF is generated on each request and not stored (no extra copy of personal data). 5. Uses embedded Noto Sans so all characters render. |
 | FR-016 | Delete analysis | A user deletes one analysis. | Should | 1. API-012 hard-deletes the TBL-006 row and its children (TBL-007/008/009 via `ON DELETE CASCADE`); returns 204. 2. Quota is **not** given back. 3. A `queued`/`processing` analysis can be deleted; the worker then finds no row and ends the task without error. 4. Audit event `analysis.deleted`. |
 | FR-017 | Erase all my data | Under the DPDP Act, a user can ask to erase all their data in this module. This also withdraws consent. | Must | 1. API-013 creates a TBL-011 request (`status = pending`) and enqueues `privacy:erase`; returns 202 with request ID. 2. A second request while one is `pending`/`processing` → 409 `ERASURE_IN_PROGRESS`. 3. The job deletes all S3 objects under `resumes/{userId}/`, then the user's TBL-001 row; FKs cascade to TBL-002, 005, 006, 007, 008, 009, 010. Audit events keep only the (now meaningless) UUID. 4. Completed within 24 h (job retries every 15 min up to 96 times; after that an alert fires). 5. API-014 shows `pending`, `processing`, `completed` or `failed`. 6. After completion the next API call with the same `sub` creates a fresh empty user (FR-001) and needs new consent. 7. Data in DB backups disappears when those backups expire (≤ 7 days, NFR-008); the consent notice says so. |
-| FR-018 | Automatic retention | Data is deleted automatically after the periods in section 0. | Must | 1. Daily job at 02:00 IST: resumes with `expires_at < now()` and `status = active` → S3 object deleted, `extracted_text` and `original_filename` set to NULL, `status = expired`. 2. Same job: analyses with `created_at < now() − 365 days` are hard-deleted (cascade). 3. Resume rows with status `expired`/`deleted` whose last analysis is gone and `uploaded_at < now() − 365 days` are hard-deleted. 4. S3 lifecycle rule deletes any object under `resumes/` older than 31 days as a safety net. 5. Each run logs counts (no IDs) and emits metric `ro_retention_deleted_total{kind}`. |
+| FR-018 | Automatic retention | Data is deleted automatically after the periods in section 0. | Must | 1. Daily job at 02:00 IST: resumes with `expires_at < now()` and `status = active` → S3 object deleted, `extracted_text` and `original_filename` set to NULL, `status = expired`. 2. Same job: analyses with `created_at < now() − 365 days` are hard-deleted (cascade). 3. Resume rows with status `expired`/`deleted` whose last analysis is gone and `uploaded_at < now() − 365 days` are hard-deleted. 4. S3 lifecycle rule deletes any object under `resumes/` older than 31 days as a safety net. 5. Same job: `audit_events` older than 1 year and `erasure_requests` older than 3 years are deleted. 6. Each run logs counts (no IDs) and emits metric `ro_retention_deleted_total{kind}`. |
 | FR-019 | Failure handling | AI, storage or other failures during analysis are handled without losing quota. | Must | 1. AI call: timeout 60 s; on timeout, HTTP 429 or 5xx, retry up to 2 more times after 2 s and 8 s. 2. AI response not matching the schema in 4.6 (or fewer than 6 dimensions) → retry once with the same input; still invalid → `failed` with `failure_code = AI_INVALID_RESPONSE`. 3. All retries exhausted → `failed`, `failure_code = AI_UNAVAILABLE`. 4. Resume deleted/expired before processing → `failed`, `RESUME_EXPIRED`. 5. Any other error → `failed`, `INTERNAL_ERROR`. 6. Moving to `failed` and decrementing `usage_counters.used` for the analysis' quota month (`quota_period`) happen in one transaction, never below 0. 7. The UI shows a message per failure code and a "Try again" button that calls API-008 again. |
 | FR-020 | Admin usage statistics | A support admin sees aggregate usage to monitor the service. | Could | 1. API-015 requires `support_admin`; others → 403 `FORBIDDEN`. 2. Returns for a date range (max 92 days): analyses created, completed, failed by `failure_code`, average overall score, count per job role, count per plan. 3. No user IDs, file names or resume content in the response. 4. Audit event `admin.stats_viewed`. |
 | FR-021 | Web user interface | The Next.js frontend provides the screens for all user actions. | Must | 1. `/{locale}/resume-optimizer` — dashboard: quota card (API-001), resumes list (API-005), analysis history (API-009), "New analysis" button. 2. `/{locale}/resume-optimizer/new` — step 1 consent (if needed, API-003), step 2 upload or pick existing resume (API-004/005), step 3 role + level (API-002), "Analyse" → API-008 → redirect to result page. Client-side checks mirror FR-003 size/type before upload. 3. `/{locale}/resume-optimizer/analyses/{analysisId}` — progress state while polling (FR-008), then overall score, dimension bars, missing skills, suggestions (locked ones shown as blurred placeholders with an upgrade link to `https://app.surfingbear.com/pricing`), "Download PDF" (API-011), "Delete" (API-012). 4. Settings link "Delete all my data" → confirm dialog → API-013, then status (API-014). 5. Every API error code has a translated message (CR-017). |
@@ -373,36 +373,296 @@ Weights sum to 100. Example: scores 80, 60, 70, 50, 90, 100 → (80×25 + 60×20
 
 ```mermaid
 flowchart LR
-  Client --> API
-  API --> DB[(Database)]
+  subgraph Browser
+    WEB[CMP-001 Web frontend<br/>Next.js]
+  end
+  subgraph AWS ap-south-1
+    ALB[ALB + TLS]
+    subgraph API task
+      MW[CMP-003 Auth middleware]
+      API[CMP-002 API server<br/>Go chi]
+      RES[CMP-004 Resume service]
+      EXT[CMP-005 Text extractor]
+      ANA[CMP-006 Analysis service]
+      REP[CMP-009 Report generator]
+      QUO[CMP-010 Quota & rate limiter]
+      PRV[CMP-015 Privacy service]
+    end
+    subgraph Worker task
+      WRK[CMP-007 Analysis worker<br/>asynq]
+      AIC[CMP-008 AI client]
+      RET[CMP-011 Retention & erasure jobs]
+    end
+    PG[(CMP-012 PostgreSQL 16)]
+    RD[(CMP-013 Redis 7)]
+    S3[(CMP-014 S3 bucket)]
+  end
+  AUTH[SurfingBear Auth<br/>JWKS]
+  CLAUDE[Anthropic Messages API]
+
+  WEB -->|HTTPS + sb_access cookie| ALB --> MW --> API
+  MW -.->|JWKS, cached| AUTH
+  API --> RES & ANA & REP & PRV
+  RES --> EXT
+  RES --> S3
+  RES & ANA & REP & PRV --> PG
+  ANA --> QUO
+  QUO --> RD
+  QUO --> PG
+  ANA -->|enqueue analysis:run| RD
+  PRV -->|enqueue privacy:erase| RD
+  RD -->|dequeue| WRK
+  WRK --> AIC -->|HTTPS| CLAUDE
+  WRK --> PG
+  RET --> PG & S3
 ```
+
+API server and worker are **two binaries from one Go module** (`cmd/api`, `cmd/worker`) sharing `internal/` packages. The worker binary also runs the asynq scheduler for the periodic jobs (exactly one scheduler instance is guaranteed by the asynq scheduler's Redis lock).
 
 ### 4.2 Components
 
 | ID | Component | Responsibility | Technology |
 |---|---|---|---|
-| CMP-001 | <name> | <what it does> | <tech> |
+| CMP-001 | Web frontend | Screens in FR-021; calls the API with the platform cookie; polls analysis status | Next.js 15 App Router, TypeScript, Tailwind CSS, `next-intl`, TanStack Query (polling) |
+| CMP-002 | API server | HTTP routing, request IDs, CORS, body limits, error formatting, access logs; calls services | Go 1.23, `go-chi/chi/v5`, `net/http` |
+| CMP-003 | Auth middleware | Verifies the JWT (CR-002/003), upserts the user (FR-001), puts `{userID, sub, plan, roles, locale}` in the request context | `lestrrat-go/jwx/v2` (JWT + JWKS cache) |
+| CMP-004 | Resume service | Upload validation (FR-003), duplicate detection, S3 storage, resume list/get/delete (FR-005) | Go, `aws-sdk-go-v2/s3` |
+| CMP-005 | Text extractor | Extract and normalise text from PDF/DOCX, page count, zip-bomb guard (FR-004) | `pdftotext` and `pdfinfo` (poppler-utils 24) via `os/exec` with timeout; `archive/zip` + `encoding/xml` for DOCX |
+| CMP-006 | Analysis service | Create analysis (FR-007) incl. idempotency, read/list (FR-014), visibility rules (FR-012), delete (FR-016), status transitions (FR-008) | Go |
+| CMP-007 | Analysis worker | Consumes `analysis:run`; loads resume text, calls CMP-008, validates, computes overall score, stores results, handles failures + quota refund (FR-009–011, FR-019) | Go, `hibiken/asynq` (concurrency 10 per task) |
+| CMP-008 | AI client | Builds the prompt (4.6), redacts PII (NFR-009), calls Anthropic with timeout/retries, validates the JSON output against the schema | `anthropic-sdk-go`, `santhosh-tekuri/jsonschema/v6` |
+| CMP-009 | Report generator | Builds the A4 PDF report (FR-015) | `go-pdf/fpdf` with embedded Noto Sans TTF |
+| CMP-010 | Quota & rate limiter | Monthly quota use/refund in PostgreSQL (FR-013), per-user rate limits in Redis (CR-013), idempotency keys | Go, `redis/go-redis/v9` |
+| CMP-011 | Retention & erasure jobs | Scheduled jobs: retention (FR-018, daily 02:00 IST), stuck-analysis recovery (FR-008, every 5 min), erasure (`privacy:erase`, FR-017) | asynq scheduler + handlers |
+| CMP-012 | PostgreSQL | System of record for all data in section 5 | Amazon RDS PostgreSQL 16, `jackc/pgx/v5` pool, `sqlc` queries, `pressly/goose` migrations |
+| CMP-013 | Redis | Job queue (asynq), rate-limit counters, idempotency keys | Amazon ElastiCache Redis 7 (no persistence needed beyond the queue; AOF on) |
+| CMP-014 | Object storage | Original resume files | Amazon S3, SSE-KMS, block public access, lifecycle rule 31 days |
+| CMP-015 | Privacy service | Consent record (FR-002), erasure requests (FR-017), audit events | Go |
 
 ### 4.3 Main flows
-One sequence diagram per main flow.
+
+**Flow 1 — Upload resume (FR-003, FR-004)**
 
 ```mermaid
 sequenceDiagram
-  participant U as User
+  participant U as Web (CMP-001)
+  participant A as API (CMP-002/003)
+  participant R as Resume svc (CMP-004)
+  participant X as Extractor (CMP-005)
+  participant S as S3
+  participant D as PostgreSQL
+  U->>A: POST /resumes (multipart file)
+  A->>A: verify JWT, rate limit, consent check
+  alt no valid consent
+    A-->>U: 403 CONSENT_REQUIRED
+  end
+  A->>R: Upload(user, stream)
+  R->>R: size ≤ 5 MiB, magic bytes, SHA-256
+  alt invalid size / type
+    R-->>U: 413 FILE_TOO_LARGE / 415 UNSUPPORTED_FILE_TYPE
+  end
+  R->>D: find active resume with same sha256
+  alt duplicate
+    R-->>U: 200 existing resume
+  end
+  R->>X: Extract(temp file)
+  alt unreadable / >10 pages / too short / too long
+    X-->>U: 422 FILE_UNREADABLE / TOO_MANY_PAGES / TEXT_TOO_SHORT / TEXT_TOO_LONG
+  end
+  R->>S: PutObject resumes/{userId}/{resumeId} (SSE-KMS)
+  alt S3 error
+    R-->>U: 503 SERVICE_UNAVAILABLE
+  end
+  R->>D: INSERT resumes (status=active, expires_at=+30d)
+  alt DB error
+    R->>S: DeleteObject (cleanup)
+    R-->>U: 500 INTERNAL_ERROR
+  end
+  R-->>U: 201 resume
+```
+
+Extraction runs **before** the S3 write, from a temp file in a private `os.MkdirTemp` dir that is removed with `defer`. So nothing is stored for invalid files (FR-004 AC 6).
+
+**Flow 2 — Create and process analysis (FR-007–FR-011, FR-019)**
+
+```mermaid
+sequenceDiagram
+  participant U as Web
+  participant A as API + Analysis svc (CMP-006)
+  participant Q as Quota (CMP-010)
+  participant D as PostgreSQL
+  participant R as Redis (asynq)
+  participant W as Worker (CMP-007)
+  participant C as AI client (CMP-008)
+  participant L as Anthropic API
+  U->>A: POST /analyses {resumeId, jobRoleId, experienceLevel}
+  A->>D: consent, resume, role checks
+  A->>Q: BEGIN; lock usage_counters row FOR UPDATE
+  alt used ≥ limit
+    Q-->>U: 403 QUOTA_EXCEEDED
+  end
+  Q->>D: used+1; INSERT analyses(status=queued); COMMIT
+  A->>R: enqueue analysis:run {analysisId}
+  A-->>U: 202 {id, status: queued}
+  loop every 2 s (max 120 s)
+    U->>A: GET /analyses/{id}
+    A-->>U: status
+  end
+  R->>W: analysis:run
+  W->>D: UPDATE status=processing WHERE status=queued
+  alt 0 rows (deleted or already taken)
+    W->>W: ack task, stop
+  end
+  W->>D: load resume text + role skills
+  alt resume expired / deleted
+    W->>D: failed RESUME_EXPIRED + refund (1 tx)
+  end
+  W->>C: Analyse(text, role, level, skills)
+  C->>C: redact PII, build prompt
+  C->>L: POST /v1/messages (timeout 60 s)
+  alt timeout / 429 / 5xx (after 2 retries)
+    C-->>W: ErrAIUnavailable
+    W->>D: failed AI_UNAVAILABLE + refund (1 tx)
+  else invalid JSON (after 1 retry)
+    C-->>W: ErrAIInvalidResponse
+    W->>D: failed AI_INVALID_RESPONSE + refund (1 tx)
+  end
+  L-->>C: tool_use JSON
+  C-->>W: validated result
+  W->>W: drop unknown skills / unmatched suggestions, order, overall score
+  W->>D: INSERT scores, skills, suggestions; status=completed (1 tx)
+```
+
+**Flow 3 — Download report (FR-015)**
+
+```mermaid
+sequenceDiagram
+  participant U as Web
   participant A as API
-  U->>A: request
-  A-->>U: response
+  participant D as PostgreSQL
+  participant P as Report gen (CMP-009)
+  U->>A: GET /analyses/{id}/report.pdf
+  A->>D: load analysis (user_id = caller)
+  alt not found
+    A-->>U: 404 NOT_FOUND
+  else status ≠ completed
+    A-->>U: 409 ANALYSIS_NOT_READY
+  end
+  A->>A: apply visibility (FR-012)
+  A->>P: Render(view model)
+  P-->>A: PDF bytes
+  A-->>U: 200 application/pdf
+```
+
+**Flow 4 — Erase all data (FR-017)**
+
+```mermaid
+sequenceDiagram
+  participant U as Web
+  participant A as API + Privacy svc (CMP-015)
+  participant D as PostgreSQL
+  participant R as Redis
+  participant J as Erasure job (CMP-011)
+  participant S as S3
+  U->>A: POST /me/erasure-requests
+  alt pending/processing request exists
+    A-->>U: 409 ERASURE_IN_PROGRESS
+  end
+  A->>D: INSERT erasure_requests(pending)
+  A->>R: enqueue privacy:erase
+  A-->>U: 202 {id, status: pending}
+  R->>J: privacy:erase
+  J->>D: status=processing
+  J->>S: list + delete resumes/{userId}/*
+  alt S3 error
+    J->>R: retry in 15 min (max 96)
+  end
+  J->>D: DELETE users WHERE id=userId (cascade)
+  J->>D: status=completed, completed_at=now()
 ```
 
 ### 4.4 External integrations
 
 | System | Purpose | Protocol / auth | Failure handling |
 |---|---|---|---|
+| SurfingBear Auth (JWKS) | Public keys to verify platform JWTs | HTTPS GET `https://auth.surfingbear.com/.well-known/jwks.json`, no auth; 5 s timeout | Cached keys used for up to 10 min, then until refetch succeeds (stale keys kept up to 24 h). No keys at all → 503 `SERVICE_UNAVAILABLE`. Alert on 3 failed refreshes in a row. |
+| Anthropic Messages API | Scoring, missing skills, suggestions | HTTPS `POST https://api.anthropic.com/v1/messages`, header `x-api-key` from Secrets Manager, `anthropic-version: 2023-06-01`; model from `RO_AI_MODEL` (prod: `claude-sonnet-5-5`); `temperature 0`, `max_tokens 4000`; forced tool call `submit_analysis` | Timeout 60 s; retry ×2 on timeout/429/5xx (2 s, 8 s; honour `retry-after` if larger, max 20 s); invalid output retry ×1; then fail with `AI_UNAVAILABLE` / `AI_INVALID_RESPONSE` and refund quota (FR-019). Circuit breaker: 20 consecutive failures → open for 60 s, tasks fail fast with `AI_UNAVAILABLE`. |
+| Amazon S3 | Store original files | AWS SDK v2, IAM task role (no keys); bucket policy denies non-TLS and unencrypted PUT | SDK retries 3× with backoff. Upload failure → 503 `SERVICE_UNAVAILABLE`, nothing stored. Delete failure in jobs → job retry; lifecycle rule is the final safety net. |
+| AWS KMS | Encryption key for S3 objects | Via S3 SSE-KMS, task role `kms:GenerateDataKey`, `kms:Decrypt` | Same as S3 |
 
 ### 4.5 Tech stack and reasons
 
 | Layer | Choice | Why this choice |
 |---|---|---|
+| Backend language | Go 1.23 | Single static binary per app, low memory, good concurrency for the I/O-bound work here (S3, AI calls, DB). The team's main stack. |
+| HTTP router | `chi` v5 | Thin layer over `net/http`, route patterns for logging (CR-005), standard middleware; no framework lock-in. |
+| DB access | `pgx` v5 + `sqlc` | Type-safe Go generated from plain SQL. We need `FOR UPDATE`, `ON CONFLICT`, CTEs for the quota and status logic, which are clearer in SQL than in an ORM. |
+| Migrations | `goose` | SQL migrations, runnable as a one-off task (1.8). |
+| Job queue | `asynq` on Redis | Analyses take 10–60 s and must survive API restarts; asynq gives retries, scheduling and unique tasks on the Redis we already need. No extra service (SQS/Kafka) to run. |
+| Database | PostgreSQL 16 | Relational data with strong consistency for quota counting; `ON DELETE CASCADE` makes erasure simple and complete; required by the brief. |
+| Cache / queue | Redis 7 | Rate limiting needs atomic counters with TTL; also hosts the queue. Required by the brief. |
+| File storage | Amazon S3 (ap-south-1) | Encrypted, in India, lifecycle rules enforce retention automatically. |
+| PDF text | poppler `pdftotext` | Much more accurate on multi-column resumes than pure-Go PDF libraries; run with a timeout in the worker-style sandbox (non-root container, read-only FS except temp dir). |
+| AI provider | Anthropic Claude via Messages API | Forced tool use gives reliable JSON matching our schema; good at careful rewriting without inventing facts; zero-data-retention terms available (A-06). |
+| PDF report | `go-pdf/fpdf` | Pure Go, no headless browser, fast enough for NFR-004. |
+| Frontend | Next.js 15 | Required by the brief; App Router + server components for fast first load; same stack as the SurfingBear platform UI. |
+| Runtime | AWS ECS Fargate | No servers to patch; scales per task (NFR-010). |
+| Observability | OpenTelemetry → AWS X-Ray, Prometheus metrics → Amazon Managed Prometheus + Grafana, logs → CloudWatch | Vendor-neutral instrumentation in Go (`otel`), meets NFR-011. |
+
+### 4.6 AI prompt contract (CMP-008)
+
+**Redaction before sending** (NFR-009): regex replace in this order — URLs (`https?://\S+`, `www\.\S+`) → `[URL]`; emails (`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`) → `[EMAIL]`; phone numbers (`(\+?\d[\d\s\-()]{8,}\d)`) → `[PHONE]`. The redacted text is used only for the AI call. Because suggestions must match the **original** text (FR-011 AC 2), the backend matches `originalText` against the redacted text, and stores it with placeholders as returned; suggestions never contain the user's real email/phone.
+
+**System prompt** (stored in `internal/ai/prompts/analysis-v1.txt`, versioned by file name): the model acts as an ATS resume reviewer; must score each of the six dimensions in 3.4 using the given descriptions and weights; must choose missing skills only from the provided list; must quote `originalText` exactly from the resume; must not invent facts and must use placeholders like `[X%]` for unknown numbers; must respond only by calling `submit_analysis`.
+
+**User message:** JSON
+```json
+{
+  "jobRole": "Backend Developer",
+  "experienceLevel": "mid",
+  "experienceLevelYears": "3-5",
+  "roleSkills": [{"name": "Go", "importance": "critical"}, {"name": "PostgreSQL", "importance": "important"}],
+  "resumeText": "<redacted text>"
+}
+```
+
+**Tool `submit_analysis` input schema** (validated again by the backend):
+```json
+{
+  "type": "object",
+  "required": ["dimensions", "missingSkills", "suggestions"],
+  "additionalProperties": false,
+  "properties": {
+    "dimensions": {
+      "type": "array", "minItems": 6, "maxItems": 6,
+      "items": {
+        "type": "object", "required": ["key", "score", "rationale"], "additionalProperties": false,
+        "properties": {
+          "key": {"enum": ["keyword_match", "skills_coverage", "experience_relevance", "impact_metrics", "formatting_parseability", "section_completeness"]},
+          "score": {"type": "integer", "minimum": 0, "maximum": 100},
+          "rationale": {"type": "string", "minLength": 1, "maxLength": 300}
+        }
+      }
+    },
+    "missingSkills": {"type": "array", "maxItems": 15, "items": {"type": "string", "minLength": 1, "maxLength": 80}},
+    "suggestions": {
+      "type": "array", "maxItems": 20,
+      "items": {
+        "type": "object", "required": ["originalText", "suggestedText", "reason", "dimension", "severity"], "additionalProperties": false,
+        "properties": {
+          "originalText": {"type": "string", "minLength": 5, "maxLength": 500},
+          "suggestedText": {"type": "string", "minLength": 5, "maxLength": 600},
+          "reason": {"type": "string", "minLength": 1, "maxLength": 300},
+          "dimension": {"enum": ["keyword_match", "skills_coverage", "experience_relevance", "impact_metrics", "formatting_parseability", "section_completeness"]},
+          "severity": {"enum": ["high", "medium", "low"]}
+        }
+      }
+    }
+  }
+}
+```
+
+Post-processing in CMP-007: duplicate dimension keys → invalid (retry); `missingSkills` matched case-insensitively against TBL-004 names, unknown dropped, duplicates removed, importance taken from TBL-004; suggestions whose `originalText` is not found are dropped; remaining ordered and numbered (FR-011 AC 3).
 
 ---
 
@@ -412,28 +672,252 @@ sequenceDiagram
 
 ```mermaid
 erDiagram
-  USER ||--o{ ORDER : places
+  users ||--o{ consents : gives
+  users ||--o{ resumes : uploads
+  users ||--o{ analyses : requests
+  users ||--o{ usage_counters : has
+  job_roles ||--|{ job_role_skills : lists
+  job_roles ||--o{ analyses : targets
+  resumes ||--o{ analyses : "analysed in"
+  analyses ||--|{ analysis_dimension_scores : has
+  analyses ||--o{ analysis_missing_skills : has
+  analyses ||--o{ analysis_suggestions : has
+  erasure_requests }o..|| users : "refers to (no FK)"
+  audit_events }o..|| users : "refers to (no FK)"
 ```
 
-### 5.2 Tables
-One block per table.
+All tables: PostgreSQL 16, schema `resume_optimizer`. All timestamps are `timestamptz` stored in UTC. UUIDs use `gen_random_uuid()` (pgcrypto, built in since PG 13). Status-like columns are `text` with a `CHECK` constraint (easier to extend with a migration than a PG enum).
 
-#### TBL-001 `<table_name>`
-Purpose: <one line>
+### 5.2 Tables
+
+#### TBL-001 `users`
+Purpose: local reference to a platform user; owner of all personal data (erasure deletes this row).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | Internal user ID used everywhere else and in logs |
+| platform_user_id | varchar(64) | NO | UQ | — | JWT `sub`; `uq_users_platform_user_id` |
+| created_at | timestamptz | NO | | now() | |
+| last_seen_at | timestamptz | NO | | now() | Updated at most hourly (FR-001) |
+
+#### TBL-002 `consents`
+Purpose: proof that the user accepted the DPDP consent notice (FR-002).
 
 | Column | Type | Null | Key | Default | Constraint / note |
 |---|---|---|---|---|---|
 | id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | FK → users.id | — | ON DELETE CASCADE |
+| consent_version | varchar(20) | NO | | — | e.g. `2026-10-v1` |
+| accepted_at | timestamptz | NO | | now() | |
+| withdrawn_at | timestamptz | YES | | NULL | Set only if a future withdraw-without-erasure feature is added; erasure deletes the row |
+| | | | UQ | | `uq_consents_user_id_consent_version` (idempotent accept) |
+
+#### TBL-003 `job_roles`
+Purpose: fixed catalogue of target roles (FR-006), seeded by migration (5.5).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | smallint | NO | PK | — | Fixed IDs from the seed so they are the same in every environment |
+| slug | varchar(60) | NO | UQ | — | `^[a-z0-9-]+$`, e.g. `backend-developer` |
+| name | varchar(100) | NO | | — | Display name |
+| is_active | boolean | NO | | true | Inactive roles are hidden from API-002 and rejected by API-008 |
+| created_at | timestamptz | NO | | now() | |
+
+#### TBL-004 `job_role_skills`
+Purpose: curated skill list per role used for missing skills (FR-010).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | integer | NO | PK | generated always as identity | |
+| job_role_id | smallint | NO | FK → job_roles.id | — | ON DELETE RESTRICT |
+| skill_name | varchar(80) | NO | | — | |
+| importance | text | NO | | — | CHECK in (`critical`,`important`,`nice_to_have`) |
+| display_order | smallint | NO | | — | CHECK > 0 |
+| | | | UQ | | `uq_job_role_skills_role_lower_name` on (job_role_id, lower(skill_name)) |
+
+#### TBL-005 `resumes`
+Purpose: uploaded resume metadata and extracted text (FR-003–FR-005, FR-018).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | FK → users.id | — | ON DELETE CASCADE |
+| original_filename | varchar(255) | YES | | — | NULL after delete/expiry |
+| file_type | text | NO | | — | CHECK in (`pdf`,`docx`) |
+| size_bytes | integer | NO | | — | CHECK between 1 and 5242880 |
+| page_count | smallint | YES | | NULL | PDF only; CHECK between 1 and 10 |
+| sha256 | char(64) | NO | | — | Hex, lowercase; duplicate detection |
+| storage_key | varchar(200) | YES | | — | `resumes/{userId}/{resumeId}`; NULL after delete/expiry |
+| extracted_text | text | YES | | — | NOT NULL while `status = active` (CHECK); NULL after delete/expiry |
+| char_count | integer | NO | | — | CHECK between 300 and 30000 |
+| status | text | NO | | 'active' | CHECK in (`active`,`expired`,`deleted`) |
+| uploaded_at | timestamptz | NO | | now() | |
+| expires_at | timestamptz | NO | | — | `uploaded_at + interval '30 days'` set by the service |
+| deleted_at | timestamptz | YES | | NULL | Set on user delete or expiry |
+| | | | | | CHECK `(status = 'active') = (extracted_text IS NOT NULL AND storage_key IS NOT NULL)` |
+
+#### TBL-006 `analyses`
+Purpose: one analysis request and its overall result (FR-007–FR-009, FR-012, FR-014, FR-019).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | FK → users.id | — | ON DELETE CASCADE |
+| resume_id | uuid | NO | FK → resumes.id | — | ON DELETE CASCADE (resume rows are only hard-deleted by FR-018 AC 3 after their analyses are gone, or by user cascade) |
+| job_role_id | smallint | NO | FK → job_roles.id | — | ON DELETE RESTRICT |
+| experience_level | text | NO | | — | CHECK in (`entry`,`mid`,`senior`,`lead`) |
+| status | text | NO | | 'queued' | CHECK in (`queued`,`processing`,`completed`,`failed`) |
+| overall_score | smallint | YES | | NULL | CHECK between 0 and 100; NOT NULL iff status = completed (CHECK) |
+| failure_code | text | YES | | NULL | CHECK in (`AI_UNAVAILABLE`,`AI_INVALID_RESPONSE`,`RESUME_EXPIRED`,`INTERNAL_ERROR`); NOT NULL iff status = failed (CHECK) |
+| plan_at_creation | text | NO | | — | CHECK in (`free`,`pro`) |
+| quota_period | char(7) | NO | | — | `YYYY-MM` (IST) of the counter used; needed for refund |
+| ai_model | varchar(100) | YES | | NULL | Set when processing starts |
+| prompt_version | varchar(30) | YES | | NULL | e.g. `analysis-v1` |
+| attempts | smallint | NO | | 0 | Incremented each time processing starts |
+| created_at | timestamptz | NO | | now() | Also "queued at" |
+| started_at | timestamptz | YES | | NULL | |
+| completed_at | timestamptz | YES | | NULL | Set on `completed` or `failed` |
+
+#### TBL-007 `analysis_dimension_scores`
+Purpose: the six dimension scores (FR-009).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| analysis_id | uuid | NO | PK (1/2), FK → analyses.id | — | ON DELETE CASCADE |
+| dimension | text | NO | PK (2/2) | — | CHECK in the six keys of 3.4 |
+| score | smallint | NO | | — | CHECK between 0 and 100 |
+| weight | smallint | NO | | — | Copied from 3.4 at write time (history stays correct if weights change) |
+| rationale | varchar(300) | NO | | — | |
+
+#### TBL-008 `analysis_missing_skills`
+Purpose: missing skills (FR-010).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | bigint | NO | PK | generated always as identity | |
+| analysis_id | uuid | NO | FK → analyses.id | — | ON DELETE CASCADE |
+| skill_name | varchar(80) | NO | | — | Copied from TBL-004 (keeps history if the catalogue changes) |
+| importance | text | NO | | — | CHECK in (`critical`,`important`,`nice_to_have`) |
+| display_order | smallint | NO | | — | CHECK between 1 and 15 |
+| | | | UQ | | `uq_analysis_missing_skills_analysis_order` (analysis_id, display_order) |
+
+#### TBL-009 `analysis_suggestions`
+Purpose: rewrite suggestions (FR-011, FR-012).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | bigint | NO | PK | generated always as identity | |
+| analysis_id | uuid | NO | FK → analyses.id | — | ON DELETE CASCADE |
+| display_order | smallint | NO | | — | CHECK between 1 and 20 |
+| dimension | text | NO | | — | CHECK in the six keys of 3.4 |
+| severity | text | NO | | — | CHECK in (`high`,`medium`,`low`) |
+| original_text | varchar(500) | NO | | — | |
+| suggested_text | varchar(600) | NO | | — | |
+| reason | varchar(300) | NO | | — | |
+| | | | UQ | | `uq_analysis_suggestions_analysis_order` (analysis_id, display_order) |
+
+#### TBL-010 `usage_counters`
+Purpose: analyses used per user per IST month (FR-013, FR-019).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| user_id | uuid | NO | PK (1/2), FK → users.id | — | ON DELETE CASCADE |
+| period | char(7) | NO | PK (2/2) | — | `YYYY-MM`, CHECK `period ~ '^\d{4}-(0[1-9]|1[0-2])$'` |
+| used | integer | NO | | 0 | CHECK used ≥ 0 |
+| updated_at | timestamptz | NO | | now() | |
+
+Quota use SQL (one transaction with the INSERT into `analyses`):
+```sql
+INSERT INTO usage_counters (user_id, period) VALUES ($1, $2) ON CONFLICT DO NOTHING;
+SELECT used FROM usage_counters WHERE user_id = $1 AND period = $2 FOR UPDATE;
+-- if used >= limit: ROLLBACK, return QUOTA_EXCEEDED
+UPDATE usage_counters SET used = used + 1, updated_at = now() WHERE user_id = $1 AND period = $2;
+```
+Refund: `UPDATE usage_counters SET used = GREATEST(used - 1, 0), updated_at = now() WHERE user_id = $1 AND period = $2`, with `period = analyses.quota_period`.
+
+#### TBL-011 `erasure_requests`
+Purpose: track DPDP erasure requests (FR-017). Must survive deletion of the user, so it has **no FK** to `users`.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | | — | Internal ID at request time (no FK) |
+| platform_user_hash | char(64) | NO | | — | SHA-256 hex of `sub`; lets the same platform user read the status after the user row is gone (API-014) |
+| status | text | NO | | 'pending' | CHECK in (`pending`,`processing`,`completed`,`failed`) |
+| attempts | smallint | NO | | 0 | Max 96 |
+| requested_at | timestamptz | NO | | now() | |
+| completed_at | timestamptz | YES | | NULL | |
+
+Rows are kept 3 years as proof of erasure (they hold no personal data besides a hash).
+
+#### TBL-012 `audit_events`
+Purpose: security-relevant actions (1.3). No personal data.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | bigint | NO | PK | generated always as identity | |
+| user_id | uuid | YES | | NULL | No FK (kept after erasure; the UUID then points to nothing) |
+| action | varchar(50) | NO | | — | CHECK in (`consent.accepted`,`resume.uploaded`,`resume.deleted`,`analysis.deleted`,`erasure.requested`,`erasure.completed`,`admin.stats_viewed`) |
+| entity_type | varchar(30) | YES | | NULL | `resume`, `analysis`, `erasure_request` |
+| entity_id | uuid | YES | | NULL | |
+| request_id | uuid | YES | | NULL | CR-009 |
+| created_at | timestamptz | NO | | now() | |
+
+Kept 1 year, deleted by the daily retention job.
 
 ### 5.3 Indexes
 
+(Primary keys and unique constraints listed in 5.2 also create indexes.)
+
 | Table | Index | Columns | Why |
 |---|---|---|---|
+| resumes | idx_resumes_user_id_status_uploaded_at | (user_id, status, uploaded_at DESC) | API-005 list of active resumes, newest first |
+| resumes | idx_resumes_user_id_sha256_active | (user_id, sha256) WHERE status = 'active' | Duplicate check in FR-003 AC 8 |
+| resumes | idx_resumes_expires_at_active | (expires_at) WHERE status = 'active' | Daily expiry job (FR-018 AC 1) |
+| analyses | idx_analyses_user_id_created_at | (user_id, created_at DESC) | API-009 history list and its count |
+| analyses | idx_analyses_status_created_at_open | (status, created_at) WHERE status IN ('queued','processing') | Recovery job (FR-008 AC 4), NFR-013 alert |
+| analyses | idx_analyses_created_at | (created_at) | 365-day retention delete; admin stats date range (API-015) |
+| analyses | idx_analyses_resume_id | (resume_id) | FK lookups; worker check on resume delete; FR-018 AC 3 |
+| job_role_skills | idx_job_role_skills_job_role_id | (job_role_id, display_order) | Load skills for prompt and for API-002 |
+| consents | (covered by uq_consents_user_id_consent_version) | | Consent check on upload/analysis |
+| erasure_requests | idx_erasure_requests_platform_user_hash | (platform_user_hash, requested_at DESC) | API-013 "already in progress" check and API-014 |
+| audit_events | idx_audit_events_created_at | (created_at) | 1-year retention delete |
 
 ### 5.4 Relationships and delete rules
 
 | From | To | Cardinality | On delete |
 |---|---|---|---|
+| consents.user_id | users.id | user 1 — 0..n consents | CASCADE |
+| resumes.user_id | users.id | user 1 — 0..n resumes | CASCADE |
+| analyses.user_id | users.id | user 1 — 0..n analyses | CASCADE |
+| usage_counters.user_id | users.id | user 1 — 0..n counters (one per month) | CASCADE |
+| analyses.resume_id | resumes.id | resume 1 — 0..n analyses | CASCADE (in practice only reached by user cascade, see TBL-006) |
+| analyses.job_role_id | job_roles.id | role 1 — 0..n analyses | RESTRICT (roles are deactivated, never deleted) |
+| job_role_skills.job_role_id | job_roles.id | role 1 — 1..n skills | RESTRICT |
+| analysis_dimension_scores.analysis_id | analyses.id | analysis 1 — 6 scores (when completed) | CASCADE |
+| analysis_missing_skills.analysis_id | analyses.id | analysis 1 — 0..15 | CASCADE |
+| analysis_suggestions.analysis_id | analyses.id | analysis 1 — 0..20 | CASCADE |
+| erasure_requests.user_id | users.id | — | No FK (survives erasure) |
+| audit_events.user_id | users.id | — | No FK (survives erasure; holds no personal data) |
+
+**User erasure (FR-017):** deleting one `users` row removes, through CASCADE, every row in TBL-002, 005, 006, 007, 008, 009, 010 for that user. S3 objects are deleted by the job **before** the row delete. Nothing personal remains except in backups, which expire within 7 days.
+
+### 5.5 Seed data (job roles and skills)
+
+Loaded by migration `00002_seed_job_roles.sql`. IDs are fixed. Importance codes: **C** = critical, **I** = important, **N** = nice_to_have. `display_order` is the order listed.
+
+| id | slug | name | Skills (importance) |
+|---|---|---|---|
+| 1 | backend-developer | Backend Developer | REST API design (C), SQL (C), Go or Java or Node.js (C), Git (C), PostgreSQL (I), Docker (I), Unit testing (I), Redis (I), Message queues (N), Kubernetes (N), AWS (N), CI/CD (N) |
+| 2 | frontend-developer | Frontend Developer | JavaScript (C), TypeScript (C), React (C), HTML (C), CSS (C), Git (I), Next.js (I), Responsive design (I), Web accessibility (I), Testing Library (N), Performance optimisation (N), Figma (N) |
+| 3 | full-stack-developer | Full Stack Developer | JavaScript (C), TypeScript (C), React (C), REST API design (C), SQL (C), Node.js (I), Git (I), Docker (I), PostgreSQL (I), CI/CD (N), AWS (N), Redis (N) |
+| 4 | mobile-developer | Mobile App Developer | Kotlin or Swift (C), Android or iOS SDK (C), REST API integration (C), Git (C), Flutter or React Native (I), Mobile UI design (I), App store publishing (I), Unit testing (I), Firebase (N), CI/CD (N) |
+| 5 | qa-engineer | QA Engineer | Test case design (C), Manual testing (C), Bug tracking (C), Test automation (I), Playwright or Selenium (I), API testing (I), SQL (I), Performance testing (N), CI/CD (N), Postman (N) |
+| 6 | devops-engineer | DevOps Engineer | Linux (C), CI/CD (C), Docker (C), Kubernetes (C), AWS or Azure or GCP (C), Terraform (I), Monitoring (I), Bash scripting (I), Networking (I), Security hardening (N), Python (N) |
+| 7 | data-analyst | Data Analyst | SQL (C), Excel (C), Data visualisation (C), Python or R (I), Power BI or Tableau (I), Statistics (I), Data cleaning (I), Dashboard design (N), A/B testing (N) |
+| 8 | ui-ux-designer | UI/UX Designer | Figma (C), User research (C), Wireframing (C), Prototyping (C), Visual design (I), Design systems (I), Usability testing (I), Interaction design (I), HTML/CSS basics (N), Accessibility (N) |
+| 9 | product-manager | Product Manager | Product roadmap (C), Requirements writing (C), Stakeholder management (C), Prioritisation (C), Data-driven decisions (I), Agile/Scrum (I), User research (I), Market analysis (N), SQL (N) |
+| 10 | digital-marketer | Digital Marketing Specialist | SEO (C), Content marketing (C), Social media marketing (C), Google Analytics (C), Paid ads (I), Email marketing (I), Copywriting (I), Marketing automation (N), A/B testing (N) |
 
 ---
 
