@@ -1977,7 +1977,7 @@ Numbering is grouped by family: `ERR-00x` general, `ERR-01x` upload and file, `E
 | ERR-004 | NOT_FOUND | 404 | We could not find that item. | Unknown id, deleted, or owned by another user |
 | ERR-005 | RATE_LIMITED | 429 | Too many requests. Please wait and try again. | Rate limit exceeded; `Retry-After` set |
 | ERR-006 | CONSENT_REQUIRED | 403 | Please review and accept the data notice before uploading. | No consent row for `CONSENT_VERSION` |
-| ERR-010 | FILE_TOO_LARGE | 413 | The file is larger than 5 MB. | size > MAX_FILE_BYTES |
+| ERR-010 | FILE_TOO_LARGE | 413 | The file is larger than the 5 MiB limit (5,242,880 bytes). | size > MAX_FILE_BYTES |
 | ERR-011 | UNSUPPORTED_FILE_TYPE | 415 | Only PDF and DOCX files are supported. | declared type not allowed |
 | ERR-012 | FILE_SIGNATURE_MISMATCH | 415 | The file content does not match its type. | magic bytes / structure mismatch |
 | ERR-013 | FILE_EMPTY | 422 | The file is empty. | 0 bytes |
