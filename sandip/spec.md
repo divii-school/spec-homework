@@ -1866,16 +1866,166 @@ Numbering is grouped by family: `ERR-00x` general, `ERR-01x` upload and file, `E
 ---
 ## 7. Traceability matrix
 
-Every FR and NFR must appear here at least once. No empty cells — write `—` only when something genuinely does not apply, and say why.
+Every FR and NFR appears at least once. `—` is used only where nothing applies, with the reason in brackets. Verification cases `TC-nnn` are defined in §7.2.
+
+### 7.1 Requirement → component → table → API → verification
 
 | Requirement | Component(s) | Table(s) | API(s) | Verified by |
 |---|---|---|---|---|
-| FR-001 | CMP-00x | TBL-00x | API-00x | <test / acceptance criterion> |
+| FR-001 | CMP-001, CMP-002, CMP-004 | TBL-001, TBL-002 | API-001 | TC-001 |
+| FR-002 | CMP-001, CMP-002, CMP-004, CMP-005 | TBL-010, TBL-005, TBL-003, TBL-012 | API-002 | TC-002 |
+| FR-003 | CMP-001, CMP-002, CMP-004 | TBL-003, TBL-013 | API-003, API-004, API-005, API-008 | TC-003, TC-004 |
+| FR-004 | CMP-001, CMP-002, CMP-005, CMP-006 | TBL-004, TBL-013 | API-005 | TC-010, TC-011 |
+| FR-005 | CMP-002 | TBL-004, TBL-013 | API-005 | TC-012, TC-013, TC-014 |
+| FR-006 | CMP-003, CMP-006 | TBL-004 | API-006 | TC-020, TC-021 |
+| FR-007 | CMP-002, CMP-003, CMP-006 | TBL-004 | API-005, API-007 | TC-015, TC-061 |
+| FR-008 | CMP-001, CMP-002, CMP-004, CMP-005 | TBL-005, TBL-004, TBL-001, TBL-013 | API-008 | TC-030 |
+| FR-009 | CMP-002, CMP-004, CMP-005 | TBL-010, TBL-005 | API-008, API-002 | TC-040, TC-041, TC-042, TC-043 |
+| FR-010 | CMP-002, CMP-003, CMP-005 | TBL-005 | API-008, API-009 | TC-031, TC-055 |
+| FR-011 | CMP-003, CMP-007 | TBL-006, TBL-005 | API-009 | TC-032, TC-033 |
+| FR-012 | CMP-003, CMP-007 | TBL-011, TBL-002 | — (worker-internal; observable via API-009) | TC-034, TC-035 |
+| FR-013 | CMP-003, CMP-007, CMP-005 | TBL-005, TBL-011, TBL-010 | API-009 | TC-036, TC-037, TC-038, TC-039 |
+| FR-014 | CMP-003 | TBL-006, TBL-007, TBL-008, TBL-005 | API-009 | TC-033, TC-035 |
+| FR-015 | CMP-003, CMP-002 | TBL-007, TBL-002 | API-009 | TC-033, TC-045 |
+| FR-016 | CMP-003, CMP-002 | TBL-008 | API-009 | TC-033, TC-045 |
+| FR-017 | CMP-002, CMP-001, CMP-009 | TBL-007, TBL-008 | API-009, API-013 | TC-045, TC-046 |
+| FR-018 | CMP-001, CMP-002 | TBL-005, TBL-001 | API-010 | TC-047 |
+| FR-019 | CMP-002, CMP-003, CMP-009, CMP-006 | TBL-009 | API-012 | TC-070, TC-071 |
+| FR-020 | CMP-002, CMP-006 | TBL-009, TBL-013 | API-013 | TC-072, TC-073 |
+| FR-021 | CMP-002, CMP-006, CMP-005 | TBL-004, TBL-005, TBL-008, TBL-006, TBL-009, TBL-013 | API-007, API-011 | TC-060, TC-061 |
+| FR-022 | CMP-002, CMP-003, CMP-006 | TBL-012, TBL-004, TBL-005, TBL-006, TBL-008, TBL-009, TBL-003, TBL-013 | API-014, API-015, API-017 | TC-062, TC-063, TC-064 |
+| FR-023 | CMP-003, CMP-006 | TBL-004, TBL-005, TBL-009, TBL-013 | — (scheduled job) | TC-065, TC-066 |
+| FR-024 | CMP-002, CMP-003 | TBL-013 | API-018 (read) | TC-080 |
+| FR-025 | CMP-002 | TBL-010, TBL-005, TBL-012, TBL-013 | API-016, API-017, API-018 | TC-081, TC-082 |
+| FR-026 | CMP-002, CMP-003 | — (dependency pings only) | API-019, API-020 | TC-090 |
+| FR-027 | CMP-001, CMP-002, CMP-009 | — (static text) | API-009 | TC-048 |
+| FR-028 | CMP-003, CMP-005 | TBL-005, TBL-009, TBL-012 | — (worker-internal) | TC-055, TC-056 |
+| FR-029 | CMP-002, CMP-003 | TBL-005, TBL-010 | API-005, API-008, API-009, API-013, API-020 | TC-050, TC-051, TC-052, TC-053, TC-054 |
+| FR-030 | CMP-002 | TBL-005, TBL-006, TBL-007, TBL-008 | API-009 | TC-033, TC-045 |
+| NFR-001 | CMP-002, CMP-006 | TBL-004 | API-005 | TC-100 |
+| NFR-002 | CMP-003, CMP-007 | TBL-005, TBL-011 | API-009 | TC-101 |
+| NFR-003 | CMP-002, CMP-004 | TBL-005, TBL-010 | API-002, API-009, API-010 | TC-102 |
+| NFR-004 | CMP-009 | TBL-009 | API-012 | TC-070 |
+| NFR-005 | CMP-003, CMP-005 | TBL-005 | API-008 | TC-103 |
+| NFR-006 | CMP-002, CMP-010 | — (infra) | API-020 | TC-090 (monitor) |
+| NFR-007 | CMP-003 | TBL-012 | API-015 | TC-063 |
+| NFR-008 | CMP-003 | TBL-004, TBL-009 | — (job) | TC-065, TC-066 |
+| NFR-009 | CMP-002, CMP-001 | — | all | TC-110 |
+| NFR-010 | CMP-003, CMP-007 | TBL-006, TBL-008 | API-009 | TC-035 |
+| NFR-011 | CMP-010, CMP-002, CMP-003 | TBL-013, TBL-011 | all | TC-111 |
+| NFR-012 | CMP-007 | TBL-011 | — (dashboard) | TC-112 |
+| NFR-013 | CMP-001 | — | — | TC-113 |
+| NFR-014 | CMP-001 | — | — | TC-114 |
+| NFR-015 | CMP-004 | all | — | TC-115 |
+| NFR-016 | all code | — | — | TC-116 |
+| NFR-017 | CMP-007 (stub adapter) | — | — | TC-117 |
+| NFR-018 | CMP-003, CMP-005 | TBL-005 | API-009 | TC-055 |
+
+**Company-wide requirement → where satisfied**
+
+| CR | Satisfied by |
+|---|---|
+| CR-001 | this table |
+| CR-002, CR-003, CR-004, CR-005 | §6.1 auth rule, `common/auth/jwt-auth.guard.ts` (CMP-002), JWKS cache in CMP-005, `worker.ts` without JWT; TC-005, TC-006 |
+| CR-006, CR-007, CR-008 | §1.2 table, `roles.guard.ts`, ownership checks in services (404 on foreign ids); TC-007, TC-008 |
+| CR-009, CR-010, CR-011, CR-012, CR-013 | `common/logging/*` with redaction, `request-id.interceptor.ts`, TBL-013, retention config; TC-080, TC-111 |
+| CR-014, CR-015, CR-016, CR-017, CR-018 | §6.1 envelope, §6.3 list, `http-exception.filter.ts`, §4.4 timeouts/retries, web error component; TC-009, TC-050–TC-054 |
+| CR-019 – CR-028 | TLS/HSTS config, `gitleaks` CI, DTO validation, CR-022 prompt data block (FR-012), Helmet/CSP, Redis rate limiter (FR-004, §6.1), PII flags §5.2 + purge FR-023, SSE-KMS + managed encryption, `pnpm audit`, processor table §4.4 + L-1/L-2; TC-010–TC-014, TC-035, TC-052, TC-110 |
+| CR-029, CR-030, CR-031 | `next-intl` catalogue, ISO-8601 fields (§6.1), FR-016 AC-4; TC-114 |
+| CR-032 – CR-035 | `config/env.schema.ts`, `.env.example`, separate resources per env, seed script; TC-116 |
+| CR-036 – CR-040 | `.github/workflows/ci.yml`, tag releases, `prisma migrate deploy` in pipeline, runbook, API-019/API-020 + Sentry/uptime; TC-090 |
+
+### 7.2 Verification cases
+
+| TC | Type | Verifies | Summary |
+|---|---|---|---|
+| TC-001 | API integration | FR-001 | only active roles, sorted; levels with bands; cache header |
+| TC-002 | API integration | FR-002 | free month / premium day counters; `resetsAt` at period boundary in `Asia/Kolkata` |
+| TC-003 | API integration | FR-003 | upload/start without consent → 403 `ERR-006`; consent row + audit on accept |
+| TC-004 | API integration | FR-003 | version bump requires re-acceptance; repeat accept returns 200 original time |
+| TC-005 | API integration | CR-002/003 | expired token, wrong `kid`, wrong issuer → 401; valid token → principal |
+| TC-006 | unit | CR-003 | JWKS cache TTL 10 min, refresh on unknown `kid`, 60 s skew |
+| TC-007 | unit | CR-006 | every route has `@Roles()` or `@Public()` |
+| TC-008 | API integration | CR-007 | user B on user A's resume/analysis/report → 404 |
+| TC-009 | contract | CR-014 | every error response validates against the envelope schema |
+| TC-010 | API integration | FR-004 | PDF 4.9 MiB accepted; 5 MiB + 1 byte → 413; wrong declared type → 415 |
+| TC-011 | API integration | FR-004 | 11th upload in an hour → 429 with `Retry-After`; pending erasure → 409 |
+| TC-012 | API integration | FR-005 | `.docx` bytes declared as PDF → 415 `ERR-012`; zip without `word/document.xml` → 415 |
+| TC-013 | API integration | FR-005 | encrypted PDF → 422 `ERR-014`; 11-page PDF → 422 `ERR-016`; truncated PDF → 422 `ERR-015` |
+| TC-014 | API integration | FR-005 | rejected file never appears in MinIO; audit row `resume.rejected` present |
+| TC-015 | API integration | FR-007 | stored key format, SSE header, no temp file left; MinIO put failure → 503 `ERR-034` and no DB row |
+| TC-020 | worker integration | FR-006 | PDF and DOCX fixtures → `ready`, text NFC-normalised, control chars stripped |
+| TC-021 | worker integration | FR-006 | image-only PDF → `extraction_failed` `TEXT_TOO_SHORT`; 70k-char DOCX → `TEXT_TOO_LONG` |
+| TC-030 | API integration | FR-008 | validation matrix: bad level 400, inactive role 422, foreign resume 404, extracting resume 409 |
+| TC-031 | API integration | FR-010 | status progression and `Retry-After` on non-terminal reads |
+| TC-032 | unit | FR-011 | weighted sum and round-half-up on boundary cases (e.g. 74.5 → 75); `null` dimension → 0 + flag |
+| TC-033 | worker integration (AI stub) | FR-011, FR-014–016, FR-030 | golden AI response → persisted rows match expected; response shape equals API-009 schema |
+| TC-034 | unit | FR-012 | masking regexes (e-mail, +91 and 10-digit phones, URLs, PIN); data-block delimiters present; no masked text persisted |
+| TC-035 | worker integration (AI stub) | FR-014, NFR-010, CR-022 | 10 prompt-injection fixtures → schema-valid; fabricated-number rewrite dropped; invented employer dropped; non-substring evidence dropped; skill present in text not reported missing |
+| TC-036 | worker integration (AI stub) | FR-013 | timeout ×3 → `AI_TIMEOUT`, 3 `ai_calls` rows, counter refunded |
+| TC-037 | worker integration (AI stub) | FR-013 | 429 with `retry-after` honoured; 5xx retried; 400 not retried → `AI_PROVIDER_ERROR` |
+| TC-038 | worker integration (AI stub) | FR-013 | malformed JSON then valid → success; malformed twice → `AI_MALFORMED_RESPONSE`; `refusal` → `AI_REFUSED` no refund |
+| TC-039 | worker integration | FR-013 | 5 failures in 60 s open the circuit; job re-queued with 30 s delay without consuming an attempt |
+| TC-040 | API integration | FR-009 | free user 4th analysis in month → 402 with details; premium 21st in day → 402 |
+| TC-041 | API integration (concurrency) | FR-009, BR-004 | 20 parallel starts with 1 quota left → exactly 1 × 202, 19 × 402/409; counter = limit |
+| TC-042 | API integration | FR-009 | Redis flushed mid-period → DB still authoritative; Redis down → start works via DB path |
+| TC-043 | worker integration | BR-007 | refund on `AI_*`/`INTERNAL`; no refund on `TEXT_TOO_SHORT`, `AI_REFUSED`, `CANCELLED` |
+| TC-045 | API integration | FR-015–FR-017 | free token → 3 unlocked suggestions, 5 skills, rest `{locked:true}` with totals; premium token on same analysis → all unlocked |
+| TC-046 | worker integration | FR-017, FR-019 | free user's PDF contains partial lists and upgrade note |
+| TC-047 | API integration | FR-018 | pagination, filters, deleted excluded, `reportAvailable` |
+| TC-048 | unit + Playwright | FR-027 | disclaimer text in API, UI and PDF; forbidden phrases absent from locale file |
+| TC-050 | chaos (Redis stopped) | FR-029 | reads 200; upload/start 503 `ERR-031`; `/ready` 503 |
+| TC-051 | chaos (Postgres stopped) | FR-029 | all requests 503; worker paused; jobs retained; resumes when DB returns |
+| TC-052 | chaos (Redis stopped) | CR-024 | write routes fail closed, read routes open |
+| TC-053 | chaos (MinIO stopped) | FR-029 | upload 503 `ERR-034`; report URL 503; ready analyses still readable |
+| TC-054 | chaos (AI stub down) | FR-029 | starts 202; circuit opens; failures reported with refund |
+| TC-055 | chaos (worker killed mid-job) | FR-028, NFR-018 | stalled job re-queued; re-run is idempotent; exactly one result persisted |
+| TC-056 | worker integration | FR-028 | re-running a job on a `completed` analysis is a no-op (no new rows, no AI call) |
+| TC-060 | API integration | FR-021, FR-024 | delete resume → objects gone, PII nulled, `deleted_at` set, analyses cancelled, audit rows |
+| TC-061 | API integration | FR-007, FR-021 | second delete → 204; MinIO delete failure → 503 and row unchanged |
+| TC-062 | worker integration | FR-022 | erasure completes: all objects deleted, all PII nulled, consent withdrawn, request `completed` |
+| TC-063 | worker integration | FR-022, NFR-007 | completion within test budget; status endpoint reflects it |
+| TC-064 | worker integration | FR-022 | storage delete failing 5× → `failed`, Sentry event; admin re-run succeeds |
+| TC-065 | job integration | FR-023, NFR-008 | files purged 24 h after terminal; text nulled after 30 d; reports after 30 d (clock injected) |
+| TC-066 | job integration | FR-023 | advisory lock prevents concurrent purge; batch limit 500; analyses > 365 d hard-deleted with cascades |
+| TC-070 | worker integration | FR-019, NFR-004 | PDF renders ≤ 5 s, ≤ 2 MB, ≤ 6 pages; content sections present |
+| TC-071 | worker integration | FR-019 | render error → `failed`; 3 failures → `blocked_until`; API-012 → 429 `ERR-035` |
+| TC-072 | API integration | FR-020 | owner gets 300 s URL with attachment filename; audit `report.downloaded` |
+| TC-073 | API integration | FR-020 | non-owner → 404; generating → no URL + `Retry-After` |
+| TC-080 | API integration | FR-024, CR-012 | audit rows for upload/start/complete/fail/download/delete/consent; no PII in `details`; app role cannot UPDATE/DELETE audit rows |
+| TC-081 | API integration | FR-025 | admin usage view has no text fields; audit `admin.viewed_usage` written |
+| TC-082 | API integration | FR-025 | admin erasure request stores `requested_by_admin_id`; user role → 403 |
+| TC-090 | API integration | FR-026, CR-040 | `/ready` 503 names the failing dependency; `/health` 200 |
+| TC-100 | k6 | NFR-001 | upload p95 < 3 s at 20 concurrent |
+| TC-101 | k6 + AI stub latency profile | NFR-002 | end-to-end p95 < 45 s |
+| TC-102 | k6 | NFR-003 | read p95 < 300 ms at 50 req/s |
+| TC-103 | k6 | NFR-005 | 1 000 analyses/hour with 4 worker processes, no job loss |
+| TC-110 | ZAP + pnpm audit | NFR-009 | 0 high findings |
+| TC-111 | manual per release | NFR-011 | `requestId` traced web → api → worker log → Sentry |
+| TC-112 | SQL on `ai_calls` | NFR-012 | token averages under budget; alert rule exists |
+| TC-113 | axe in Playwright | NFR-013 | 0 serious violations on three screens |
+| TC-114 | Playwright projects | NFR-014, CR-029 | flows pass on listed browsers; no literal strings |
+| TC-115 | runbook drill | NFR-015 | restore from snapshot + PITR verified |
+| TC-116 | CI | NFR-016, CR-032 | typecheck, lint, coverage gates; env schema fails fast on missing var |
+| TC-117 | CI | NFR-017 | pipeline tests run with network disabled using the stub adapter |
+
+### 7.3 Internal consistency rules (checked before every release of this document)
+
+1. Every `CR-`, `FR-`, `NFR-`, `CMP-`, `TBL-`, `API-`, `ERR-`, `BR-`, `A-`, `TC-` id referenced anywhere is defined exactly once.
+2. The file-size limit (5 MiB) is identical in FR-004, `TBL-004.size_bytes` check, API-005 validation and ERR-010.
+3. Scoring weights in FR-011, `TBL-006.weight` snapshots and the API-009 example sum to 100.
+4. Every error code named in an FR acceptance criterion or a sequence diagram exists in §6.3 with the same HTTP status.
+5. Every status value used in §3, §4 and §6 appears in the matching `CHECK` constraint in §5.2.
+6. Every endpoint in the §6.2 index has a specification block and appears in at least one row of §7.1.
+7. Every table in §5.2 appears in at least one row of §7.1.
 
 ---
 
 ## 8. Change log
 
+**Process.** This document is changed only by a commit in `sandip/` with a message `docs(spec): …`. Versioning: **MAJOR** = an API contract or data model change that breaks an existing consumer, or removal of an FR/BR; **MINOR** = new or changed requirement, table, endpoint, error code or business rule; **PATCH** = clarification with no behavioural change. IDs are permanent; a removed item is marked **Deprecated** (row kept, reason and replacement named). Every entry lists the affected IDs, and the author re-checks §7 so the traceability matrix and the consistency rules in §7.3 still hold. An assumption confirmed or overturned by a stakeholder moves out of §3.3.2 in the same change and is recorded here.
+
 | Version | Date | Author | What changed | Why | Affected IDs |
 |---|---|---|---|---|---|
-| v1.0 | YYYY-MM-DD | <name> | Initial version | — | — |
+| v0.1 | 2026-10-19 | Sandip Kumar Mondal | Outline created from the standard template; sections 1–2 (company-wide requirements, coding conventions) written for a NestJS + Next.js + PostgreSQL + Redis project. | Round 1 start; brief and template received 2026-10-14. | CR-001–CR-040 |
+| v1.0 | 2026-10-19 | Sandip Kumar Mondal | First complete version: 30 FRs with acceptance criteria, 18 NFRs, 16 assumptions, 16 business rules, constants, out-of-scope and DPDP legal questions (§3); 10 components, 7 sequence diagrams with failure paths, integrations, stack reasons (§4); 13 tables, 21 indexes, delete rules (§5); 20 endpoints and 35 error codes (§6); traceability and 70 verification cases (§7). | Round 1 submission — buildable from this document alone. | FR-001–FR-030, NFR-001–NFR-018, A-01–A-16, BR-001–BR-016, CMP-001–CMP-010, TBL-001–TBL-013, API-001–API-020, ERR-001–ERR-047 |
