@@ -807,3 +807,373 @@ Validation rules: exactly the six dimensions, each once; `score` integer 0–100
 
 ---
 
+## 5. ERD and database design
+
+### 5.1 ERD
+
+```mermaid
+erDiagram
+  USERS ||--o{ CONSENTS : gives
+  USERS ||--o{ RESUMES : owns
+  USERS ||--o{ ANALYSES : requests
+  USERS ||--o{ USAGE_COUNTERS : has
+  USERS ||--o{ AUDIT_LOGS : "is subject of"
+  PLAN_LIMITS ||--o{ USERS : "applies to (by plan)"
+  JOB_ROLES ||--o{ ROLE_SKILLS : defines
+  JOB_ROLES ||--o{ ANALYSES : "is target of"
+  RESUMES ||--o{ ANALYSES : "is analysed in"
+  ANALYSES ||--|{ ANALYSIS_SCORES : has
+  ANALYSES ||--o{ MISSING_SKILLS : lists
+  ANALYSES ||--o{ REWRITE_SUGGESTIONS : lists
+
+  USERS {
+    uuid id PK
+    text plan
+    text role
+    timestamptz plan_updated_at
+    timestamptz erased_at
+    timestamptz created_at
+  }
+  CONSENTS {
+    uuid id PK
+    uuid user_id FK
+    text version
+    timestamptz accepted_at
+    timestamptz withdrawn_at
+  }
+  JOB_ROLES {
+    uuid id PK
+    text slug UK
+    text title
+    text category
+    boolean is_active
+  }
+  ROLE_SKILLS {
+    uuid id PK
+    uuid job_role_id FK
+    text name
+    text importance
+    text min_level
+    int sort_order
+  }
+  RESUMES {
+    uuid id PK
+    uuid user_id FK
+    text status
+    text original_filename
+    text mime_type
+    bigint size_bytes
+    int page_count
+    text storage_key
+    bytea extracted_text
+    int text_char_count
+    timestamptz purge_at
+    timestamptz purged_at
+  }
+  ANALYSES {
+    uuid id PK
+    uuid user_id FK
+    uuid resume_id FK
+    uuid job_role_id FK
+    text experience_level
+    text status
+    int overall_score
+    text error_code
+    boolean quota_refunded
+  }
+  ANALYSIS_SCORES {
+    uuid id PK
+    uuid analysis_id FK
+    text dimension
+    int score
+    int weight
+    text feedback
+  }
+  MISSING_SKILLS {
+    uuid id PK
+    uuid analysis_id FK
+    int rank
+    text name
+    text importance
+  }
+  REWRITE_SUGGESTIONS {
+    uuid id PK
+    uuid analysis_id FK
+    int rank
+    text section
+    text original_line
+    text suggested_line
+    text reason
+  }
+  USAGE_COUNTERS {
+    uuid user_id PK
+    text period PK
+    int analyses_count
+  }
+  PLAN_LIMITS {
+    text plan PK
+    int analyses_per_month
+    int visible_missing_skills
+    int visible_rewrite_suggestions
+  }
+  AUDIT_LOGS {
+    uuid id PK
+    uuid user_id FK
+    text actor
+    text action
+    uuid entity_id
+    jsonb metadata
+    timestamptz created_at
+  }
+```
+
+### 5.2 Tables
+
+All tables: `id uuid PK DEFAULT gen_random_uuid()` unless stated; `created_at timestamptz NOT NULL DEFAULT now()`; `updated_at timestamptz NOT NULL DEFAULT now()` maintained by a trigger `set_updated_at()` where listed. Enum-like columns are `text` with `CHECK`.
+
+#### TBL-001 `users`
+Purpose: one row per platform user who has used the module; mirrors plan; never stores personal contact data.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | — | Equals the platform JWT `sub`. Not generated here. |
+| plan | text | NO | FK → plan_limits.plan | `'free'` | `CHECK (plan IN ('free','pro'))` |
+| role | text | NO | | `'user'` | `CHECK (role IN ('user','admin'))`; mirrored from JWT |
+| plan_updated_at | timestamptz | NO | | `now()` | Set when `plan` changes (JWT or webhook) |
+| erased_at | timestamptz | YES | | NULL | Set by FR-018 / FR-021; cleared when the user gives consent again |
+| last_seen_at | timestamptz | NO | | `now()` | Updated at most once per hour by the auth middleware |
+| created_at | timestamptz | NO | | `now()` | |
+| updated_at | timestamptz | NO | | `now()` | trigger |
+
+#### TBL-002 `consents`
+Purpose: DPDP consent records per user and consent-text version.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | FK → users.id | — | ON DELETE RESTRICT (users rows are never deleted) |
+| version | text | NO | | — | `CHECK (version ~ '^v[0-9]+$')`; current is `v1` |
+| accepted_at | timestamptz | NO | | `now()` | |
+| withdrawn_at | timestamptz | YES | | NULL | Set on erasure. Active consent = `withdrawn_at IS NULL AND version = current` |
+| created_at | timestamptz | NO | | `now()` | |
+
+Unique: `uq_consents_user_id_version_active` — partial unique index on `(user_id, version) WHERE withdrawn_at IS NULL` (one active row per version).
+
+#### TBL-003 `job_roles`
+Purpose: catalogue of target roles.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| slug | text | NO | UK | — | `CHECK (slug ~ '^[a-z0-9-]{2,64}$')`; used in URLs |
+| title | text | NO | | — | `CHECK (char_length(title) BETWEEN 2 AND 100)` |
+| category | text | NO | | — | `CHECK (category IN ('engineering','data','product','design','qa','devops','management','other'))` |
+| is_active | boolean | NO | | `true` | Inactive roles are hidden from users but kept for existing analyses |
+| created_at | timestamptz | NO | | `now()` | |
+| updated_at | timestamptz | NO | | `now()` | trigger |
+
+#### TBL-004 `role_skills`
+Purpose: skills expected for a role from a given level upward.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| job_role_id | uuid | NO | FK → job_roles.id | — | ON DELETE CASCADE |
+| name | text | NO | | — | `CHECK (char_length(name) BETWEEN 1 AND 80)`; unique per role (case-insensitive) via `uq_role_skills_role_lower_name` on `(job_role_id, lower(name))` |
+| importance | text | NO | | `'required'` | `CHECK (importance IN ('required','preferred'))` |
+| min_level | text | NO | | `'entry'` | `CHECK (min_level IN ('entry','mid','senior','lead'))`; the skill applies to this level and above |
+| sort_order | int | NO | | 0 | Display order within the role |
+| created_at | timestamptz | NO | | `now()` | |
+
+#### TBL-005 `resumes`
+Purpose: uploaded resume metadata and encrypted extracted text.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | Also used as the S3 key suffix |
+| user_id | uuid | NO | FK → users.id | — | ON DELETE CASCADE |
+| status | text | NO | | `'READY'` | `CHECK (status IN ('READY','PURGED'))` |
+| original_filename | text | NO | | — | `CHECK (char_length(original_filename) BETWEEN 1 AND 255)`, sanitised (FR-002 rule 10) |
+| mime_type | text | NO | | — | `CHECK (mime_type IN ('application/pdf','application/vnd.openxmlformats-officedocument.wordprocessingml.document'))` |
+| size_bytes | bigint | NO | | — | `CHECK (size_bytes > 0 AND size_bytes <= 5242880)` |
+| page_count | int | YES | | NULL | PDF only; `CHECK (page_count IS NULL OR (page_count BETWEEN 1 AND 10))` |
+| sha256 | char(64) | NO | | — | Hex digest of the file; used to report `duplicate_of` in API-005 |
+| storage_key | text | YES | | — | `resumes/{user_id}/{id}.pdf` or `.docx`; NULL after purge |
+| extracted_text | bytea | YES | | — | AES-256-GCM ciphertext (12-byte nonce ‖ ciphertext ‖ 16-byte tag); NULL after purge |
+| text_char_count | int | NO | | — | `CHECK (text_char_count BETWEEN 200 AND 30000)` |
+| purge_at | timestamptz | NO | | — | `created_at + RETENTION_RESUME_DAYS`; shown to the user |
+| purged_at | timestamptz | YES | | NULL | |
+| purge_error | boolean | NO | | `false` | Set when S3 delete failed; retried next run |
+| created_at | timestamptz | NO | | `now()` | |
+| updated_at | timestamptz | NO | | `now()` | trigger |
+
+#### TBL-006 `analyses`
+Purpose: one analysis request and its outcome.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | FK → users.id | — | ON DELETE CASCADE |
+| resume_id | uuid | NO | FK → resumes.id | — | ON DELETE CASCADE (a resume row is never deleted except by erasure, which deletes analyses too) |
+| job_role_id | uuid | NO | FK → job_roles.id | — | ON DELETE RESTRICT |
+| job_role_title | text | NO | | — | Copied at creation so renames do not change history |
+| experience_level | text | NO | | — | `CHECK (experience_level IN ('entry','mid','senior','lead'))` |
+| status | text | NO | | `'QUEUED'` | `CHECK (status IN ('QUEUED','PROCESSING','COMPLETED','FAILED'))` |
+| overall_score | int | YES | | NULL | `CHECK (overall_score IS NULL OR overall_score BETWEEN 0 AND 100)`; NOT NULL when COMPLETED (enforced in service) |
+| error_code | text | YES | | NULL | `CHECK (error_code IS NULL OR error_code IN ('AI_UNAVAILABLE','AI_INVALID_RESPONSE'))`; set when FAILED |
+| ai_model | text | YES | | NULL | e.g. `claude-sonnet-5-5` |
+| ai_input_tokens | int | YES | | NULL | |
+| ai_output_tokens | int | YES | | NULL | |
+| attempts | int | NO | | 0 | Incremented by the worker per attempt |
+| quota_period | text | NO | | — | `YYYY-MM` (IST) in which quota was reserved; used for refunds |
+| quota_refunded | boolean | NO | | `false` | |
+| started_at | timestamptz | YES | | NULL | |
+| completed_at | timestamptz | YES | | NULL | Set for COMPLETED and FAILED |
+| created_at | timestamptz | NO | | `now()` | |
+| updated_at | timestamptz | NO | | `now()` | trigger |
+
+#### TBL-007 `analysis_scores`
+Purpose: six dimension scores per completed analysis.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| analysis_id | uuid | NO | FK → analyses.id | — | ON DELETE CASCADE |
+| dimension | text | NO | | — | `CHECK (dimension IN ('keyword_match','impact_quantification','section_completeness','length_relevance','formatting','readability'))` |
+| score | int | NO | | — | `CHECK (score BETWEEN 0 AND 100)` |
+| weight | int | NO | | — | `CHECK (weight BETWEEN 0 AND 100)`; copied from FR-009 |
+| feedback | text | NO | | — | `CHECK (char_length(feedback) BETWEEN 1 AND 400)` |
+
+Unique: `uq_analysis_scores_analysis_id_dimension (analysis_id, dimension)`.
+
+#### TBL-008 `missing_skills`
+Purpose: skills from the catalogue not evidenced in the resume.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| analysis_id | uuid | NO | FK → analyses.id | — | ON DELETE CASCADE |
+| rank | int | NO | | — | `CHECK (rank BETWEEN 1 AND 50)`; 1 = most important |
+| name | text | NO | | — | Copied from `role_skills.name` |
+| importance | text | NO | | — | `CHECK (importance IN ('required','preferred'))` |
+
+Unique: `uq_missing_skills_analysis_id_rank (analysis_id, rank)`.
+
+#### TBL-009 `rewrite_suggestions`
+Purpose: rewrite suggestions for weak lines.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| analysis_id | uuid | NO | FK → analyses.id | — | ON DELETE CASCADE |
+| rank | int | NO | | — | `CHECK (rank BETWEEN 1 AND 10)` |
+| section | text | NO | | — | `CHECK (section IN ('summary','experience','education','skills','projects','other'))` |
+| original_line | text | NO | | — | `CHECK (char_length(original_line) BETWEEN 1 AND 300)` (resume content, personal data) |
+| suggested_line | text | NO | | — | `CHECK (char_length(suggested_line) BETWEEN 1 AND 300)` |
+| reason | text | NO | | — | `CHECK (char_length(reason) BETWEEN 1 AND 300)` |
+
+Unique: `uq_rewrite_suggestions_analysis_id_rank (analysis_id, rank)`.
+
+#### TBL-010 `usage_counters`
+Purpose: analyses started per user per month; the quota source of truth.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| user_id | uuid | NO | PK, FK → users.id | — | ON DELETE CASCADE |
+| period | text | NO | PK | — | `CHECK (period ~ '^[0-9]{4}-[0-9]{2}$')`, IST calendar month |
+| analyses_count | int | NO | | 0 | `CHECK (analyses_count >= 0)` |
+| updated_at | timestamptz | NO | | `now()` | trigger |
+
+Composite PK `(user_id, period)`.
+
+#### TBL-011 `audit_logs`
+Purpose: DPDP accountability trail of processing events; no resume content.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | YES | FK → users.id | — | ON DELETE SET NULL; NULL for admin catalogue changes and retention runs |
+| actor | text | NO | | — | `CHECK (actor IN ('user','admin','platform','system'))` |
+| action | text | NO | | — | `CHECK (action IN ('CONSENT_GIVEN','RESUME_UPLOADED','RESUME_DELETED','ANALYSIS_CREATED','ANALYSIS_DELETED','REPORT_DOWNLOADED','DATA_EXPORTED','DATA_ERASED','PLAN_CHANGED','RETENTION_PURGE','JOB_ROLE_CHANGED','PLAN_LIMIT_CHANGED'))` |
+| entity_id | uuid | YES | | NULL | Resume, analysis or role id |
+| metadata | jsonb | NO | | `'{}'` | Small facts only (counts, old/new plan, size). Never text content or filenames. |
+| request_id | uuid | YES | | NULL | |
+| created_at | timestamptz | NO | | `now()` | |
+
+#### TBL-012 `plan_limits`
+Purpose: configurable limits per plan (seeded, admin editable).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| plan | text | NO | PK | — | `CHECK (plan IN ('free','pro'))` |
+| analyses_per_month | int | NO | | — | `CHECK (analyses_per_month BETWEEN 1 AND 1000)` |
+| visible_missing_skills | int | YES | | NULL | NULL = unlimited; `CHECK (visible_missing_skills IS NULL OR visible_missing_skills BETWEEN 0 AND 100)` |
+| visible_rewrite_suggestions | int | YES | | NULL | NULL = unlimited; same range |
+| updated_at | timestamptz | NO | | `now()` | trigger |
+
+Seed rows: `('free', 3, 3, 2)`, `('pro', 50, NULL, NULL)`.
+
+### 5.3 Indexes
+
+| Table | Index | Columns | Why |
+|---|---|---|---|
+| consents | `idx_consents_user_id` | (user_id, withdrawn_at) | Consent check on every upload/analysis request (FR-001) |
+| consents | `uq_consents_user_id_version_active` | (user_id, version) WHERE withdrawn_at IS NULL | Idempotent consent (FR-001 rule 3) |
+| job_roles | `uq_job_roles_slug` | (slug) | Lookup by slug in API-004, API-009 |
+| job_roles | `idx_job_roles_active_title` | (is_active, title) | Listing active roles ordered by title (API-003) |
+| role_skills | `idx_role_skills_role_level` | (job_role_id, min_level, importance, sort_order) | Skills for a role and level (API-004, worker) |
+| role_skills | `uq_role_skills_role_lower_name` | (job_role_id, lower(name)) | No duplicate skills per role |
+| resumes | `idx_resumes_user_status_created` | (user_id, status, created_at DESC) | User's resume list (API-006) and the 10-resume cap (FR-002 rule 7) |
+| resumes | `idx_resumes_user_sha256` | (user_id, sha256) WHERE status = 'READY' | `duplicate_of` lookup on upload (API-005) |
+| resumes | `idx_resumes_purge` | (purge_at) WHERE status = 'READY' | Daily purge selection (FR-017) |
+| analyses | `idx_analyses_user_created` | (user_id, created_at DESC) | User's analysis list (API-010) |
+| analyses | `idx_analyses_in_progress` | (resume_id, job_role_id, experience_level) WHERE status IN ('QUEUED','PROCESSING') | Duplicate check (FR-007 rule 4) and resume-in-use check (FR-005 rule 3) |
+| analyses | `idx_analyses_status_created` | (status, created_at) | Worker startup sweep (4.3 flow F) |
+| analyses | `idx_analyses_completed` | (completed_at) WHERE status IN ('COMPLETED','FAILED') | 365-day purge (FR-017) |
+| analysis_scores | `uq_analysis_scores_analysis_id_dimension` | (analysis_id, dimension) | One row per dimension; load by analysis |
+| missing_skills | `uq_missing_skills_analysis_id_rank` | (analysis_id, rank) | Ordered load and gating by rank (FR-014) |
+| rewrite_suggestions | `uq_rewrite_suggestions_analysis_id_rank` | (analysis_id, rank) | Same |
+| usage_counters | PK | (user_id, period) | Atomic upsert in FR-013 |
+| audit_logs | `idx_audit_logs_user_created` | (user_id, created_at DESC) | Export (FR-018) |
+| audit_logs | `idx_audit_logs_created` | (created_at) | 365-day purge |
+
+### 5.4 Relationships and delete rules
+
+| From | To | Cardinality | On delete |
+|---|---|---|---|
+| consents.user_id | users.id | N:1 | RESTRICT. `users` rows are never deleted; erasure sets `erased_at` and `withdrawn_at`. |
+| resumes.user_id | users.id | N:1 | CASCADE (only reachable via erasure, which first deletes S3 objects). |
+| analyses.user_id | users.id | N:1 | CASCADE. |
+| analyses.resume_id | resumes.id | N:1 | CASCADE. A resume row is never deleted outside erasure; user deletion of a resume (FR-005) only purges file and text, so analyses survive. |
+| analyses.job_role_id | job_roles.id | N:1 | RESTRICT. Roles are deactivated, never deleted. |
+| analysis_scores.analysis_id | analyses.id | 6:1 | CASCADE. |
+| missing_skills.analysis_id | analyses.id | N:1 | CASCADE. |
+| rewrite_suggestions.analysis_id | analyses.id | N:1 | CASCADE. |
+| role_skills.job_role_id | job_roles.id | N:1 | CASCADE. |
+| usage_counters.user_id | users.id | N:1 | CASCADE. |
+| audit_logs.user_id | users.id | N:1 | SET NULL (never triggered in practice). |
+| users.plan | plan_limits.plan | N:1 | RESTRICT. |
+
+**What happens when a user asks to delete their data (FR-018):** S3 objects deleted → `analyses` (and children by cascade), `resumes`, `usage_counters` deleted → active consent withdrawn → `users.erased_at` set → audit row written. The `users` and `audit_logs` rows remain because DPDP requires an accountability record of the erasure itself; they contain no personal data beyond the platform UUID.
+
+### 5.5 Seed data
+
+`seed/plan_limits.json` contains the two rows in TBL-012. `seed/job_roles.json` contains the following 10 roles. `min_level` is the lowest level the skill applies to. Skills are `required` unless marked `(preferred)`; `sort_order` is the position in the list.
+
+| Slug | Title | Category | Skills (min_level) |
+|---|---|---|---|
+| `backend-engineer-go` | Backend Engineer (Go) | engineering | Go (entry), REST API design (entry), PostgreSQL (entry), Git (entry), Unit testing (entry), Docker (entry), Redis (mid), gRPC (mid, preferred), Concurrency patterns (mid), Message queues (mid), Kubernetes (senior), System design (senior), Observability (senior), Mentoring (lead), Architecture ownership (lead) |
+| `backend-engineer-nodejs` | Backend Engineer (Node.js) | engineering | Node.js (entry), TypeScript (entry), NestJS or Express (entry), REST API design (entry), PostgreSQL (entry), Git (entry), Jest (entry), Docker (entry), Redis (mid), Message queues (mid), GraphQL (mid, preferred), Kubernetes (senior), System design (senior), Performance tuning (senior), Mentoring (lead) |
+| `backend-engineer-java` | Backend Engineer (Java) | engineering | Java 17+ (entry), Spring Boot (entry), JPA/Hibernate (entry), REST API design (entry), PostgreSQL (entry), Maven or Gradle (entry), JUnit (entry), Docker (entry), Kafka (mid), Redis (mid), Microservices (mid), Kubernetes (senior), System design (senior), Security (OAuth2) (senior), Mentoring (lead) |
+| `frontend-engineer-react` | Frontend Engineer (React) | engineering | JavaScript (entry), TypeScript (entry), React (entry), HTML/CSS (entry), Git (entry), REST integration (entry), Testing Library (entry), Next.js (mid), State management (mid), Accessibility (mid), Performance optimisation (senior), Design systems (senior), CI/CD (senior, preferred), Mentoring (lead), Frontend architecture (lead) |
+| `fullstack-engineer` | Full-stack Engineer | engineering | JavaScript/TypeScript (entry), React (entry), Node.js (entry), SQL (entry), REST API design (entry), Git (entry), Docker (entry), Next.js (mid), Authentication (mid), Caching (mid), Cloud (AWS) (senior), System design (senior), CI/CD (senior), Mentoring (lead) |
+| `mobile-engineer-flutter` | Mobile Engineer (Flutter) | engineering | Dart (entry), Flutter (entry), State management (entry), REST integration (entry), Git (entry), Widget testing (entry), Firebase (mid), Offline storage (mid), App store release (mid), Native integration (senior), Performance profiling (senior), CI/CD for mobile (senior, preferred), Mentoring (lead) |
+| `data-analyst` | Data Analyst | data | SQL (entry), Excel (entry), Data visualisation (entry), Statistics (entry), Python or R (entry), Dashboards (Power BI/Tableau) (mid), Data cleaning (mid), A/B testing (mid), Data modelling (senior), Stakeholder communication (senior), Team leadership (lead) |
+| `data-engineer` | Data Engineer | data | SQL (entry), Python (entry), ETL concepts (entry), Git (entry), Airflow (mid), Spark (mid), Data warehousing (mid), Cloud (AWS/GCP) (mid), Kafka (senior), Data modelling (senior), Infrastructure as code (senior, preferred), Mentoring (lead) |
+| `qa-engineer` | QA Engineer | qa | Test case design (entry), Manual testing (entry), Bug reporting (entry), SQL (entry), API testing (Postman) (entry), Selenium or Playwright (mid), Test automation frameworks (mid), CI integration (mid), Performance testing (senior), Test strategy (senior), Team leadership (lead) |
+| `devops-engineer` | DevOps Engineer | devops | Linux (entry), Git (entry), Bash scripting (entry), Docker (entry), CI/CD (entry), AWS (mid), Terraform (mid), Kubernetes (mid), Monitoring (Prometheus/Grafana) (mid), Networking (senior), Security hardening (senior), Cost optimisation (senior, preferred), Platform leadership (lead) |
+
+`make seed` is idempotent: it upserts by `slug` and by `(job_role_id, lower(name))`.
+
+---
+
