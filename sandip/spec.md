@@ -1272,43 +1272,598 @@ Hard deletion of remaining rows happens by the retention purge (FR-023), which i
 ## 6. API design
 
 ### 6.1 Common rules
-- Base path:
-- Auth header / cookie:
-- Pagination format:
-- Date / time format and timezone:
-- Standard error format (must match section 1.4):
+
+- **Base path:** `https://<api-host>/api/v1/resume-optimizer` (local: `http://localhost:4000/api/v1/resume-optimizer`). Health endpoints live at the service root (`/health`, `/ready`).
+- **Auth header / cookie:** `Authorization: Bearer <platform JWT>` on every endpoint except `/health`, `/ready`. The guard verifies RS256 against the platform JWKS (CR-002) and exposes `principal = { userId: sub, plan, role }`. Admin endpoints additionally require `role = admin`. No API-key or anonymous access exists in v1.
+- **Content types:** requests `application/json` except API-005 (`multipart/form-data`); responses `application/json; charset=utf-8`. Success envelope: `{ "data": <object | array>, "meta"?: { … } }`.
+- **Pagination format:** offset pagination; query `page` (default 1, min 1) and `pageSize` (default 20, min 1, max 100); response `meta: { page, pageSize, total, totalPages }`. Sorting is fixed per endpoint (documented inline). Filters are query parameters; repeated params form arrays (`status=completed&status=failed`).
+- **Date / time format and timezone:** all instants are ISO-8601 UTC with `Z` (`2026-10-19T09:30:00.000Z`); the client renders in the viewer's timezone (CR-030). Period keys follow BR-003.
+- **IDs:** UUID v4 strings. Unknown or not-owned ids return 404 (CR-007).
+- **Headers:** request `X-Request-Id` optional (UUID v4; generated if absent); responses always carry `X-Request-Id` and `X-App-Version`; 429 responses carry `Retry-After` (seconds); non-terminal status responses carry `Retry-After: 2` as a polling hint.
+- **Rate limits (CR-024):** 120 req/min per user on all endpoints; API-005 additionally `RATE_LIMIT_UPLOAD` = 10/hour per user; API-008 additionally 30/hour per user. Enforced in Redis; fail closed for write endpoints when Redis is unavailable (503 `ERR-031`).
+- **Idempotency:** `DELETE` endpoints and API-012/API-014 are idempotent (a repeat returns the current state); API-008 is not idempotent by design (each call is a new analysis) and is protected by the in-flight rule (ERR-021).
+- **Validation:** DTO validation with `whitelist` and `forbidNonWhitelisted` (CR-021); unknown body fields → 400 `ERR-001`.
+- **Standard error format (must match section 1.4, CR-014):**
+
+```json
+{
+  "error": {
+    "code": "QUOTA_EXCEEDED",
+    "message": "You have used all 3 free analyses for October 2026.",
+    "details": { "limit": 3, "used": 3, "plan": "free", "resetsAt": "2026-10-31T18:30:00.000Z" },
+    "requestId": "6f1c2d3e-8a4b-4c5d-9e6f-0a1b2c3d4e5f"
+  }
+}
+```
+
+Validation errors: `code = "VALIDATION_ERROR"`, `details = { "fields": [ { "path": "experienceLevel", "message": "must be one of entry, mid, senior, lead" } ] }`.
 
 ### 6.2 Endpoints
-One block per endpoint.
 
-#### API-001 `<METHOD> <path>`
-- **Purpose:**
-- **Auth / role:**
-- **Implements:** FR-xxx
+Endpoint index:
+
+| ID | Method | Path | Auth | Implements |
+|---|---|---|---|---|
+| API-001 | GET | `/roles` | user, admin | FR-001 |
+| API-002 | GET | `/me/entitlements` | user | FR-002 |
+| API-003 | GET | `/consents/current` | user | FR-003 |
+| API-004 | POST | `/consents` | user | FR-003 |
+| API-005 | POST | `/resumes` | user | FR-004, FR-005, FR-007 |
+| API-006 | GET | `/resumes/{resumeId}` | user (own) | FR-006, FR-010 |
+| API-007 | DELETE | `/resumes/{resumeId}` | user (own) | FR-021 |
+| API-008 | POST | `/analyses` | user | FR-008, FR-009 |
+| API-009 | GET | `/analyses/{analysisId}` | user (own) | FR-010, FR-011, FR-015, FR-016, FR-017, FR-027, FR-030 |
+| API-010 | GET | `/analyses` | user | FR-018 |
+| API-011 | DELETE | `/analyses/{analysisId}` | user (own) | FR-021 |
+| API-012 | POST | `/analyses/{analysisId}/report` | user (own) | FR-019 |
+| API-013 | GET | `/analyses/{analysisId}/report` | user (own) | FR-020 |
+| API-014 | POST | `/me/deletion-requests` | user | FR-022 |
+| API-015 | GET | `/me/deletion-requests/{requestId}` | user (own) | FR-022 |
+| API-016 | GET | `/admin/users/{userId}/usage` | admin | FR-025 |
+| API-017 | POST | `/admin/users/{userId}/deletion-requests` | admin | FR-025, FR-022 |
+| API-018 | GET | `/admin/audit-logs` | admin | FR-024, FR-025 |
+| API-019 | GET | `/health` (service root) | public | FR-026 |
+| API-020 | GET | `/ready` (service root) | public | FR-026 |
+
+Common errors on every authenticated endpoint (not repeated below): 401 `ERR-002` (missing/invalid/expired token), 403 `ERR-003` (role not allowed), 429 `ERR-005`, 500 `ERR-030`, 503 `ERR-031`.
+
+#### API-001 `GET /roles`
+- **Purpose:** list active target roles and the experience levels.
+- **Auth / role:** user, admin.
+- **Implements:** FR-001
 
 **Request**
 
 | Field | In (path/query/body) | Type | Required | Validation |
 |---|---|---|---|---|
+| family | query | string | No | one of the `job_roles.family` values |
 
 **Response 200**
 
 ```json
-{}
+{
+  "data": {
+    "roles": [
+      { "id": "2b1e…", "slug": "backend-engineer", "title": "Backend Engineer", "family": "software", "description": "Server-side services and APIs" }
+    ],
+    "experienceLevels": [
+      { "value": "entry", "label": "Entry (0–2 years)" },
+      { "value": "mid", "label": "Mid (2–5 years)" },
+      { "value": "senior", "label": "Senior (5–10 years)" },
+      { "value": "lead", "label": "Lead (10+ years)" }
+    ]
+  }
+}
+```
+
+Headers: `Cache-Control: private, max-age=600`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | unknown `family` |
+
+#### API-002 `GET /me/entitlements`
+- **Purpose:** plan, quota used/remaining, reset time, in-flight analysis.
+- **Auth / role:** user.
+- **Implements:** FR-002
+
+**Request:** none.
+
+**Response 200**
+
+```json
+{
+  "data": {
+    "plan": "free",
+    "periodType": "month",
+    "periodKey": "2026-10",
+    "limit": 3,
+    "used": 1,
+    "remaining": 2,
+    "resetsAt": "2026-10-31T18:30:00.000Z",
+    "inFlightAnalysisId": null,
+    "consentRequired": false,
+    "erasurePending": false
+  }
+}
+```
+
+**Errors:** common only.
+
+#### API-003 `GET /consents/current`
+- **Purpose:** tell the client whether the current notice version has been accepted and return the notice reference.
+- **Auth / role:** user.
+- **Implements:** FR-003
+
+**Response 200**
+
+```json
+{ "data": { "consentVersion": "2026-10", "accepted": false, "acceptedAt": null, "noticeKey": "consent.notice.2026-10" } }
+```
+
+(`noticeKey` is the i18n key of the notice text shipped with the web app; the API does not return legal copy.)
+
+#### API-004 `POST /consents`
+- **Purpose:** record acceptance of the DPDP notice.
+- **Auth / role:** user.
+- **Implements:** FR-003
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| consentVersion | body | string | Yes | must equal server `CONSENT_VERSION` |
+| accepted | body | boolean | Yes | must be `true` |
+
+**Response 201**
+
+```json
+{ "data": { "consentVersion": "2026-10", "acceptedAt": "2026-10-19T09:30:00.000Z" } }
+```
+
+A repeat for the same version returns 200 with the original `acceptedAt`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | `accepted` not true, or version ≠ current |
+
+#### API-005 `POST /resumes`
+- **Purpose:** upload a resume file; validate; store; start extraction.
+- **Auth / role:** user.
+- **Implements:** FR-004, FR-005, FR-007
+
+**Request** — `multipart/form-data`
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| file | body (multipart) | binary | Yes | exactly one file; declared type PDF or DOCX; 1 byte ≤ size ≤ 5 242 880; signature matches declared type; not encrypted; PDF ≤ 10 pages; structure parseable |
+
+**Response 201**
+
+```json
+{ "data": { "resumeId": "7d3a…", "status": "uploaded", "contentType": "application/pdf", "sizeBytes": 183422, "pageCount": 2, "createdAt": "2026-10-19T09:31:00.000Z" } }
 ```
 
 **Errors**
 
 | HTTP | Error code | When |
 |---|---|---|
+| 400 | VALIDATION_ERROR | no file field, more than one file |
+| 403 | CONSENT_REQUIRED | no consent for current version |
+| 409 | DELETION_IN_PROGRESS | pending erasure |
+| 413 | FILE_TOO_LARGE | size > MAX_FILE_BYTES |
+| 415 | UNSUPPORTED_FILE_TYPE | declared type not PDF/DOCX |
+| 415 | FILE_SIGNATURE_MISMATCH | magic bytes/structure do not match declared type |
+| 422 | FILE_EMPTY | 0 bytes |
+| 422 | FILE_ENCRYPTED | encrypted/password protected |
+| 422 | FILE_CORRUPTED | parser cannot open the file / CPU budget exceeded |
+| 422 | FILE_TOO_MANY_PAGES | PDF pages > MAX_PAGES |
+| 429 | RATE_LIMITED | > 10 uploads/hour |
+| 503 | STORAGE_ERROR | object storage write failed |
+
+#### API-006 `GET /resumes/{resumeId}`
+- **Purpose:** resume status (extraction progress) and metadata; never returns the extracted text.
+- **Auth / role:** user (own).
+- **Implements:** FR-006, FR-010
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| resumeId | path | uuid | Yes | owned, not deleted |
+
+**Response 200**
+
+```json
+{ "data": { "resumeId": "7d3a…", "status": "ready", "failureCode": null, "contentType": "application/pdf", "sizeBytes": 183422, "pageCount": 2, "extractedChars": 3120, "createdAt": "…", "extractedAt": "…" } }
+```
+
+While `status` is `uploaded`/`extracting` the response carries `Retry-After: 2`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | unknown, deleted or not owned |
+
+#### API-007 `DELETE /resumes/{resumeId}`
+- **Purpose:** delete a resume, its analyses and reports (FR-021).
+- **Auth / role:** user (own).
+- **Implements:** FR-021
+
+**Response 204** (also for an already-deleted resume).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | unknown or not owned |
+| 503 | STORAGE_ERROR | object deletion failed (row unchanged; client may retry) |
+
+#### API-008 `POST /analyses`
+- **Purpose:** start an analysis for a ready resume.
+- **Auth / role:** user.
+- **Implements:** FR-008, FR-009
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| resumeId | body | uuid | Yes | owned; `status = ready` |
+| roleId | body | uuid | Yes | exists and `is_active` |
+| experienceLevel | body | string | Yes | `entry` \| `mid` \| `senior` \| `lead` |
+
+**Response 202**
+
+```json
+{ "data": { "analysisId": "a91f…", "status": "queued", "resumeId": "7d3a…", "roleId": "2b1e…", "experienceLevel": "mid", "createdAt": "…", "quota": { "limit": 3, "used": 2, "remaining": 1, "resetsAt": "…" } } }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | bad uuid, bad level, unknown field |
+| 402 | QUOTA_EXCEEDED | period limit reached (details: limit, used, plan, resetsAt) |
+| 403 | CONSENT_REQUIRED | no consent |
+| 404 | NOT_FOUND | resume not owned/unknown |
+| 409 | RESUME_NOT_READY | resume `uploaded`/`extracting` (`details.reason = "processing"`) or its text already purged (`details.reason = "text_expired"`) |
+| 409 | ANALYSIS_IN_PROGRESS | another analysis in flight (details.analysisId) |
+| 409 | DELETION_IN_PROGRESS | pending erasure |
+| 422 | UNKNOWN_ROLE | role missing or inactive |
+| 422 | TEXT_TOO_SHORT / TEXT_TOO_LONG / FILE_CORRUPTED | resume `extraction_failed` with that code |
+| 429 | RATE_LIMITED | > 30 starts/hour |
+
+#### API-009 `GET /analyses/{analysisId}`
+- **Purpose:** status while running; full gated result when completed; failure details when failed.
+- **Auth / role:** user (own).
+- **Implements:** FR-010, FR-011, FR-015, FR-016, FR-017, FR-027, FR-030
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| analysisId | path | uuid | Yes | owned, not deleted |
+
+**Response 200 — non-terminal** (header `Retry-After: 2`)
+
+```json
+{ "data": { "analysisId": "a91f…", "status": "running", "attempts": 1, "createdAt": "…", "startedAt": "…" } }
+```
+
+**Response 200 — failed**
+
+```json
+{ "data": { "analysisId": "a91f…", "status": "failed", "failureCode": "AI_TIMEOUT", "userMessage": "The analysis service did not respond in time. Your quota was not used. Please try again.", "refunded": true, "failedAt": "…" } }
+```
+
+**Response 200 — completed** (free plan example; locked entries carry no text)
+
+```json
+{
+  "data": {
+    "analysisId": "a91f…",
+    "status": "completed",
+    "resumeId": "7d3a…",
+    "role": { "id": "2b1e…", "slug": "backend-engineer", "title": "Backend Engineer" },
+    "experienceLevel": "mid",
+    "plan": "free",
+    "overallScore": 68,
+    "band": "fair",
+    "dimensions": [
+      { "dimension": "keyword_match", "weight": 30, "score": 62, "insufficientData": false, "rationale": "Mentions Node.js and PostgreSQL; lacks Docker, CI/CD and cloud keywords expected for mid-level backend roles.", "evidence": ["Built REST APIs with Node.js and PostgreSQL"] },
+      { "dimension": "experience_relevance", "weight": 20, "score": 70, "insufficientData": false, "rationale": "…", "evidence": ["…"] },
+      { "dimension": "formatting_parseability", "weight": 15, "score": 85, "insufficientData": false, "rationale": "…", "evidence": [] },
+      { "dimension": "impact_quantification", "weight": 15, "score": 55, "insufficientData": false, "rationale": "…", "evidence": ["…"] },
+      { "dimension": "section_completeness", "weight": 10, "score": 80, "insufficientData": false, "rationale": "…", "evidence": [] },
+      { "dimension": "clarity_language", "weight": 10, "score": 72, "insufficientData": false, "rationale": "…", "evidence": ["…"] }
+    ],
+    "missingSkills": {
+      "total": 8,
+      "visible": 5,
+      "items": [
+        { "skill": "Docker", "importance": "core", "why": "Containerised deployment is expected at mid level.", "locked": false },
+        { "skill": "CI/CD", "importance": "core", "why": "…", "locked": false },
+        { "skill": "AWS", "importance": "core", "why": "…", "locked": false },
+        { "skill": "Redis", "importance": "preferred", "why": "…", "locked": false },
+        { "skill": "Unit testing", "importance": "preferred", "why": "…", "locked": false },
+        { "locked": true }, { "locked": true }, { "locked": true }
+      ]
+    },
+    "suggestions": {
+      "total": 7,
+      "visible": 3,
+      "items": [
+        { "originalText": "Worked on backend services.", "rewrittenText": "Developed and maintained backend REST services in Node.js, handling order and payment flows.", "reason": "Vague; names no technology or scope.", "severity": "high", "locked": false },
+        { "originalText": "…", "rewrittenText": "…", "reason": "…", "severity": "high", "locked": false },
+        { "originalText": "…", "rewrittenText": "…", "reason": "…", "severity": "medium", "locked": false },
+        { "locked": true }, { "locked": true }, { "locked": true }, { "locked": true }
+      ]
+    },
+    "gating": { "suggestionsVisible": 3, "missingSkillsVisible": 5, "upgradeAvailable": true },
+    "disclaimer": "This score is an AI estimate of how well your resume matches common ATS criteria for the selected role. It is not a guarantee of how any employer's system will rate it.",
+    "model": "claude-opus-5-5",
+    "promptVersion": "v1",
+    "validationDropped": 1,
+    "reportAvailable": false,
+    "createdAt": "…",
+    "completedAt": "…"
+  }
+}
+```
+
+`band` ∈ `needs_work` (0–49) · `fair` (50–74) · `strong` (75–89) · `excellent` (90–100). Premium responses have `visible = total` and no locked items.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | unknown, deleted or not owned |
+
+#### API-010 `GET /analyses`
+- **Purpose:** the user's analysis history.
+- **Auth / role:** user.
+- **Implements:** FR-018
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| status | query | string[] | No | subset of `queued, running, completed, failed` |
+| roleId | query | uuid | No | |
+| page / pageSize | query | int | No | §6.1 |
+
+**Response 200** — sorted by `createdAt` descending
+
+```json
+{ "data": [ { "analysisId": "a91f…", "status": "completed", "role": { "id": "2b1e…", "title": "Backend Engineer" }, "experienceLevel": "mid", "overallScore": 68, "band": "fair", "resumeId": "7d3a…", "reportAvailable": true, "createdAt": "…", "completedAt": "…" } ], "meta": { "page": 1, "pageSize": 20, "total": 4, "totalPages": 1 } }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | bad filter or page values |
+
+#### API-011 `DELETE /analyses/{analysisId}`
+- **Purpose:** delete one analysis and its report (FR-021).
+- **Auth / role:** user (own).
+- **Implements:** FR-021
+
+**Response 204.**
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | unknown or not owned |
+| 503 | STORAGE_ERROR | report object deletion failed |
+
+#### API-012 `POST /analyses/{analysisId}/report`
+- **Purpose:** request PDF generation (idempotent).
+- **Auth / role:** user (own).
+- **Implements:** FR-019
+
+**Request:** path `analysisId` only; empty body.
+
+**Response 202** (new) or **200** (existing)
+
+```json
+{ "data": { "reportId": "c0de…", "analysisId": "a91f…", "status": "generating", "createdAt": "…" } }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | unknown or not owned |
+| 409 | ANALYSIS_NOT_COMPLETED | analysis not `completed` |
+| 429 | REPORT_RETRY_BLOCKED | 3 consecutive render failures; `Retry-After` until `blocked_until` |
+
+#### API-013 `GET /analyses/{analysisId}/report`
+- **Purpose:** report status and a short-lived download URL.
+- **Auth / role:** user (own).
+- **Implements:** FR-020
+
+**Response 200**
+
+```json
+{ "data": { "reportId": "c0de…", "status": "ready", "filename": "surfingbear-resume-analysis-20261019-a91f3c2e.pdf", "sizeBytes": 412833, "url": "https://…signed…", "expiresAt": "2026-10-19T09:40:00.000Z" } }
+```
+
+For `generating`: `{ "status": "generating", "url": null, "expiresAt": null }` with `Retry-After: 2`. For `failed`: `{ "status": "failed", "errorCode": "REPORT_RENDER_FAILED", "url": null }`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | analysis unknown/not owned, or no report requested yet |
+| 503 | STORAGE_ERROR | presign failed |
+
+#### API-014 `POST /me/deletion-requests`
+- **Purpose:** request erasure of all the user's Resume Optimizer data (FR-022).
+- **Auth / role:** user.
+- **Implements:** FR-022
+
+**Request:** empty body.
+
+**Response 202** (new) or **200** (pending exists)
+
+```json
+{ "data": { "requestId": "e2a5…", "status": "pending", "createdAt": "…" } }
+```
+
+**Errors:** common only.
+
+#### API-015 `GET /me/deletion-requests/{requestId}`
+- **Purpose:** erasure status.
+- **Auth / role:** user (own).
+- **Implements:** FR-022
+
+**Response 200**
+
+```json
+{ "data": { "requestId": "e2a5…", "status": "completed", "createdAt": "…", "completedAt": "…", "attempts": 1 } }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | unknown or not owned |
+
+#### API-016 `GET /admin/users/{userId}/usage`
+- **Purpose:** support view: plan periods, counters, analysis metadata (no content).
+- **Auth / role:** admin.
+- **Implements:** FR-025
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| userId | path | uuid | Yes | |
+
+**Response 200**
+
+```json
+{ "data": { "userId": "…", "counters": [ { "periodType": "month", "periodKey": "2026-10", "plan": "free", "count": 3, "limit": 3 } ], "analyses": [ { "analysisId": "a91f…", "status": "failed", "failureCode": "AI_TIMEOUT", "refunded": true, "attempts": 3, "createdAt": "…" } ], "pendingErasure": null } }
+```
+
+Writes audit `admin.viewed_usage`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | user has no data in this module |
+
+#### API-017 `POST /admin/users/{userId}/deletion-requests`
+- **Purpose:** start or re-run an erasure on a user's behalf (FR-025).
+- **Auth / role:** admin.
+- **Implements:** FR-025, FR-022
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| userId | path | uuid | Yes | |
+| reason | body | string | Yes | 5–300 chars; not stored in the database (only `details.reasonLength` goes to the audit row); the text belongs in the support ticket |
+| rerunRequestId | body | uuid | No | re-queue a `failed` request |
+
+**Response 202**
+
+```json
+{ "data": { "requestId": "e2a5…", "status": "pending", "requestedBy": "admin" } }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | reason missing |
+| 404 | NOT_FOUND | `rerunRequestId` unknown |
+
+#### API-018 `GET /admin/audit-logs`
+- **Purpose:** compliance and support queries over the audit log.
+- **Auth / role:** admin.
+- **Implements:** FR-024, FR-025
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| userId | query | uuid | No | |
+| action | query | string | No | dotted action name |
+| from / to | query | ISO-8601 | No | `to − from` ≤ 90 days |
+| page / pageSize | query | int | No | §6.1 |
+
+**Response 200** — sorted by `createdAt` descending
+
+```json
+{ "data": [ { "id": "…", "actorType": "user", "actorId": "…", "userId": "…", "action": "report.downloaded", "entityType": "reports", "entityId": "…", "details": { "sizeBytes": 412833 }, "requestId": "…", "createdAt": "…" } ], "meta": { "page": 1, "pageSize": 20, "total": 132, "totalPages": 7 } }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | range > 90 days, bad values |
+
+#### API-019 `GET /health` and API-020 `GET /ready`
+- **Purpose:** liveness and readiness (FR-026, CR-040).
+- **Auth / role:** public (no token).
+- **Implements:** FR-026
+
+**Response 200 (`/health`)**: `{ "data": { "status": "ok", "version": "1.4.2" } }`
+**Response 200 (`/ready`)**: `{ "data": { "status": "ok", "checks": { "postgres": "ok", "redis": "ok", "storage": "ok" } } }`
+**Response 503 (`/ready`)**: standard error envelope with `code = SERVICE_UNAVAILABLE`, `details.checks = { "postgres": "ok", "redis": "timeout", "storage": "ok" }`.
 
 ### 6.3 Error code list
 
+Numbering is grouped by family: `ERR-00x` general, `ERR-01x` upload and file, `ERR-02x` state and quota, `ERR-03x` infrastructure, `ERR-04x` analysis failure codes (returned inside a 200 body as `failureCode`, never as an HTTP error).
+
 | ID | Code | HTTP | Message | When it happens |
 |---|---|---|---|---|
+| ERR-001 | VALIDATION_ERROR | 400 | Some fields are invalid. | DTO validation failed; `details.fields` lists them |
+| ERR-002 | UNAUTHENTICATED | 401 | Please sign in to SurfingBear to continue. | Missing, malformed, expired or unverifiable token |
+| ERR-003 | FORBIDDEN | 403 | You do not have access to this action. | Role not allowed (e.g., user calling admin route) |
+| ERR-004 | NOT_FOUND | 404 | We could not find that item. | Unknown id, deleted, or owned by another user |
+| ERR-005 | RATE_LIMITED | 429 | Too many requests. Please wait and try again. | Rate limit exceeded; `Retry-After` set |
+| ERR-006 | CONSENT_REQUIRED | 403 | Please review and accept the data notice before uploading. | No consent row for `CONSENT_VERSION` |
+| ERR-010 | FILE_TOO_LARGE | 413 | The file is larger than 5 MB. | size > MAX_FILE_BYTES |
+| ERR-011 | UNSUPPORTED_FILE_TYPE | 415 | Only PDF and DOCX files are supported. | declared type not allowed |
+| ERR-012 | FILE_SIGNATURE_MISMATCH | 415 | The file content does not match its type. | magic bytes / structure mismatch |
+| ERR-013 | FILE_EMPTY | 422 | The file is empty. | 0 bytes |
+| ERR-014 | FILE_ENCRYPTED | 422 | The file is password protected. Please remove the password and upload again. | encrypted PDF/DOCX |
+| ERR-015 | FILE_CORRUPTED | 422 | The file could not be read. Please export it again and retry. | parser failure, CPU budget exceeded |
+| ERR-016 | FILE_TOO_MANY_PAGES | 422 | The resume has more than 10 pages. | page_count > MAX_PAGES |
+| ERR-017 | TEXT_TOO_SHORT | 422 | We could not find enough text. Scanned images are not supported; please upload a text-based PDF or DOCX. | extracted text < MIN_EXTRACTED_CHARS (also used as a resume failure code) |
+| ERR-018 | TEXT_TOO_LONG | 422 | The document contains too much text to analyse. | extracted text > MAX_EXTRACTED_CHARS |
+| ERR-019 | RESUME_NOT_READY | 409 | Your resume is not available for analysis. | resume `uploaded`/`extracting` (`details.reason = processing`, message "still being processed") or `extracted_text` purged after 30 days (`details.reason = text_expired`, message "please upload the resume again") |
+| ERR-020 | QUOTA_EXCEEDED | 402 | You have used all your analyses for this period. | counter ≥ limit; `details { limit, used, plan, resetsAt }` |
+| ERR-021 | ANALYSIS_IN_PROGRESS | 409 | An analysis is already running. Please wait for it to finish. | in-flight unique index hit; `details.analysisId` |
+| ERR-022 | ANALYSIS_NOT_COMPLETED | 409 | The report is available once the analysis has completed. | report requested for non-completed analysis |
+| ERR-023 | UNKNOWN_ROLE | 422 | Please choose a valid target role. | role missing or inactive |
+| ERR-025 | DELETION_IN_PROGRESS | 409 | Your data deletion request is being processed; new uploads are disabled. | pending erasure |
+| ERR-030 | INTERNAL_ERROR | 500 | Something went wrong on our side. Please try again; quote the request id if it persists. | unexpected exception |
+| ERR-031 | SERVICE_UNAVAILABLE | 503 | The service is temporarily unavailable. Please try again shortly. | Postgres/Redis/JWKS unavailable; `details.checks` on `/ready` |
+| ERR-033 | REPORT_RENDER_FAILED | — (report status) | We could not generate the PDF. Please try again. | PDF render error; stored in `reports.last_error` |
+| ERR-034 | STORAGE_ERROR | 503 | File storage is temporarily unavailable. | object storage put/delete/presign failed |
+| ERR-035 | REPORT_RETRY_BLOCKED | 429 | PDF generation failed repeatedly. Please try again later. | `reports.blocked_until` in the future |
+| ERR-040 | PARSE_FAILED | — (failure code) | We could not read the text of your resume. | extraction error during the pipeline; not refunded |
+| ERR-041 | INTERNAL | — (failure code) | An internal error stopped the analysis. Your quota was not used. | pipeline bug, enqueue failure; refunded |
+| ERR-042 | AI_TIMEOUT | — (failure code) | The analysis service did not respond in time. Your quota was not used. | all attempts timed out; refunded |
+| ERR-043 | AI_RATE_LIMITED | — (failure code) | The analysis service is busy. Your quota was not used. Please try again in a few minutes. | provider 429/529 after retries; refunded |
+| ERR-044 | AI_PROVIDER_ERROR | — (failure code) | The analysis service returned an error. Your quota was not used. | provider 5xx/4xx/network; refunded |
+| ERR-045 | AI_MALFORMED_RESPONSE | — (failure code) | The analysis result was invalid. Your quota was not used. | JSON/schema invalid twice, or < 1 valid dimension; refunded |
+| ERR-046 | AI_REFUSED | — (failure code) | The content could not be analysed. | provider refusal; not refunded |
+| ERR-047 | CANCELLED | — (failure code) | The analysis was cancelled because the resume was deleted. | user deleted resume/analysis or requested erasure; not refunded |
 
 ---
-
 ## 7. Traceability matrix
 
 Every FR and NFR must appear here at least once. No empty cells — write `—` only when something genuinely does not apply, and say why.
