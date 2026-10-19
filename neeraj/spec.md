@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Author | Neeraj Gurjar |
-| Version | v0.7 |
+| Version | v0.8 |
 | Last updated | 2026-10-19 |
 | Status | Draft |
 | Backend stack | NestJS 11 (TypeScript 5, Node.js 22 LTS) |
@@ -98,6 +98,9 @@ Every number below is defined **once** here, and other sections refer to these n
 | `AI_TIMEOUT_MS` | `90000` per request | §4.7, ERR-028 |
 | `AI_SDK_MAX_RETRIES` | `2` | §4.7, ERR-028 |
 | `AI_INVALID_OUTPUT_RETRIES` | `1` | §4.7, ERR-029 |
+| `AI_CIRCUIT_FAILURES` | `5` (`AI_UNAVAILABLE` outcomes that open the circuit) | §4.7.7, FR-011.9 |
+| `AI_CIRCUIT_WINDOW_MS` | `60000` | §4.7.7 |
+| `AI_CIRCUIT_OPEN_MS` | `60000` | §4.7.7, FR-011.9 |
 | `PROMPT_VERSION` | `v1` | §4.7, TBL-004 |
 | `NOTICE_VERSION` | `RO-NOTICE-2026-10` | FR-002, API-003, API-004 |
 | `DEFAULT_PAGE_SIZE` | `10` | §6.1 |
@@ -224,7 +227,7 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
 | CR-014 | Error format | Every error response from every endpoint uses exactly the format below, produced by one global `HttpExceptionFilter`. | e2e test asserts the shape for each error code it triggers. |
-| CR-015 | Safe errors | Error bodies never contain stack traces, SQL, internal hostnames or library messages. The global filter maps dependency outages to 503 `SERVICE_UNAVAILABLE` (ERR-011): PostgreSQL connection errors (Node error codes `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND`; SQLSTATE class `08`, `57P01`, `57P03`; TypeORM pool acquisition timeout), Redis errors when enqueueing a BullMQ job (cache reads, cache deletes and rate limiting never return 503: they fall back or fail open, see FR-002.7, FR-003.4 and CR-021), AWS SDK errors with `$metadata.httpStatusCode >= 500` or a network error, and JWKS unavailability (CR-005). Every other unexpected exception becomes 500 `INTERNAL_ERROR` (ERR-010) with the generic message. In both cases the full error is logged at `error` level with the request ID. Client settings that make outages fail fast: the ioredis client for caches and the throttler uses `enableOfflineQueue: false`, `maxRetriesPerRequest: 1`, `commandTimeout: 500`; the API's BullMQ producer connection uses `enableOfflineQueue: false`; TypeORM uses `extra: { max: 10, connectionTimeoutMillis: 2000 }`. | Unit tests of the filter for each listed error type and for a plain `Error`. |
+| CR-015 | Safe errors | Error bodies never contain stack traces, SQL, internal hostnames or library messages. The global filter maps dependency outages to 503 `SERVICE_UNAVAILABLE` (ERR-011): PostgreSQL connection errors (Node error codes `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND`; SQLSTATE class `08`, `57P01`, `57P03`; TypeORM pool acquisition timeout), Redis errors when enqueueing a BullMQ job (cache reads, cache deletes and rate limiting never return 503: they fall back or fail open, see FR-002.7, FR-003.4 and CR-021), AWS SDK errors with `$metadata.httpStatusCode >= 500` or a network error, and JWKS unavailability (CR-005). Every other unexpected exception becomes 500 `INTERNAL_ERROR` (ERR-010) with the generic message. In both cases the full error is logged at `error` level with the request ID. Client settings that make outages fail fast: the ioredis client for caches and the throttler uses `enableOfflineQueue: false`, `maxRetriesPerRequest: 1`, `commandTimeout: 500`; the API's BullMQ producer connection uses `enableOfflineQueue: false`; TypeORM uses `extra: { max: 10, connectionTimeoutMillis: 2000 }`; the S3 client uses `requestHandler: { connectionTimeout: 2000, requestTimeout: 5000 }`. | Unit tests of the filter for each listed error type and for a plain `Error`. |
 | CR-016 | Error codes | Every error code is listed in §6.3, is `UPPER_SNAKE_CASE`, never changes meaning, and is never reused. The message is chosen from the request's locale (§1.6). Clients branch on `code`, never on `message`. | Unit test: every value of the `ErrorCode` enum has an `en`, `hi` and `ko` message. |
 
 **Standard error response (all APIs):**
@@ -399,7 +402,8 @@ surfingbear-resume-optimizer/
 ├── package.json                  # workspaces: apps/*, tools/*
 ├── docker-compose.yml            # postgres, redis, localstack, mock-platform
 ├── .env.example                  # local example values (§1.7); copy to .env
-├── docs/runbooks/                # data-breach.md (NFR-023)
+├── docs/                         # spec.md (this document), manual-checks.md, runbooks/data-breach.md (NFR-023)
+├── scripts/                      # check-criteria.ts (§2.5)
 ├── .github/workflows/            # ci.yml, deploy.yml (§4.12.5, §4.12.6)
 ├── .github/pull_request_template.md
 ├── CODEOWNERS
@@ -522,6 +526,7 @@ Rules:
    - [ ] Unit tests added or updated; e2e test added for new endpoints.
    - [ ] Migration is expand-only (CR-035) and was tested with `migration:revert`.
    - [ ] No personal data in logs, metrics or job payloads (CR-011).
+   - [ ] New columns that hold personal data added to the §5.8 inventory.
    - [ ] New error codes added to §6.3 (all three languages), to `error-codes.ts`, and to the web `messages/*.json` files when the web shows the code itself.
    - [ ] This specification updated if behaviour changed (with a change log entry).
 4. The reviewer responds within 1 working day. The author resolves every comment (fix or reply) before merge.
@@ -554,6 +559,8 @@ Rules:
 
 **Root scripts** (`package.json`): `dev:api` = `npm run start:dev -w apps/api`; `dev:worker` = `cross-env METRICS_PORT=9465 npm run start:worker:dev -w apps/api`; `dev:web` = `npm run dev -w apps/web`; `dev:mock-platform` = `npm run start -w tools/mock-platform`; `db:migrate` = `npm run migration:run -w apps/api`; `db:seed` = `npm run seed -w apps/api`; `lint` = `eslint .`; `typecheck` = `tsc --noEmit` for each workspace; `test` = `npm test -w apps/api`; `test:e2e` = `npm run test:e2e -w apps/api`; `test:web` = `npm test -w apps/web` (Vitest); `test:browser` = `npm run test:e2e -w apps/web` (Playwright); `build` = `npm run build --workspaces --if-present`.
 
+**Criterion IDs in tests:** a test that proves an acceptance criterion starts its title with the criterion ID, for example `it('FR-004.3 accepts a file of exactly MAX_FILE_SIZE_BYTES', …)`. The script `scripts/check-criteria.ts` (CI job `lint`) reads every criterion ID `FR-xxx.n` from §3.1 of `docs/spec.md` (this document, kept in the code repository) and every test title in `apps/**/*.spec.ts`, `apps/api/test/**/*.e2e-spec.ts` and `apps/web/tests/**/*.spec.ts`, and fails when a criterion has no test. A criterion that cannot be tested automatically is listed with its reason and manual check in `docs/manual-checks.md`, which the script also reads.
+
 **Test conventions:** Jest for the API (unit tests `*.spec.ts` next to the source, e2e tests `apps/api/test/*.e2e-spec.ts`; tests that parse files, and `reports.e2e-spec.ts` when it reads generated PDFs, run the compiled `dist/worker/parsing/parse-thread.mjs` through `parse-runner.ts`), Vitest + Testing Library for web components, Playwright for browser e2e with `AI_MODE=mock`. Line coverage MUST be at least 80% for `apps/api/src/modules` and `apps/api/src/worker` (NFR-021).
 
 **Root npm scripts:** `dev:api`, `dev:worker`, `dev:web`, `dev:mock-platform`, `db:migrate`, `db:seed`, `lint`, `typecheck`, `test`, `test:e2e`, `test:web`, `test:browser`, `build`.
@@ -578,7 +585,7 @@ Priority: **Must** = needed for launch; **Should** = planned for launch, can sli
 | FR-008 | ATS scoring | The worker asks the AI to score the resume on six dimensions and computes the overall score. | Must | 1. Every completed analysis has exactly six TBL-005 rows, one per dimension code in §4.7.3, each with an integer score 0–100 and a rationale of 1–400 characters. 2. The weight stored per row equals the §4.7.3 weight at the time of analysis. 3. `overall_score = floor((Σ score × weight + 50) / 100)`, an integer 0–100 (§4.7.4); with scores 70/50/80/90/60/75 the result is 70. 4. `score_band` is `NEEDS_WORK` (0–49), `FAIR` (50–69), `GOOD` (70–84) or `EXCELLENT` (85–100). 5. The AI is called with the exact prompt in §4.7.1 and structured output schema in §4.7.2. 6. If the AI says `isResume = false` the analysis fails with `NOT_A_RESUME`; if `detectedLanguage` is not `en` it fails with `RESUME_LANGUAGE_UNSUPPORTED`. |
 | FR-009 | Missing skills | The result lists skills that are important for the chosen role and level but are not shown in the resume. Which core skills of the role are missing is decided by code from the catalog (TBL-001); the AI only rates their importance, explains them, and may add a few extra skills. | Must | 1. A completed analysis has 0 to `MAX_MISSING_SKILLS` TBL-006 rows ordered by `display_order` starting at 1 with no gaps. 2. Each has `skill` (1–80 chars), `importance` (`CRITICAL`, `IMPORTANT` or `NICE_TO_HAVE`), `reason` (1–300 chars) and `source` (`CATALOG` or `AI`). 3. Every core skill of the role for which none of its `matchTerms` is found in the redacted resume text (whole word, case-insensitive, §4.7.5 step 4) has a `CATALOG` row, unless the `MAX_MISSING_SKILLS` cap cuts it off; no core skill whose term is found has a row. 4. At most `MAX_AI_EXTRA_SKILLS` rows have source `AI`; none of them equals a core skill name or match term, and none is found in the resume text. 5. Rows are ordered `CRITICAL`, then `IMPORTANT`, then `NICE_TO_HAVE`; inside a group, `CATALOG` rows (in catalog order) come before `AI` rows (in AI order). 6. If the AI gives no rating for a missing core skill, the row uses importance `IMPORTANT` and the reason "This is a core skill for the selected role." 7. Missing skills are shown in full to FREE and PRO users. |
 | FR-010 | Rewrite suggestions | The result suggests better wording for weak lines, ordered from highest to lowest impact. | Must | 1. A completed analysis has 0 to `MAX_SUGGESTIONS` TBL-007 rows with `priority` 1..n and no gaps. 2. Every `original_text` occurs in the redacted resume text after whitespace normalization (§4.7.5); suggestions that do not match are dropped before numbering. 3. Suggestions whose `suggested_text` equals `original_text`, or whose `original_text` is longer than 500 or `suggested_text` longer than 600 characters, are dropped. 4. Each suggestion has `section` and `issue_type` from the enums in TBL-007. 5. The AI is instructed never to invent facts and to use placeholders such as `[X%]` for missing numbers (§4.7.1), and the system enforces it: a suggestion whose `suggestedText` contains a number (outside `[…]` placeholders) that does not occur in its `originalText` is dropped (§4.7.5 step 5). With the `NEW_NUMBER_FIXTURE` mock case (§4.7.6), 5 suggestions are produced and 4 are stored. |
-| FR-011 | Analysis status and failure handling | The user can follow the analysis and always gets a final state, even when the AI fails. | Must | 1. Status moves only along `QUEUED → PROCESSING → COMPLETED` or `QUEUED/PROCESSING → FAILED` (§4.3.6). 2. AI request timeouts, connection errors and HTTP 408, 409, 429 and 5xx responses are retried by the SDK up to `AI_SDK_MAX_RETRIES` times; if all fail the analysis is `FAILED` with `AI_UNAVAILABLE`. 3. AI output that is not valid JSON, fails the §4.7.2 schema, stops with `max_tokens`, or is a refusal is retried `AI_INVALID_OUTPUT_RETRIES` time(s); then `FAILED` with `AI_OUTPUT_INVALID`. 4. Any analysis not finished `ANALYSIS_STALE_AFTER_MS` after `queued_at` is set to `FAILED` with `ANALYSIS_TIMEOUT` by the maintenance job, which runs every minute. 5. Unexpected worker exceptions are retried by BullMQ (3 attempts, exponential backoff starting at 5 s); after the last attempt the analysis is `FAILED` with `INTERNAL_ERROR`. 6. Every failure releases the quota reservation (FR-007.2). 7. API-011 returns `errorCode` and a localized `errorMessage` for `FAILED` analyses. 8. The web app polls API-011 as described in P-02 and stops polling when the status is `COMPLETED` or `FAILED`. |
+| FR-011 | Analysis status and failure handling | The user can follow the analysis and always gets a final state, even when the AI fails. | Must | 1. Status moves only along `QUEUED → PROCESSING → COMPLETED` or `QUEUED/PROCESSING → FAILED` (§4.3.6). 2. AI request timeouts, connection errors and HTTP 408, 409, 429 and 5xx responses are retried by the SDK up to `AI_SDK_MAX_RETRIES` times; if all fail the analysis is `FAILED` with `AI_UNAVAILABLE`. 3. AI output that is not valid JSON, fails the §4.7.2 schema, stops with `max_tokens`, or is a refusal is retried `AI_INVALID_OUTPUT_RETRIES` time(s); then `FAILED` with `AI_OUTPUT_INVALID`. 4. Any analysis not finished `ANALYSIS_STALE_AFTER_MS` after `queued_at` is set to `FAILED` with `ANALYSIS_TIMEOUT` by the maintenance job, which runs every minute. 5. Unexpected worker exceptions are retried by BullMQ (3 attempts, exponential backoff starting at 5 s); after the last attempt the analysis is `FAILED` with `INTERNAL_ERROR`. 6. Every failure releases the quota reservation (FR-007.2). 7. API-011 returns `errorCode` and a localized `errorMessage` for `FAILED` analyses. 8. The web app polls API-011 as described in P-02 and stops polling when the status is `COMPLETED` or `FAILED`. 9. While the AI circuit is open (§4.7.7), an analysis picked up by that worker task fails with `AI_UNAVAILABLE` without sending an AI request, within 5 s, and its reservation is released. |
 | FR-012 | View result with plan gating | The user sees the complete result; FREE users see only the first suggestions. | Must | 1. API-011 for a `COMPLETED` analysis returns overall score, band, summary, six dimensions (localized names), all missing skills and suggestions. 2. When the **current** plan is FREE, `suggestions` contains only rows with `priority <= FREE_VISIBLE_SUGGESTIONS`, `lockedSuggestionCount = max(0, total − FREE_VISIBLE_SUGGESTIONS)` and `upgradeUrl = PLATFORM_UPGRADE_URL`. 3. The text of locked suggestions is never sent to a FREE user in any API response (checked by an e2e test that searches the raw response body). 4. When the current plan is PRO, all suggestions are returned, `lockedSuggestionCount = 0` and `upgradeUrl = null`. 5. Gating is applied when reading, so a user who upgrades sees the previously locked suggestions of old analyses. 6. For any other status, `result` is `null`. |
 | FR-013 | Download PDF report | The user downloads the analysis as a PDF file. | Must | 1. API-012 for a `COMPLETED` analysis returns `200`, `Content-Type: application/pdf`, `Content-Disposition: attachment; filename="resume-analysis-<yyyyMMdd>-<first 8 chars of analysisId>.pdf"` (date = analysis creation date in IST) and `Cache-Control: no-store`. 2. The PDF follows the layout in §4.10 and applies the same gating as FR-012 (a FREE user's PDF contains at most 3 suggestions and the locked box of §4.10 block 8). 3. For an analysis that is not `COMPLETED` it returns 409 `ANALYSIS_NOT_COMPLETED`. 4. The PDF is generated on request and never stored. 5. The PDF is in English regardless of locale (ASM-004). 6. p95 generation time ≤ 3 s (NFR-005). 7. Each download writes audit action `REPORT_DOWNLOADED`. 8. Rate limit: 30 downloads per user per hour. |
 | FR-014 | Analysis history | The user sees a list of their past analyses. | Must | 1. API-010 returns only the caller's analyses, newest first (`created_at DESC, id DESC`), paginated (§6.1). 2. Each item has id, status, job role (code and localized name), experience level, overall score and band (null unless completed), resume file name, `createdAt`, `completedAt`. 3. Analyses past `expires_at` are never returned: every read of TBL-003 and TBL-004 (API-006, API-007, API-009, API-010, API-011, API-012, API-014) filters `expires_at > $now`, so an expired row behaves as deleted until FR-020 removes it. 4. P-03 shows 10 items per page with page controls and an empty state with a link to P-01. |
@@ -620,6 +627,7 @@ All performance targets are measured server-side in the AWS region (excluding th
 | NFR-022 | AI quality | AI results are valid and stable. | ≥ 98% of first AI responses pass the §4.7.2 schema; on a golden set of 50 synthetic resumes analysed twice, the two overall scores differ by ≤ 10 points for ≥ 90% of resumes. | Script `apps/api/test/ai-golden.ts` run against the live model before changing `AI_MODEL` or `PROMPT_VERSION`. |
 | NFR-023 | Compliance | Personal data breaches are reported. | Breach detected → Data Protection Board and affected users informed without delay; detailed report to the Board within 72 h (DPDP Rules 2025 rule 7). Runbook `docs/runbooks/data-breach.md` exists and is tested once a year. | Tabletop exercise record. |
 | NFR-024 | Internationalization | The UI is available in English, Hindi and Korean. | 100% of UI strings are in `messages/*.json`; `hi.json` and `ko.json` each cover 100% of the keys in `en.json` before prod release. | CR-028 lint rule on every PR; key-coverage script `apps/web/scripts/check-messages.ts` runs in the prod deploy job of `deploy.yml` and blocks the prod deploy if a key is missing (on PRs, missing `hi` or `ko` keys only warn, because CR-028 allows the `en` fallback during development). |
+| NFR-025 | Resilience | When one dependency is down, every flow behaves as the degraded-operation matrix in §4.4.1 says: no request waits longer than 5 s because of the outage, no quota unit is lost or counted twice, and the service recovers without manual steps when the dependency returns. | 100% of the §4.4.1 cells pass. | `apps/api/test/outage.e2e-spec.ts`: one case per row; the dependency is made unreachable by pointing its URL at a closed port (`127.0.0.1:1`), for Anthropic with `AI_MODE=live` and `ANTHROPIC_BASE_URL` set to that port, for the JWKS with an empty key cache. |
 
 ### 3.3 Assumptions and out of scope
 
@@ -742,7 +750,7 @@ flowchart LR
 | CMP-019 | PostgreSQL | System of record for all tables in §5. | PostgreSQL 16 (Amazon RDS) |
 | CMP-020 | Redis | BullMQ queues, rate-limit counters, consent and catalog caches. Holds no data that cannot be rebuilt. | Redis 7 (Amazon ElastiCache, TLS, auth token) |
 | CMP-021 | S3 | Short-lived staging of raw uploaded files between API and worker. Private, SSE-KMS, lifecycle 1 day. | Amazon S3 |
-| CMP-022 | Observability | Logs (CloudWatch Logs), metrics (Prometheus scrape by the CloudWatch agent → CloudWatch Metrics), traces (OpenTelemetry → AWS X-Ray), alarms (§4.11). | CloudWatch, ADOT collector sidecar, OpenTelemetry SDK |
+| CMP-022 | Observability | Logs (CloudWatch Logs), metrics (Prometheus scrape by the ADOT collector → CloudWatch Metrics, §4.11), traces (OpenTelemetry → AWS X-Ray), alarms (§4.11). | CloudWatch, ADOT collector sidecar, OpenTelemetry SDK |
 | CMP-023 | Mock Platform (local only) | Stands in for platform auth on a laptop: JWKS, dev login that sets the cookie, a token endpoint for tests, a fake pricing page (§4.12.3). Never deployed. | Node.js 22 `http` + `jose` |
 
 ### 4.3 Main flows
@@ -971,6 +979,18 @@ No other transitions exist. `COMPLETED` and `FAILED` are final: a later write at
 | Anthropic Claude API | Scoring, missing skills, suggestions (§4.7). | HTTPS via `@anthropic-ai/sdk`, header `x-api-key` from `ANTHROPIC_API_KEY`. Separate Anthropic workspace and key per environment. | Per request timeout `AI_TIMEOUT_MS`; SDK retries `AI_SDK_MAX_RETRIES` with exponential backoff on 408, 409, 429, 5xx and connection errors (honours `retry-after`). Then `AI_UNAVAILABLE`. Invalid output: `AI_INVALID_OUTPUT_RETRIES` extra request, then `AI_OUTPUT_INVALID`. 401/403: `AI_UNAVAILABLE` plus counter `ro_ai_auth_errors_total` and a paging alarm. 400: `INTERNAL_ERROR` (a bug) and an error log. Refusal: server-side fallback (`fallbacks: "default"`); a final refusal counts as invalid output. |
 | Amazon S3 | Raw file staging. | AWS SDK v3, IAM task role (no static keys in AWS). | API `PutObject` error: 503, nothing saved. Worker `GetObject` error: throw; BullMQ makes 3 attempts in total (retries after 2 s and 4 s), then the resume is `FAILED` with `INTERNAL_ERROR`. `DeleteObject` error: `warn` log; the lifecycle rule removes the object within `RAW_FILE_MAX_HOURS` hours. |
 | AWS Secrets Manager / KMS | Secrets and encryption keys. | ECS injects secrets as env vars at task start; KMS used by RDS, ElastiCache, S3. | Missing secret: task fails to start (CR-018), ECS keeps the old tasks running. |
+
+#### 4.4.1 Degraded-operation matrix (NFR-025)
+
+What happens while exactly one dependency is down. "Works" means normal behaviour. Times are bounded by the client settings in CR-015 and CR-005.
+
+| Dependency down | Read APIs (API-001 to API-003, API-006, API-007, API-010, API-011, API-014) | Upload (API-005) | Create analysis (API-009) | Report (API-012) | Worker jobs | Maintenance jobs | Readiness (API-020) |
+|---|---|---|---|---|---|---|---|
+| PostgreSQL | API-003 works; API-002 works while its cache entry lives; all others 503 `SERVICE_UNAVAILABLE` | 503; the S3 object is deleted (best effort) | 503 | 503 | A job throws and BullMQ retries it (3 attempts). After recovery the stale janitor fails anything left unfinished (`ANALYSIS_TIMEOUT` or `INTERNAL_ERROR`) and releases its reservation | The run fails; the next run catches up | 503, so the ALB stops routing to the task |
+| Redis | Works: consent and catalog are read from PostgreSQL, rate limiting fails open | 503 (enqueue fails; the row and the object are removed) | 503 (the analysis becomes `FAILED` with `INTERNAL_ERROR` and its reservation is released, FR-006.4) | Works | No job runs. Queued work continues when Redis returns; work lost with Redis data is failed by the stale janitor | Not scheduled until Redis returns | 200 with `"status": "degraded"` and `"redis": "down"` |
+| S3 | Works | 503; no row is created | Works (the text is in PostgreSQL) | Works | Parse jobs fail `GetObject`, BullMQ retries them, then the resume is `FAILED` with `INTERNAL_ERROR`. Analysis jobs are not affected | Not affected (objects expire through the lifecycle rule) | 200 (S3 is not checked) |
+| Anthropic API | Works | Works | Works (the analysis is accepted) | Works | Analyses fail with `AI_UNAVAILABLE` and release their reservation; after `AI_CIRCUIT_FAILURES` failures the circuit opens and jobs fail at once (§4.7.7) | Not affected | 200 |
+| Platform JWKS | Works while a key set fetched in the last 24 h exists; after that 503 on every protected endpoint (CR-005) | Same | Same | Same | Not affected | Not affected | 200 |
 
 ### 4.5 Tech stack and reasons
 
@@ -1248,6 +1268,16 @@ Example: scores 70, 50, 80, 90, 60, 75 → 2100 + 1000 + 1200 + 1350 + 600 + 750
 
 Mock results go through the same validation and post-processing as live results. Token counts are 0 and `ai_model` is `mock`.
 
+#### 4.7.7 AI circuit breaker
+
+Each worker task keeps one in-memory circuit around its AI client (live or mock), so that an Anthropic outage does not hold worker slots for minutes per job.
+
+1. **Closed** (normal): every analysis outcome `AI_UNAVAILABLE` is recorded with its time. When `AI_CIRCUIT_FAILURES` such outcomes fall within the last `AI_CIRCUIT_WINDOW_MS`, the circuit opens.
+2. **Open**: for `AI_CIRCUIT_OPEN_MS`, `analyze()` throws `AiUnavailableError` at once without a request (`attempts = 0`, `model = null`), so the analysis fails with `AI_UNAVAILABLE` and its reservation is released (FR-011.9).
+3. **Half-open**: after the open period, the next call is sent. Success closes the circuit and clears the record; another `AI_UNAVAILABLE` opens it again for `AI_CIRCUIT_OPEN_MS`. Calls arriving while that one call is running are treated as open.
+4. Only `AI_UNAVAILABLE` outcomes count; `AI_OUTPUT_INVALID`, `NOT_A_RESUME` and the other failures do not.
+5. The gauge `ro_ai_circuit_open` is `1` while the circuit is open or half-open and `0` otherwise.
+
 ### 4.8 Worker processing rules (CMP-014 to CMP-018)
 
 #### 4.8.1 Queues
@@ -1419,6 +1449,7 @@ Enum labels in the PDF (English): sections `Summary`, `Experience`, `Projects`, 
 | `ro_ai_request_duration_seconds` | histogram (5, 10, 20, 30, 45, 60, 90) | `outcome` (`ok`, `invalid`, `error`) | CMP-017 |
 | `ro_ai_tokens_total` | counter | `type` (`input`, `output`) | CMP-017 |
 | `ro_ai_auth_errors_total` | counter | — | CMP-017 |
+| `ro_ai_circuit_open` | gauge | — | CMP-017 (§4.7.7) |
 | `ro_queue_waiting_jobs` | gauge, refreshed every 15 s | `queue` | CMP-014 |
 | `ro_quota_exceeded_total` | counter | `plan` | CMP-008 |
 | `ro_jwks_fetch_errors_total` | counter | — | CMP-004 |
@@ -1508,7 +1539,7 @@ Runs on every pull request and every push to `main`. Jobs (all required by branc
 | # | Job | Needs | What it does |
 |---|---|---|---|
 | 1 | `install` | — | `npm ci` with the npm cache; later jobs restore the cache. |
-| 2 | `lint` | 1 | `npm run lint -- --max-warnings 0`, `npx prettier --check .`, and on PRs `npx commitlint --from origin/main --to HEAD`. |
+| 2 | `lint` | 1 | `npm run lint -- --max-warnings 0`, `npx prettier --check .`, `npx tsx scripts/check-criteria.ts`, and on PRs `npx commitlint --from origin/main --to HEAD`. |
 | 3 | `typecheck` | 1 | `npm run typecheck`. |
 | 4 | `unit` | 1 | `npm test` (API Jest with the coverage threshold of NFR-021) and `npm run test:web` (Vitest). |
 | 5 | `api-e2e` | 4 | Service containers `postgres:16-alpine`, `redis:7-alpine`, `localstack/localstack:3` (`SERVICES=s3`). Env from `.env.example`. Jest `globalSetup` (`apps/api/test/global-setup.ts`) starts the mock platform in-process on port 4100, creates the bucket `sb-ro-resumes-local` with the AWS SDK, runs migrations and the seed. Tests that need the worker start `WorkerModule` in the same process with `AI_MODE=mock` and `AI_MOCK_DELAY_MS=0`. All log lines go to `apps/api/test/output/logs.ndjson`, and `scan-logs.ts` runs after the suite (NFR-016). |
@@ -1932,6 +1963,25 @@ In this table, skills are separated by `;`. An item written `Name {a, b}` is sto
 3. `jsonb` → `@Column({ type: 'jsonb' })` (`core_skills` is typed `CoreSkill[]` with `CoreSkill = { name: string; matchTerms: string[] }`; `metadata` is typed per audit action); `bytea` → `Buffer`; `bigint` identity → `string`; `timestamptz` → `Date`.
 4. CHECK constraints, partial indexes and FK names are created in migrations with the exact names in §5.2 and §5.3. Migration files are named `<13-digit epoch ms>-<kebab-name>.ts` with class `<PascalName><epoch ms>`, as TypeORM requires; the first is `1760572800000-initial-schema.ts` with class `InitialSchema1760572800000`.
 5. Relations used in code: `Analysis.jobRole` (ManyToOne, eager false), `Analysis.resume` (ManyToOne, nullable), `Analysis.dimensionScores`, `Analysis.missingSkills`, `Analysis.suggestions` (OneToMany, loaded explicitly for API-011 and API-012).
+
+### 5.8 Personal data inventory
+
+Every place where personal data lives, with its retention and what erasure (FR-019) does to it. This table is the checklist for NFR-013 and NFR-014; a change that adds personal data must add a row (§2.4).
+
+| Data | Where | What it reveals | Retention | On erasure (FR-019) | Protection |
+|---|---|---|---|---|---|
+| Platform user ID (`sub`) | `user_id` in TBL-002, TBL-003, TBL-004, TBL-008, TBL-009; `actor_user_id` in TBL-010; logs | Pseudonymous identifier | With the row that holds it | Kept only in TBL-002, TBL-008, TBL-009, TBL-010 and logs (FR-019.7) | RDS encryption |
+| Raw resume file | S3 `uploads/` | Full resume including contact details | Deleted after parsing; at most `RAW_FILE_MAX_HOURS` | Deleted (best effort, then the lifecycle rule) | SSE-KMS, private bucket |
+| File name | `resumes.original_filename`, `analyses.resume_filename` | Often the person's name | `RESUME_RETENTION_DAYS` / `ANALYSIS_RETENTION_DAYS` | Deleted | RDS encryption; never logged (CR-011) |
+| Redacted resume text | `resumes.text_enc` | Resume content without contact details or ID numbers | `RESUME_RETENTION_DAYS` | Deleted | AES-256-GCM (§5.6) and RDS encryption |
+| AI-written text about the resume | `analyses.summary`, `analysis_dimension_scores.rationale`, `analysis_missing_skills.reason` | Assessment of the person's resume | `ANALYSIS_RETENTION_DAYS` | Deleted (cascade) | RDS encryption |
+| Resume quotes and rewrites | `analysis_suggestions.original_text`, `suggested_text` | Short excerpts of the resume | `ANALYSIS_RETENTION_DAYS` | Deleted (cascade) | RDS encryption |
+| Consent record | TBL-002 (`ip_hash`, `locale`, times) | Hashed IP address and consent history | While active; then `AUDIT_RETENTION_DAYS` after `ended_at` | Kept as proof, status `WITHDRAWN` | Salted SHA-256 for the IP |
+| Usage counts | TBL-008 | How many analyses the person ran | Current and previous period month | Kept (FR-019.7) | RDS encryption |
+| Erasure record | TBL-009 | That the person asked for erasure | `AUDIT_RETENTION_DAYS` | Kept | RDS encryption |
+| Audit events | TBL-010 | The person's actions (IDs only) | `AUDIT_RETENTION_DAYS` | Kept (security logs, DPDP Rules 2025 rule 6) | RDS encryption |
+| Application logs | CloudWatch Logs | `userId` only (CR-011) | 365 days in prod, 30 days elsewhere (CR-013) | Kept | CloudWatch encryption |
+| AI request content | Anthropic (processor) | Redacted resume text | Under Anthropic's commercial terms (ASM-005) | Not reachable from this module; stated in the notice (§4.9) | TLS; redaction before sending (NFR-015) |
 
 ---
 
@@ -2696,15 +2746,15 @@ A user with no data gets 200 with all counts 0 (a TBL-009 row is still written).
 - **Auth / role:** public. **Rate limit:** none.
 - **Implements:** NFR-007, NFR-017
 
-Checks, each with a 1000 ms timeout: PostgreSQL `SELECT 1`, Redis `PING`.
+Checks, each with a 1000 ms timeout: PostgreSQL `SELECT 1`, which decides readiness, and Redis `PING`, which is reported only, because the read APIs keep working without Redis (§4.4.1).
 
-**Response 200:** `{ "data": { "status": "ok", "checks": { "database": "up", "redis": "up" } } }`
+**Response 200:** `{ "data": { "status": "ok", "checks": { "database": "up", "redis": "up" } } }`. When Redis is down the response is still 200, with `"status": "degraded"` and `"redis": "down"`.
 
 **Errors**
 
 | HTTP | Error code | When |
 |---|---|---|
-| 503 | `SERVICE_UNAVAILABLE` | Any check fails; `details` lists each failed check, e.g. `[{ "field": "redis", "issue": "down" }]` |
+| 503 | `SERVICE_UNAVAILABLE` | The PostgreSQL check fails; `details` lists every failed check, e.g. `[{ "field": "database", "issue": "down" }]` |
 
 ### 6.3 Error code list
 
@@ -2750,6 +2800,8 @@ Checks, each with a 1000 ms timeout: PostgreSQL `SELECT 1`, Redis `PING`.
 ---
 
 ## 7. Traceability matrix
+
+### 7.1 Requirements to design
 
 Every FR and NFR appears here. `—` means the item genuinely has no element of that kind; the reason is given in brackets. For every FR except the cross-cutting FR-001, each API listed here names that FR in its "Implements" line in §6.2, and the reverse is also true. NFRs are not repeated in "Implements" lines. Test file names refer to `apps/api/test/` (e2e), `apps/api/src/**` (unit, `*.spec.ts`), `apps/web/tests/e2e/` (Playwright) and `perf/` (k6).
 
@@ -2800,6 +2852,67 @@ Every FR and NFR appears here. `—` means the item genuinely has no element of 
 | NFR-022 | CMP-016, CMP-017 | TBL-004, TBL-005 | — (offline evaluation) | `ai-golden.ts` report |
 | NFR-023 | CMP-022, CMP-012 | TBL-010 | — (process requirement) | Annual tabletop record |
 | NFR-024 | CMP-001, CMP-003 | TBL-001 (`name_hi`, `name_ko`) | API-002, API-003, API-011 | `no-literal-string` lint; key-coverage script |
+| NFR-025 | CMP-003, CMP-004, CMP-013, CMP-014, CMP-017 | TBL-004, TBL-008 (reservations released in every failure path) | API-001 to API-020 | `outage.e2e-spec.ts`, one case per §4.4.1 row |
+
+### 7.2 Tables to requirements
+
+Generated from §7.1; every table is used by at least one requirement.
+
+| Table | Requirements |
+|---|---|
+| TBL-001 `job_roles` | FR-003, FR-006, FR-009, FR-021, NFR-001, NFR-009, NFR-024 |
+| TBL-002 `consents` | FR-002, FR-018, FR-019, FR-020, NFR-001, NFR-009, NFR-013, NFR-014 |
+| TBL-003 `resumes` | FR-004, FR-005, FR-006, FR-015, FR-016, FR-018, FR-019, FR-020, NFR-001, NFR-002, NFR-003, NFR-009, NFR-011, NFR-013, NFR-014, NFR-015 |
+| TBL-004 `analyses` | FR-006, FR-007, FR-008, FR-011, FR-012, FR-013, FR-014, FR-016, FR-017, FR-018, FR-019, FR-020, NFR-001, NFR-004, NFR-005, NFR-006, NFR-008, NFR-009, NFR-013, NFR-014, NFR-018, NFR-022, NFR-025 |
+| TBL-005 `analysis_dimension_scores` | FR-008, FR-012, FR-013, FR-017, FR-019, NFR-005, NFR-009, NFR-014, NFR-022 |
+| TBL-006 `analysis_missing_skills` | FR-009, FR-012, FR-013, FR-017, FR-019, NFR-005, NFR-009, NFR-014 |
+| TBL-007 `analysis_suggestions` | FR-010, FR-012, FR-013, FR-017, FR-019, NFR-005, NFR-009, NFR-014 |
+| TBL-008 `monthly_usage` | FR-006, FR-007, FR-011, FR-018, FR-019, FR-020, NFR-006, NFR-009, NFR-013, NFR-025 |
+| TBL-009 `erasure_requests` | FR-019, FR-020, NFR-009, NFR-013, NFR-014 |
+| TBL-010 `audit_events` | FR-002, FR-004, FR-006, FR-013, FR-016, FR-017, FR-018, FR-019, FR-020, FR-021, NFR-009, NFR-013, NFR-023 |
+
+### 7.3 Common requirements to components
+
+Where each company-wide rule is implemented. How each one is checked is in its row in §1.
+
+| Rule | Implemented in |
+|---|---|
+| CR-001 | CMP-004, CMP-013 |
+| CR-002 | CMP-004 |
+| CR-003 | CMP-004, CMP-001 |
+| CR-004 | CMP-004, CMP-001 |
+| CR-005 | CMP-004 |
+| CR-006 | CMP-004 |
+| CR-007 | CMP-006, CMP-007, CMP-008, CMP-009, CMP-010 |
+| CR-008 | CMP-004, CMP-011 |
+| CR-009 | CMP-001, CMP-003, CMP-014, CMP-022 |
+| CR-010 | CMP-012 |
+| CR-011 | CMP-003, CMP-014, CMP-022 |
+| CR-012 | CMP-003, CMP-014 |
+| CR-013 | CMP-022 |
+| CR-014 | CMP-003 |
+| CR-015 | CMP-003, CMP-014 |
+| CR-016 | CMP-003, CMP-001 |
+| CR-017 | CMP-003, CMP-014, CI job `secrets-scan` (§4.12.5) |
+| CR-018 | CMP-003, CMP-014 |
+| CR-019 | CMP-002, CMP-003 |
+| CR-020 | CMP-003 |
+| CR-021 | CMP-002, CMP-004, CMP-020 |
+| CR-022 | CMP-001, CMP-003 |
+| CR-023 | CMP-002, CMP-015, CMP-019, CMP-020, CMP-021 |
+| CR-024 | CMP-015 |
+| CR-025 | CMP-018 |
+| CR-026 | CI job `deps-audit` (§4.12.5) |
+| CR-027 | CMP-016, CMP-017 |
+| CR-028 | CMP-001 |
+| CR-029 | CMP-003 |
+| CR-030 | CMP-001 |
+| CR-031 | §1.7, §4.12 |
+| CR-032 | CI pipeline (§4.12.5) |
+| CR-033 | Deploy pipeline (§4.12.6) |
+| CR-034 | Deploy pipeline (§4.12.6) |
+| CR-035 | CMP-019, CI job `migrations` (§4.12.5) |
+| CR-036 | CMP-002, deploy pipeline (§4.12.6) |
 
 ---
 
@@ -2824,3 +2937,4 @@ Every FR and NFR appears here. `—` means the item genuinely has no element of 
 | v0.5 | 2026-10-19 | Neeraj Gurjar | Korean (`ko`) added as a third UI language: locale rules, routes, date format, Korean error messages, notice, dimension, band, level and label texts, job role names (`name_ko`, `nameKo`) and the consent locale check. The role × permission table now uses ✔️ / ✗ marks instead of Yes / No. | Let the Korean HQ team use and review the product in Korean (ASM-016); make the permission table easier to scan. | Changed: CR-016, CR-028, CR-029, CR-030, FR-002, FR-021, NFR-024, ASM-004, OOS-004, TBL-001, TBL-002, API-003, API-004, API-016, API-017, API-018, ERR-001–ERR-034 (messages), §1.2, §4.6, §4.7.3, §4.7.4, §4.9, §5.5. Added: ASM-016. |
 | v0.6 | 2026-10-19 | Neeraj Gurjar | Review against the rubric. (1) A system check now drops rewrite suggestions that add a number not in the original line, so FR-010.5 is testable (new mock fixture and drop metric). (2) Fixes: Korean catalog cache key, three-language wording in the code tree and PR checklist, expiry filters use the Clock time, CSRF headers for Bearer clients, cost estimate counts thinking tokens. | Make every criterion testable and remove small inconsistencies. | Changed: CR-004, FR-010, FR-014, FR-021, NFR-018, §2.2, §2.4, §4.5, §4.7.5, §4.7.6, §4.11, §6.1, API-006, API-010. |
 | v0.7 | 2026-10-19 | Neeraj Gurjar | Missing skills are now decided by code from the role catalog: each core skill has match terms (`core_skills` becomes `jsonb`), the worker computes the missing core skills before the AI call, the AI only rates and explains them and may add up to `MAX_AI_EXTRA_SKILLS` extra skills, and every row stores its `source`. Seed data rewritten with match terms. | The old filter compared descriptive phrases with the resume and almost never matched, so FR-009 depended on the AI; now it is deterministic and testable. | Changed: FR-009, FR-021, TBL-001, TBL-006, API-002, API-011, API-016, API-017, API-018, §4.7.1, §4.7.2, §4.7.5, §4.7.6, §4.8.5, §5.5, §5.7, P-02. Added: `MAX_AI_EXTRA_SKILLS`. |
+| v0.8 | 2026-10-19 | Neeraj Gurjar | (1) New NFR-025 with one degraded-operation matrix (§4.4.1) for PostgreSQL, Redis, S3, Anthropic and JWKS outages; readiness now fails only on PostgreSQL. (2) AI circuit breaker (§4.7.7, FR-011.9). (3) Test titles carry criterion IDs and a CI script fails when a criterion has no test. (4) Personal data inventory (§5.8). (5) Reverse traceability: tables to requirements (§7.2) and rules to components (§7.3). | Outage behaviour was spread over six places; the matrix and the criterion check make it verifiable, and the inventory makes erasure completeness checkable. | Changed: CR-015, FR-011, API-020, CMP-022, §2.2, §2.4, §2.5, §4.11, §4.12.5. Added: NFR-025, §4.4.1, §4.7.7, §5.8, §7.2, §7.3, `AI_CIRCUIT_FAILURES`, `AI_CIRCUIT_WINDOW_MS`, `AI_CIRCUIT_OPEN_MS`. |
