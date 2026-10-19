@@ -430,39 +430,389 @@ Listing safeguards does **not** make the system DPDP-compliant. The following mu
 
 ```mermaid
 flowchart LR
-  Client --> API
-  API --> DB[(Database)]
+  subgraph Client
+    WEB[CMP-001 Web app<br/>Next.js 15]
+  end
+  subgraph Platform["SurfingBear platform (external)"]
+    IDP[CMP-008 Identity<br/>JWKS / session JWT]
+  end
+  subgraph Backend["Resume Optimizer backend (ap-south-1)"]
+    API[CMP-002 API<br/>NestJS HTTP]
+    WRK[CMP-003 Worker<br/>NestJS + BullMQ + cron]
+    PG[(CMP-004 PostgreSQL 16)]
+    RD[(CMP-005 Redis 7)]
+    S3[(CMP-006 Object storage<br/>S3, private, SSE-KMS)]
+    PDF[CMP-009 PDF renderer<br/>react-pdf, in worker]
+    OBS[CMP-010 Observability<br/>pino → logs, Sentry, uptime]
+  end
+  subgraph AI["AI provider (external)"]
+    LLM[CMP-007 AiPort → Anthropic Messages API]
+  end
+  WEB -- "HTTPS JSON, Bearer JWT" --> API
+  WEB -. "login redirect" .-> IDP
+  API -- "JWKS fetch (cached)" --> IDP
+  API --> PG
+  API --> RD
+  API -- "stream validated file" --> S3
+  API -- "enqueue job" --> RD
+  RD -- "consume job" --> WRK
+  WRK --> PG
+  WRK -- "read file / write report" --> S3
+  WRK -- "masked text, JSON schema" --> LLM
+  WRK --> PDF
+  API --> OBS
+  WRK --> OBS
 ```
 
 ### 4.2 Components
 
 | ID | Component | Responsibility | Technology |
 |---|---|---|---|
-| CMP-001 | <name> | <what it does> | <tech> |
+| CMP-001 | Web app | Upload form with role/level picker, consent dialog, analysis status polling, result view with plan gating, history, PDF download, erase-my-data flow, error display with `requestId`. Renders lists as Server Components; forms and polling as Client Components. Route guard in `middleware.ts` redirects unauthenticated users to the platform login. | Next.js 15 (App Router), React 19, TypeScript, MUI 6, React Hook Form + Zod, TanStack Query (polling), next-intl |
+| CMP-002 | API | All synchronous behaviour: auth guard, RBAC, validation, upload validation and streaming to storage, quota transaction, job enqueue, result projection and gating, report URL signing, deletion requests, admin routes, health. Owns the error filter and the audit writer. | NestJS 11, Prisma 6, class-validator, `@nestjs/bullmq`, `jose` (JWT), `file-type` (signatures), `pdf-parse` (page count only), Swagger |
+| CMP-003 | Worker | Asynchronous pipeline: `run-analysis` (extract → mask → AI → validate → persist), `render-report`, `erase-user-data`, cron jobs (purge, reconcile). Scales by process count. Pauses on `/ready` failure. | Same NestJS codebase, separate entrypoint `worker.ts`; BullMQ workers; `@nestjs/schedule` |
+| CMP-004 | PostgreSQL | System of record: catalogue, resumes, analyses, results, usage counters, consents, deletion requests, audit, AI call metrics. Enforces status/ownership/quota constraints at the schema level. | PostgreSQL 16 (managed, PITR), extensions `pgcrypto`, `citext` |
+| CMP-005 | Redis | Job queue (BullMQ), per-user quota fast-path cache, rate limiter counters, in-flight locks, JWKS cache, AI circuit-breaker state. Never the sole source of truth for anything durable (BR-004). | Redis 7 (managed), `maxmemory-policy volatile-ttl`, AOF on |
+| CMP-006 | Object storage | Private bucket for resume files and PDF reports; presigned GET for downloads; lifecycle rule as a safety net (expire `resumes/` after 3 days, `reports/` after 45 days) behind the application purge. | AWS S3 `ap-south-1` (prod); MinIO in `docker-compose` locally; `@aws-sdk/client-s3` |
+| CMP-007 | AI adapter | Implements `AiPort.analyse(input): Promise<AiResult>`: builds the prompt, calls the Messages API with structured JSON output, enforces timeout/retry/circuit rules, maps provider errors to the failure codes, records `ai_calls`. Only this adapter imports the provider SDK. | `@anthropic-ai/sdk` (TypeScript), Zod schema shared with FR-014 validation |
+| CMP-008 | Platform identity (external) | Issues the user's session JWT; publishes JWKS; owns plan/role claims. | SurfingBear platform (A-01) |
+| CMP-009 | PDF renderer | Deterministic PDF from the stored result and the plan-gated projection; runs in the worker process. | `@react-pdf/renderer` |
+| CMP-010 | Observability | Structured logs with redaction, error tracking, uptime checks, dashboards (queue depth, AI latency, failure codes, quota rejections). | pino → platform log sink; Sentry (api + web + worker); Better Stack uptime |
 
 ### 4.3 Main flows
-One sequence diagram per main flow.
+
+Each diagram shows the success path and the failure paths required by the rubric. Error codes refer to §6.3; failure codes `AI_*`, `PARSE_FAILED`, `TEXT_TOO_SHORT` are stored on the analysis (ERR-040…ERR-047).
+
+#### SEQ-01 Upload a resume (FR-003, FR-004, FR-005, FR-007)
 
 ```mermaid
 sequenceDiagram
-  participant U as User
-  participant A as API
-  U->>A: request
-  A-->>U: response
+  autonumber
+  participant U as User (Web, CMP-001)
+  participant A as API (CMP-002)
+  participant R as Redis (CMP-005)
+  participant P as PostgreSQL (CMP-004)
+  participant S as Object storage (CMP-006)
+  U->>A: POST /resumes (multipart, Bearer JWT)
+  A->>A: verify JWT (JWKS cache) → principal
+  alt token invalid / expired
+    A-->>U: 401 UNAUTHENTICATED (ERR-002)
+  end
+  A->>R: INCR rate-limit key (10/h/user)
+  alt Redis unavailable
+    A-->>U: 503 SERVICE_UNAVAILABLE (ERR-031) — fail closed for writes
+  else limit exceeded
+    A-->>U: 429 RATE_LIMITED (ERR-005), Retry-After
+  end
+  A->>P: consent for CONSENT_VERSION? pending erasure?
+  alt no consent
+    A-->>U: 403 CONSENT_REQUIRED (ERR-006)
+  else erasure pending
+    A-->>U: 409 DELETION_IN_PROGRESS (ERR-025)
+  end
+  A->>A: multipart parser: size cap MAX_FILE_BYTES, declared type
+  alt too large / wrong type / empty
+    A-->>U: 413 ERR-010 / 415 ERR-011 / 422 ERR-013
+  end
+  A->>A: signature + structure check (magic bytes, zip entry, /Encrypt, page count)
+  alt signature mismatch / encrypted / corrupted / too many pages
+    A->>P: audit resume.rejected {code}
+    A-->>U: 415 ERR-012 / 422 ERR-014 / 422 ERR-015 / 422 ERR-016
+  end
+  A->>S: PUT resumes/{env}/{userId}/{resumeId}.{ext} (SSE-KMS)
+  alt storage error / timeout 10 s
+    A-->>U: 503 STORAGE_ERROR (ERR-034); nothing persisted
+  end
+  A->>P: INSERT resumes(status=uploaded) + audit resume.uploaded
+  alt DB error
+    A->>S: DELETE object (best effort, logged)
+    A-->>U: 503 SERVICE_UNAVAILABLE (ERR-031)
+  end
+  A->>R: enqueue extract-text {resumeId}
+  alt enqueue fails
+    A->>P: UPDATE resumes status=extraction_failed, failure=INTERNAL
+    A-->>U: 503 ERR-031
+  end
+  A-->>U: 201 { resumeId, status: "uploaded" }
+```
+
+#### SEQ-02 Start an analysis with quota and concurrency (FR-008, FR-009, BR-004–BR-006)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (CMP-001)
+  participant A as API (CMP-002)
+  participant R as Redis (CMP-005)
+  participant P as PostgreSQL (CMP-004)
+  participant Q as Queue (BullMQ on Redis)
+  U->>A: POST /analyses { resumeId, roleId, experienceLevel }
+  A->>A: validate DTO; verify JWT; consent gate
+  A->>P: SELECT resume (owner, status) ; SELECT role (active)
+  alt resume not owned / missing
+    A-->>U: 404 NOT_FOUND (ERR-004)
+  else resume not ready
+    A-->>U: 409 RESUME_NOT_READY (ERR-019) or 422 extraction failure code
+  else role unknown/inactive
+    A-->>U: 422 UNKNOWN_ROLE (ERR-023)
+  end
+  A->>R: GET quota:user:{id}:{period}
+  alt Redis has count ≥ limit
+    A-->>U: 402 QUOTA_EXCEEDED (ERR-020) — fast path, no DB write
+  else Redis unavailable
+    Note over A: skip fast path (BR-005)
+  end
+  A->>P: BEGIN; SELECT usage_counters FOR UPDATE (upsert period row)
+  alt count ≥ limit
+    A->>P: ROLLBACK
+    A-->>U: 402 QUOTA_EXCEEDED (ERR-020)
+  end
+  A->>P: INSERT analyses(status=queued) — partial unique index on in-flight
+  alt unique violation (one in flight)
+    A->>P: ROLLBACK
+    A-->>U: 409 ANALYSIS_IN_PROGRESS (ERR-021)
+  end
+  A->>P: UPDATE usage_counters count+1; INSERT audit analysis.started; COMMIT
+  alt DB failure anywhere
+    A-->>U: 503 SERVICE_UNAVAILABLE (ERR-031); nothing committed
+  end
+  A->>R: SET quota cache = new count (TTL to period end)
+  A->>Q: add job run-analysis (jobId = analysisId, attempts 3, backoff 10 s exp)
+  alt enqueue fails
+    A->>P: UPDATE analyses status=failed, failure=INTERNAL; counter-1 (BR-007)
+    A-->>U: 503 ERR-031
+  end
+  A-->>U: 202 { analysisId, status: "queued" }
+  Note over A,Q: reconcile job every 5 min re-enqueues orphaned queued rows (BR-006)
+```
+
+#### SEQ-03 Analysis pipeline in the worker (FR-006, FR-010–FR-014)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Q as Queue
+  participant W as Worker (CMP-003)
+  participant P as PostgreSQL
+  participant S as Object storage
+  participant AI as AiPort → Anthropic (CMP-007)
+  Q->>W: run-analysis {analysisId} (attempt n)
+  W->>P: SELECT analysis + resume FOR UPDATE SKIP LOCKED
+  alt analysis terminal (completed/failed) — idempotent re-run (BR-008)
+    W-->>Q: ack, no-op
+  end
+  W->>P: UPDATE status=running, attempts=n, started_at
+  alt resume.extracted_text missing (extract-text job not finished)
+    W->>S: GET file ; W->>W: extract text (pdf-parse / mammoth)
+    alt parser error / text < 200 chars / > 60 000 chars
+      W->>P: UPDATE resume extraction_failed; analysis failed {PARSE_FAILED | TEXT_TOO_SHORT}; audit
+      Note over W: no quota refund (user-caused, BR-007)
+      W-->>Q: ack
+    end
+  end
+  W->>W: mask PII (BR-011); build prompt with role rubric; data-block delimiters
+  W->>AI: analyse(masked text, rubric, JSON schema) timeout 60 s
+  alt circuit open
+    W-->>Q: re-queue with delay 30 s (does not consume an attempt)
+  else timeout
+    W->>AI: retry ×2 (2 s, 8 s)
+    W->>P: on final failure: status=failed AI_TIMEOUT; counter-1; audit
+  else 429 / 529 rate limited
+    W->>AI: retry honouring retry-after (≤30 s)
+    W->>P: on final failure: failed AI_RATE_LIMITED; refund; audit
+  else 5xx / network
+    W->>AI: retry ×2
+    W->>P: on final failure: failed AI_PROVIDER_ERROR; refund; audit
+  else stop_reason = refusal
+    W->>P: failed AI_REFUSED; no refund; audit
+  else JSON / schema invalid
+    W->>AI: retry once with "return only the schema" instruction
+    W->>P: on second failure: failed AI_MALFORMED_RESPONSE; refund; audit
+  end
+  W->>W: validate (FR-014): evidence substrings, no-new-facts, missing skills ⊆ role_skills
+  W->>W: overallScore = round-half-up(Σ w_i·s_i / 100)
+  W->>P: BEGIN; INSERT dimension_scores, missing_skills, suggestions; UPDATE analysis completed, completed_at, model; INSERT ai_calls; audit; COMMIT
+  alt DB failure
+    W-->>Q: nack → BullMQ retry (attempt n+1); nothing partially persisted
+  end
+  W-->>Q: ack
+```
+
+#### SEQ-04 Read a result with plan gating (FR-010, FR-017, FR-030)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (CMP-001)
+  participant A as API (CMP-002)
+  participant P as PostgreSQL
+  loop every 2 s while non-terminal
+    U->>A: GET /analyses/{id}
+    A->>P: SELECT analysis WHERE id AND user_id = sub AND deleted_at IS NULL
+    alt not found / not owned
+      A-->>U: 404 NOT_FOUND (ERR-004)
+    else DB unavailable
+      A-->>U: 503 SERVICE_UNAVAILABLE (ERR-031)
+    end
+    alt status queued/running
+      A-->>U: 200 { status, attempts } + Retry-After: 2
+    else status failed
+      A-->>U: 200 { status: failed, failureCode, userMessage, refunded }
+    else completed
+      A->>P: SELECT scores, missing_skills, suggestions
+      A->>A: project by plan claim: lock entries beyond FREE_VISIBLE_* (BR-015)
+      A-->>U: 200 full result shape (API-009) + disclaimer
+    end
+  end
+```
+
+#### SEQ-05 Generate and download the PDF report (FR-019, FR-020)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (CMP-001)
+  participant A as API (CMP-002)
+  participant P as PostgreSQL
+  participant Q as Queue
+  participant W as Worker (CMP-003) + PDF (CMP-009)
+  participant S as Object storage
+  U->>A: POST /analyses/{id}/report
+  A->>P: analysis owned & completed?
+  alt not owned
+    A-->>U: 404 (ERR-004)
+  else not completed
+    A-->>U: 409 ANALYSIS_NOT_COMPLETED (ERR-022)
+  else report exists (generating/ready)
+    A-->>U: 202/200 existing { reportId, status }
+  end
+  A->>P: INSERT reports(status=generating)
+  A->>Q: add render-report (jobId = reportId)
+  A-->>U: 202 { reportId, status: generating }
+  Q->>W: render-report
+  W->>P: load analysis + results; project by plan at render time
+  W->>W: render PDF (react-pdf) — budget 5 s, ≤ 6 pages, ≤ 2 MB
+  alt render error / over limits
+    W->>P: UPDATE reports failed (ERR-033), failures+1; audit report.failed
+    Note over W: 3 consecutive failures → retry blocked 1 h
+  end
+  W->>S: PUT reports/{env}/{userId}/{analysisId}.pdf
+  alt storage error
+    W-->>Q: nack → retry (3 attempts) then reports.failed ERR-034
+  end
+  W->>P: UPDATE reports ready, size_bytes, ready_at
+  U->>A: GET /analyses/{id}/report
+  A->>P: report row (owner check)
+  alt not owner
+    A-->>U: 404 (ERR-004)
+  else generating
+    A-->>U: 200 { status: generating }
+  else failed
+    A-->>U: 200 { status: failed, errorCode }
+  else ready
+    A->>S: presign GET (300 s, attachment filename)
+    A->>P: audit report.downloaded
+    A-->>U: 200 { status: ready, url, expiresAt }
+    U->>S: GET url (direct download)
+  end
+```
+
+#### SEQ-06 Erase all my data (FR-022, BR-014)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User / Admin
+  participant A as API (CMP-002)
+  participant P as PostgreSQL
+  participant Q as Queue
+  participant W as Worker (CMP-003)
+  participant S as Object storage
+  U->>A: POST /me/deletion-requests  (or admin: POST /admin/users/{id}/deletion-requests)
+  A->>P: pending request exists?
+  alt already pending
+    A-->>U: 200 existing { id, status: pending }
+  end
+  A->>P: INSERT deletion_requests(pending); audit erasure.requested
+  alt DB failure
+    A-->>U: 503 ERR-031
+  end
+  A->>Q: add erase-user-data (jobId = requestId, attempts 5, backoff 1 h)
+  A-->>U: 202 { id, status: pending }
+  Q->>W: erase-user-data
+  W->>P: cancel in-flight analyses (failed CANCELLED); list storage keys for user
+  W->>S: DELETE all resumes/{env}/{userId}/* and reports/{env}/{userId}/*
+  alt storage deletion error
+    W->>P: UPDATE deletion_requests attempts+1, last_error
+    W-->>Q: nack → retry (up to 5 over ~6 h)
+    Note over W: after 5 failures: status=failed, Sentry alert, admin re-run (FR-025)
+  end
+  W->>P: BEGIN; NULL PII columns (extracted_text, original_filename, suggestions text…); mark rows deleted; withdraw consent; UPDATE request completed; audit erasure.completed; COMMIT
+  alt DB failure
+    W-->>Q: nack → retry; storage deletes are idempotent
+  end
+  U->>A: GET /me/deletion-requests/{id}
+  A-->>U: 200 { status: completed, completedAt }
+```
+
+#### SEQ-07 Retention purge (FR-023)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Cron (in worker)
+  participant P as PostgreSQL
+  participant S as Object storage
+  C->>P: pg_try_advisory_lock(purge)
+  alt lock held by another worker
+    C-->>C: skip this run
+  end
+  C->>P: SELECT resumes WHERE file_deleted_at IS NULL AND last_terminal_at < now()-24h LIMIT 500
+  loop each row
+    C->>S: DELETE object
+    alt delete error
+      C->>P: log + leave row for next run (bucket lifecycle rule is the safety net)
+    else
+      C->>P: UPDATE file_deleted_at = now()
+    end
+  end
+  C->>P: UPDATE resumes SET extracted_text = NULL WHERE extracted_at < now()-30d
+  C->>P: DELETE reports older than 30 d (+ objects); DELETE analyses older than 365 d (cascade)
+  C->>P: audit purge.completed {counts}; release lock
 ```
 
 ### 4.4 External integrations
 
 | System | Purpose | Protocol / auth | Failure handling |
 |---|---|---|---|
+| SurfingBear platform identity (CMP-008) | Verify the user's session; obtain `sub`, `plan`, `role` | JWT RS256 in `Authorization: Bearer`; JWKS over HTTPS, cached in Redis 10 min, refreshed on unknown `kid` | JWKS unreachable and cache empty → 503 `ERR-031`; cache present → verification continues. Invalid/expired token → 401 `ERR-002`. No fallback to unauthenticated access. |
+| Anthropic Messages API (via CMP-007) | Score resume, judge missing skills, propose rewrites | HTTPS, API key from env `AI_API_KEY`; SDK `@anthropic-ai/sdk`; structured JSON output; timeout 60 s; SDK retries disabled (the adapter owns retries) | Per FR-013: retry on timeout/429/529/5xx with backoff, circuit breaker 5 failures/60 s → open 30 s, no retry on 4xx/refusal, malformed JSON → one corrective retry; terminal failures become `analyses.failure_code` and refund quota. Data sent: masked text + rubric only; no files. Region: provider default (see L-1). |
+| AWS S3 `ap-south-1` (CMP-006) | Store resume files and reports; presigned downloads | HTTPS, IAM role of the service; SSE-KMS; bucket policy denies public access | PUT/DELETE timeout 10 s, 2 retries; failure → 503 `ERR-034` (upload) or job retry (worker). Lifecycle rules expire objects as a safety net. |
+| Managed PostgreSQL (CMP-004) | System of record | TLS, credentials from env; Prisma pool size 10 per process; statement timeout 15 s | Unavailable → 503 `ERR-031` for all requests; worker pauses; queue holds jobs. |
+| Managed Redis (CMP-005) | Queue, cache, rate limits, locks | TLS, password from env; `ioredis` with 2 s connect timeout | Unavailable → writes fail closed (503), reads continue from Postgres; queue consumers reconnect with backoff; no durable data lost (BR-004). |
+| Sentry / log sink / uptime (CMP-010) | Observability | HTTPS DSN; async transport | Never blocks requests; dropped events are logged locally. |
 
 ### 4.5 Tech stack and reasons
 
 | Layer | Choice | Why this choice |
 |---|---|---|
+| Frontend | Next.js 15 (App Router) + TypeScript | Mandated by the brief. App Router lets the history and result pages render on the server (fast first paint, no token in client bundles) while the upload form and status polling are small client components. One language across the stack. |
+| UI / forms | MUI 6, React Hook Form + Zod, TanStack Query | Zod schemas are shared with the API so the file/role/level validation is identical on both sides; TanStack Query gives polling with backoff for FR-010 without hand-written timers. |
+| Backend | NestJS 11 + TypeScript | Mandated. Module system maps one-to-one onto the domain modules in §2.2; guards/pipes/filters implement CR-006, CR-021 and CR-014 as framework features rather than ad-hoc code; `@nestjs/bullmq` and `@nestjs/schedule` cover the worker without a second framework. |
+| ORM / migrations | Prisma 6 | Type-safe client, declarative schema, `migrate deploy` in CI (CR-038); raw SQL migrations for partial unique indexes and check constraints Prisma cannot express. |
+| Database | PostgreSQL 16 | Mandated. Needed specifically for: row-level locking of `usage_counters` (BR-004), partial unique index for one in-flight analysis (FR-009), check constraints for status machines (BR-009), `citext` for case-insensitive skill aliases, JSONB for AI rationale evidence, PITR for NFR-015. |
+| Cache / queue | Redis 7 + BullMQ | Mandated. One Redis serves four needs that each fit it: a persistent job queue with retries, stalled-job detection and delayed re-queue (FR-010, FR-013); atomic `INCR` counters for rate limits (CR-024) and the quota fast path (BR-005); TTL keys for the JWKS cache; circuit-breaker state shared across workers. Redis is never the only copy of durable data. |
+| AI provider | Anthropic Claude via the Messages API, structured JSON output, model/effort configurable (`claude-opus-5-5`, `medium` by default) | Structured outputs return schema-valid JSON, which is what the fact-guards in FR-014 are built on; long-context handles a full resume plus rubric in one call; explicit `refusal` stop reason lets FR-013 distinguish refusals from errors. Isolated behind `AiPort` so the provider can be swapped by changing one adapter. |
+| Text extraction | `pdf-parse`, `mammoth`, `file-type` | Pure-JS, no native binaries in the container; run server-side so the raw file never leaves our storage (A-03). |
+| PDF output | `@react-pdf/renderer` in the worker | Deterministic layout from React components, no headless browser (smaller image, no Chromium CVE surface), same skills as the web team. |
+| Object storage | AWS S3 (`ap-south-1`), MinIO locally | Private bucket with SSE-KMS and lifecycle rules gives encryption at rest and a retention safety net (CR-025/026); presigned URLs keep file bytes out of the API (FR-020). Region keeps resume data in India by default (A-14). |
+| Auth | Platform JWT verified with `jose` against JWKS | The brief forbids local login; JWKS verification needs no per-request call to the platform and no shared secret. |
+| Hosting | Containers (API ×2, worker ×2) on the company's standard container platform in `ap-south-1`; managed Postgres and Redis | Horizontal scaling of the worker by process count (NFR-005); managed stores give backups and PITR without ops effort. |
+| CI/CD | GitHub Actions | Company standard (CR-036); runs lint, typecheck, unit, Testcontainers integration tests, build, migrations. |
+| Observability | pino, Sentry, Better Stack | Structured logs with redaction (CR-010); Sentry captures 5xx with `requestId` (CR-016); uptime on `/ready` (CR-040). |
+| Testing | Jest + supertest + Testcontainers; Vitest + RTL; Playwright; k6 | Integration tests run against real Postgres/Redis/MinIO containers so constraints and locks are tested, not mocked; the AI port has a golden-fixture stub (NFR-017). |
 
 ---
-
 ## 5. ERD and database design
 
 ### 5.1 ERD
