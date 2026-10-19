@@ -27,6 +27,8 @@ List every AI conversation you used, with a link and one line on what it was for
 | 2026-10-19 | v0.7 | Missing core skills decided by code from catalog match terms | `c825eb9` |
 | 2026-10-19 | v0.8 | Outage matrix, AI circuit breaker, criterion-to-test check, personal data inventory, reverse traceability | `9bf4c39` |
 | 2026-10-19 | v0.9 | Resume limit, script check at parse, exact error bodies, test fixtures, grievance erasure | `9a8ba53` |
+| 2026-10-19 | v0.10 | Build test 4 fixes | `c68a96b` |
+| 2026-10-19 | v0.11 | Build test 5 fixes | `5b73fe5` |
 
 ### Main decisions and their trade-offs
 
@@ -51,6 +53,8 @@ List every AI conversation you used, with a link and one line on what it was for
   | 1 | v0.1 | 16–20 | Dockerfiles, CI jobs, per-environment URLs, test tokens, metrics pipeline |
   | 2 | v0.2 | 10–12 | env loading for the web app, the 503/500 rule, OIDC trust, ESM-only `pdfjs-dist`, CODEOWNERS |
   | 3 | v0.3 | about 8 | erasure racing a running analysis, Redis failures on caches, per-process env validation |
+  | 4 | v0.9 | about 9 | new gaps opened by the v0.6–v0.9 additions: outage-test harness, fixture build hook, erase CLI start-up, criterion script rules |
+  | 5 | v0.10 | about 6 | migration task image on deploy, log-scan false positives on IDs, header logging, JWKS refresh timing |
 
   The findings of each round were fixed in the next version.
 - **Consistency audit** against `RUBRIC.md`: constants, enums, error codes, traceability links and JSON examples.
