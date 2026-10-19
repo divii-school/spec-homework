@@ -1725,3 +1725,53 @@ Frontend mapping: `messages/en.json` has a key `errors.<CODE>` for every row; `A
 
 ---
 
+## 7. Traceability matrix
+
+| Requirement | Component(s) | Table(s) | API(s) | Verified by |
+|---|---|---|---|---|
+| FR-001 Consent | CMP-001, CMP-002, CMP-003 | TBL-001, TBL-002, TBL-011 | API-001, API-002, API-005, API-009 | Integration tests `TestFR001_*`: upload without consent → 403; consent idempotent; status in `/me` |
+| FR-002 Upload | CMP-002, CMP-004, CMP-012 | TBL-005, TBL-011 | API-005 | Unit tests per rule 1–10 with fixture files (5 MiB+1 byte, 11-page PDF, image-only PDF, renamed PNG) |
+| FR-003 Extraction | CMP-004 | TBL-005 | API-005 | Unit tests `TestFR003_*` on sample PDF/DOCX; ciphertext stored |
+| FR-004 List/view resumes | CMP-002, CMP-004 | TBL-005 | API-006, API-007 | Integration: ownership, ordering, no text in response |
+| FR-005 Delete resume | CMP-004, CMP-012 | TBL-005, TBL-006, TBL-011 | API-008 | Integration: S3 object gone, status PURGED, 409 while in progress |
+| FR-006 Job roles | CMP-002 | TBL-003, TBL-004 | API-003, API-004 | Integration: level filter, inactive hidden, seed has ≥ 10 roles |
+| FR-007 Request analysis | CMP-005, CMP-011 | TBL-001, TBL-002, TBL-005, TBL-006, TBL-010, TBL-012, TBL-011 | API-009 | Integration: each error path; row QUEUED; task enqueued (asynq inspector) |
+| FR-008 Run analysis | CMP-006, CMP-007, CMP-011 | TBL-006, TBL-007, TBL-008, TBL-009, TBL-010 | API-011 (observes result) | Worker tests with fake AI: success, 3× provider error → FAILED + refund, invalid JSON → retry, idempotent pickup |
+| FR-009 Scoring | CMP-006 (`services/scoring.go`) | TBL-007, TBL-006 | API-011, API-012 | Unit test of the weighted average example (72) and rounding |
+| FR-010 Missing skills | CMP-006, CMP-007 | TBL-004, TBL-008 | API-011, API-012 | Unit: unknown names dropped, ordering required→preferred, cap 50 |
+| FR-011 Rewrites | CMP-006, CMP-007 | TBL-009 | API-011, API-012 | Unit: unmatched `original_line` dropped, cap 10, length limits |
+| FR-012 Status tracking | CMP-001, CMP-005 | TBL-006 | API-010, API-011, API-012 | Integration: null result fields while QUEUED; 409 on PDF; web test for polling stop at 150 s |
+| FR-013 Quota | CMP-005, CMP-006 | TBL-010, TBL-012, TBL-006 | API-001, API-009 | Integration: 4th free analysis → 429 with `X-Quota-Reset`; refund on FAILED; IST month boundary with fake clock |
+| FR-014 Plan gating | CMP-005, CMP-008 | TBL-012, TBL-008, TBL-009 | API-011, API-012 | Integration: free sees 3/2 with correct totals and locked counts; pro sees all; upgrade unlocks old analysis |
+| FR-015 PDF | CMP-008 | TBL-006, TBL-007, TBL-008, TBL-009, TBL-011 | API-012 | Integration: headers, size < 2 MiB, text contains role title and "N more"; 409 when not completed |
+| FR-016 List/view/delete analyses | CMP-005 | TBL-006 (+cascade) | API-010, API-011, API-013 | Integration: filters, ownership 404, cascade delete, 409 in progress |
+| FR-017 Retention | CMP-009, CMP-012 | TBL-005, TBL-006, TBL-011 | — (no API; scheduled job) | Scheduler test with fake clock: 31-day-old resume purged, 366-day-old analysis deleted, audit row with counts |
+| FR-018 Export / erase | CMP-014, CMP-012 | TBL-001, TBL-002, TBL-005, TBL-006, TBL-010, TBL-011 | API-014, API-015 | Integration: export contains decrypted text; erase removes S3 and rows, keeps users/audit; cool-down 429 |
+| FR-019 Plan sync | CMP-003, CMP-013 | TBL-001, TBL-011 | API-020 (and JWT path in API-001) | Integration: webhook with valid/invalid HMAC; stale `changed_at` ignored; JWT newer `iat` updates plan |
+| FR-020 Admin catalogue | CMP-002 | TBL-003, TBL-004, TBL-012, TBL-011 | API-017, API-018, API-019 | Integration: user → 403; duplicate slug 409; limits change applies to next `/me` |
+| FR-021 Account deletion | CMP-013, CMP-014 | same as FR-018 | API-021 | Integration: unknown user 204; known user erased with actor `platform` |
+| NFR-001 Upload p95 | CMP-004 | TBL-005 | API-005 | k6 script `perf/upload.js` on staging |
+| NFR-002 Analysis p95 | CMP-006, CMP-007 | TBL-006 | API-009, API-011 | k6 `perf/analysis.js`; metric `analysis_duration_seconds` |
+| NFR-003 Read p95 | CMP-002 | all read tables | API-001, 003, 004, 006, 007, 010, 011 | k6 `perf/reads.js` |
+| NFR-004 PDF p95 | CMP-008 | TBL-006–009 | API-012 | k6 `perf/report.js` |
+| NFR-005 Availability | CMP-002, CMP-010, CMP-011 | — (infrastructure) | API-016 | Uptime monitor report |
+| NFR-006 Scalability | CMP-006, CMP-011 | TBL-006 | API-009 | Burst test 200 analyses; queue wait metric |
+| NFR-007 Encryption | CMP-004, CMP-010, CMP-012 | TBL-005 | — (applies to all) | Infra checklist; unit test on ciphertext |
+| NFR-008 No PII in logs / AI | CMP-003, CMP-006, CMP-007 | — (applies to all) | all | Log scan test; prompt builder test asserts no `user_id` in payload |
+| NFR-009 Residency / retention | CMP-009, CMP-010, CMP-011, CMP-012 | TBL-005, TBL-006 | — (scheduled job) | Terraform region assertion; scheduler test |
+| NFR-010 Observability | CMP-002, CMP-006 | — (metrics, not tables) | API-016, `/metrics` | Dashboard and alert rules exist in repo |
+| NFR-011 AI cost | CMP-007 | TBL-006 (`ai_*_tokens`) | API-009 | Unit test `max_tokens`, attempts ≤ 3 |
+| NFR-012 Backup | CMP-010 | all | — (infrastructure) | Quarterly restore rehearsal record |
+| NFR-013 Coverage | all Go packages | — (code quality) | — | CI coverage gate |
+| NFR-014 Browsers | CMP-001 | — (frontend only) | — | Playwright CI job |
+| CR-001–CR-020 | CMP-003 (auth, logging, errors, rate limit), CMP-002, CI pipeline | TBL-001, TBL-011 | all | Tests named `TestCR0xx_*` plus pipeline configuration |
+
+Consistency checks performed by the author (same fact, same value everywhere): file size 5 MiB / 5,242,880 bytes in FR-002, TBL-005, API-001 `limits`, API-005 errors, ERR-014; page limit 10 in FR-002, TBL-005, ERR-016; text 200–30,000 chars in FR-002, FR-003, TBL-005, ERR-017, ERR-018; free limits 3 / 3 / 2 and pro 50 / unlimited / unlimited in section 0, 1.2, FR-013, FR-014, TBL-012 seed, API-001 example; retention 30 / 365 days in CR-014, FR-017, TBL-005, 1.7, A12; dimensions and weights in FR-009, 4.6, TBL-007, API-011 example (80·30+60·20+70·15+90·15+50·10+70·10 = 7200 → 72).
+
+---
+
+## 8. Change log
+
+| Version | Date | Author | What changed | Why | Affected IDs |
+|---|---|---|---|---|---|
+| v1.0 | 2026-10-19 | Nikky Navvya | Initial version: all 8 sections for the SurfingBear Resume Optimizer on Go + Next.js + PostgreSQL + Redis | Round 1 submission | CR-001–CR-020, FR-001–FR-021, NFR-001–NFR-014, CMP-001–CMP-014, TBL-001–TBL-012, API-001–API-021, ERR-001–ERR-025 |
