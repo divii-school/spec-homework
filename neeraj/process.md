@@ -17,7 +17,10 @@ List every AI conversation you used, with a link and one line on what it was for
   - A separate AI agent was given only `spec.md` and asked to act as the build-test builder and list every place it would have to guess. On v0.1 it estimated 16–20 guesses, mostly in deployment and operations (Dockerfiles, CI jobs, per-environment URLs, test tokens, metrics pipeline) plus a few runtime traps (Next.js CSP, a health check on a redirecting path, build-time `NEXT_PUBLIC_*` values in a single promoted image). These were fixed in v0.2 (see the change log).
   - A second agent audited internal consistency against `RUBRIC.md`: constants, enums, error codes, traceability links and JSON examples. It found real defects, for example that erasing data reset the FREE monthly limit and that `used` meant two different things in two endpoints. These are fixed in v0.2.
   - A second simulated build test on v0.2 estimated about 10–12 guesses, almost all in tooling and deployment (env loading for the web app, the 503/500 rule, OIDC trust, the ESM-only `pdfjs-dist` in a CommonJS NestJS build, CODEOWNERS). These were fixed in v0.3.
+  - A third simulated build test on v0.3 estimated about 8 guesses, now mostly concurrency and failure edges (erasure racing a running analysis, Redis failures on caches, per-process env validation, who schedules the maintenance jobs). These were fixed in v0.4.
   - A script checks that every JSON example parses, every table has a consistent column count, every referenced ID is defined, and every FR/NFR is in the traceability matrix.
 - **Decisions I changed while writing:**
   - The raw resume file is no longer kept. It is deleted right after parsing, with a 1-day S3 lifecycle rule as a backup, because nothing needs it after the text is extracted (DPDP data minimisation).
-  - Hindi PDF reports were dropped, because `pdfmake` cannot shape Devanagari text correctly. The UI stays bilingual.
+  - Hindi PDF reports were dropped, because `pdfmake` cannot shape Devanagari text correctly. The UI stays multilingual.
+  - On 2026-10-19 I added Korean (`ko`) as a third UI language (ASM-016), for SurfingBear's Korean HQ team and Korean-speaking users. The English notice stays the legally binding one.
+  - The role × permission table now uses ✔️ / ✗ marks instead of Yes / No, so it is easier to scan.

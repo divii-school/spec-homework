@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | Author | Neeraj Gurjar |
-| Version | v0.3 |
-| Last updated | 2026-10-16 |
+| Version | v0.5 |
+| Last updated | 2026-10-19 |
 | Status | Draft |
 | Backend stack | NestJS 11 (TypeScript 5, Node.js 22 LTS) |
 | Frontend stack | Next.js 15 (App Router, React 19) |
@@ -192,19 +192,21 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 
 | Permission | Anonymous | FREE_USER | PRO_USER | RO_ADMIN |
 |---|---|---|---|---|
-| Health checks (API-019, API-020) | Yes | Yes | Yes | Yes |
-| View own profile, plan and usage (API-001) | No | Yes | Yes | Yes |
-| View job role catalog (API-002) | No | Yes | Yes | Yes |
-| Read privacy notice, give consent (API-003, API-004) | No | Yes | Yes | Yes |
-| Upload, list, view own resumes (API-005 to API-007) | No | Yes (consent needed) | Yes (consent needed) | Yes (consent needed) |
-| Delete own resume (API-008) | No | Yes | Yes | Yes |
-| Create analysis (API-009) | No | Yes, `FREE_MONTHLY_ANALYSES` per month | Yes, `PRO_MONTHLY_ANALYSES` per month | As their plan |
-| View own analyses (API-010, API-011) | No | Yes, first `FREE_VISIBLE_SUGGESTIONS` suggestions | Yes, all suggestions | As their plan |
-| Download own PDF report (API-012) | No | Yes, same gating as API-011 | Yes, all suggestions | As their plan |
-| Delete own analysis (API-013) | No | Yes | Yes | Yes |
-| View own data summary, erase own data (API-014, API-015) | No | Yes (no consent needed) | Yes (no consent needed) | Yes |
-| Manage job role catalog (API-016 to API-018) | No | No | No | Yes |
-| See any other user's data | No | No | No | **No** (admins have no access to user data) |
+| Health checks (API-019, API-020) | ✔️ | ✔️ | ✔️ | ✔️ |
+| View own profile, plan and usage (API-001) | ✗ | ✔️ | ✔️ | ✔️ |
+| View job role catalog (API-002) | ✗ | ✔️ | ✔️ | ✔️ |
+| Read privacy notice, give consent (API-003, API-004) | ✗ | ✔️ | ✔️ | ✔️ |
+| Upload, list, view own resumes (API-005 to API-007) | ✗ | ✔️ (consent needed) | ✔️ (consent needed) | ✔️ (consent needed) |
+| Delete own resume (API-008) | ✗ | ✔️ | ✔️ | ✔️ |
+| Create analysis (API-009) | ✗ | ✔️ up to `FREE_MONTHLY_ANALYSES` per month | ✔️ up to `PRO_MONTHLY_ANALYSES` per month | ✔️ as their plan |
+| View own analyses (API-010, API-011) | ✗ | ✔️ first `FREE_VISIBLE_SUGGESTIONS` suggestions | ✔️ all suggestions | ✔️ as their plan |
+| Download own PDF report (API-012) | ✗ | ✔️ same gating as API-011 | ✔️ all suggestions | ✔️ as their plan |
+| Delete own analysis (API-013) | ✗ | ✔️ | ✔️ | ✔️ |
+| View own data summary, erase own data (API-014, API-015) | ✗ | ✔️ (no consent needed) | ✔️ (no consent needed) | ✔️ |
+| Manage job role catalog (API-016 to API-018) | ✗ | ✗ | ✗ | ✔️ |
+| See any other user's data | ✗ | ✗ | ✗ | ✗ (admins have no access to user data) |
+
+✔️ = allowed, ✗ = not allowed. Text after a mark is the condition or limit.
 
 ### 1.3 Logging
 
@@ -221,8 +223,8 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
 | CR-014 | Error format | Every error response from every endpoint uses exactly the format below, produced by one global `HttpExceptionFilter`. | e2e test asserts the shape for each error code it triggers. |
-| CR-015 | Safe errors | Error bodies never contain stack traces, SQL, internal hostnames or library messages. The global filter maps dependency outages to 503 `SERVICE_UNAVAILABLE` (ERR-011): PostgreSQL connection errors (Node error codes `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND`; SQLSTATE class `08`, `57P01`, `57P03`; TypeORM pool acquisition timeout), Redis errors while ioredis is not connected (`MaxRetriesPerRequestError`, "Connection is closed"), AWS SDK errors with `$metadata.httpStatusCode >= 500` or a network error, and JWKS unavailability (CR-005). Every other unexpected exception becomes 500 `INTERNAL_ERROR` (ERR-010) with the generic message. In both cases the full error is logged at `error` level with the request ID. | Unit tests of the filter for each listed error type and for a plain `Error`. |
-| CR-016 | Error codes | Every error code is listed in §6.3, is `UPPER_SNAKE_CASE`, never changes meaning, and is never reused. The message is chosen from the request's locale (§1.6). Clients branch on `code`, never on `message`. | Unit test: every value of the `ErrorCode` enum has an `en` and `hi` message. |
+| CR-015 | Safe errors | Error bodies never contain stack traces, SQL, internal hostnames or library messages. The global filter maps dependency outages to 503 `SERVICE_UNAVAILABLE` (ERR-011): PostgreSQL connection errors (Node error codes `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND`; SQLSTATE class `08`, `57P01`, `57P03`; TypeORM pool acquisition timeout), Redis errors when enqueueing a BullMQ job (cache reads, cache deletes and rate limiting never return 503: they fall back or fail open, see FR-002.7, FR-003.4 and CR-021), AWS SDK errors with `$metadata.httpStatusCode >= 500` or a network error, and JWKS unavailability (CR-005). Every other unexpected exception becomes 500 `INTERNAL_ERROR` (ERR-010) with the generic message. In both cases the full error is logged at `error` level with the request ID. Client settings that make outages fail fast: the ioredis client for caches and the throttler uses `enableOfflineQueue: false`, `maxRetriesPerRequest: 1`, `commandTimeout: 500`; the API's BullMQ producer connection uses `enableOfflineQueue: false`; TypeORM uses `extra: { max: 10, connectionTimeoutMillis: 2000 }`. | Unit tests of the filter for each listed error type and for a plain `Error`. |
+| CR-016 | Error codes | Every error code is listed in §6.3, is `UPPER_SNAKE_CASE`, never changes meaning, and is never reused. The message is chosen from the request's locale (§1.6). Clients branch on `code`, never on `message`. | Unit test: every value of the `ErrorCode` enum has an `en`, `hi` and `ko` message. |
 
 **Standard error response (all APIs):**
 
@@ -243,7 +245,7 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | Field | Type | Always present | Notes |
 |---|---|---|---|
 | `error.code` | string | Yes | One of §6.3. |
-| `error.message` | string | Yes | Localized (`en` or `hi`). |
+| `error.message` | string | Yes | Localized (`en`, `hi` or `ko`). |
 | `error.details` | array of `{ field: string, issue: string }` | Yes (may be empty `[]`) | For `VALIDATION_FAILED`, one entry per invalid field. `issue` is English and technical. |
 | `error.meta` | object | Only for `QUOTA_EXCEEDED` | `{ "limit": 3, "used": 2, "inProgress": 1, "resetsAt": "2026-10-31T18:30:00.000Z" }` (`used` = consumed, `inProgress` = reserved, as in API-001). |
 | `error.requestId` | string (UUID) | Yes | Same as the `X-Request-Id` header. |
@@ -256,7 +258,7 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
 | CR-017 | Secrets | Secrets (`ANTHROPIC_API_KEY`, `DATABASE_URL` and `REDIS_URL` (both contain passwords), `DATA_ENCRYPTION_KEYS`, `IP_HASH_SALT`) live in AWS Secrets Manager and are injected into ECS tasks as environment variables. No secret is committed to git; `.env` files are gitignored and only `.env.example` (no real values) is committed. CI runs `gitleaks` on every push and fails on any finding. | CI job `secrets-scan`. |
-| CR-018 | Configuration validation | All environment variables (§1.7) are validated at startup with a `zod` schema in `apps/api/src/config/env.schema.ts`. A missing or invalid variable stops the process with exit code 1 and a log line naming the variable (never its value). | Unit test with a missing variable. |
+| CR-018 | Configuration validation | All environment variables (§1.7) are validated at startup with a `zod` schema in `apps/api/src/config/env.schema.ts`. A missing or invalid variable stops the process with exit code 1 and a log line naming the variable (never its value). The file exports `dbEnvSchema` (`NODE_ENV`, `APP_ENV`, `DATABASE_URL`, `DATABASE_SSL`), `baseEnvSchema` (`dbEnvSchema` plus every API/worker variable of §1.7 that is not marked "API only" or "Worker only"), `apiEnvSchema` (base plus `PORT`) and `workerEnvSchema` (base plus `WORKER_*`). `main.ts` validates `apiEnvSchema`, `worker.ts` validates `workerEnvSchema`, and `data-source.ts`, `migrate.ts` and `run-seed.ts` validate `dbEnvSchema`; variables of another process are ignored. Code that runs outside Nest (`data-source.ts`, `migrate.ts`, `run-seed.ts`) first calls Node's `process.loadEnvFile('<repository root>/.env')` when that file exists. | Unit test with a missing variable. |
 | CR-019 | CORS | The web app and the API share one origin: in AWS the load balancer routes `/api/*` to the API, and in local the Next.js dev server proxies `/api/*` to the API (`API_PROXY_TARGET`). The API therefore never enables CORS, in any environment. | e2e test: a preflight from another origin gets no `Access-Control-Allow-Origin`. |
 | CR-020 | Input validation | Every request DTO uses `class-validator`. The global `ValidationPipe` is created with `whitelist: true`, `forbidNonWhitelisted: true`, `transform: true`. Unknown fields return 400 `VALIDATION_FAILED` (ERR-006). JSON bodies larger than `JSON_BODY_LIMIT` return 413 `PAYLOAD_TOO_LARGE` (ERR-007). Path IDs are validated as UUID v4. | e2e tests with an unknown field, a bad UUID, a 101 kB body. |
 | CR-021 | Rate limiting | `@nestjs/throttler` with Redis storage (`@nest-lab/throttler-storage-redis`), keyed by `userId` (custom `getTracker` returns `request.user.userId`). Limits: default 120 requests / 60 s; API-005 10 / 3600 s; API-009 10 / 3600 s; API-012 30 / 3600 s; API-015 3 / 3600 s; API-019 and API-020 are excluded (`@SkipThrottle()`). Over the limit: 429 `RATE_LIMITED` (ERR-009) with `Retry-After`. Requests without a valid token are rejected by `PlatformJwtGuard` before throttling runs; floods of such requests are stopped by the AWS WAF rule that blocks an IP sending more than 1000 requests in 5 minutes. If the throttler's Redis storage fails, the request is allowed (fail open, `warn` log), so a Redis problem does not block reads. Throttler keys use the prefix `ro:throttle:`. | e2e test sends 11 uploads in a row and gets 429 on the 11th. |
@@ -271,9 +273,9 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-028 | Locales | Supported locales: `en` (default) and `hi`. The web app uses `next-intl` with locale-prefixed routes (`/en/...`, `/hi/...`). All UI strings live in `apps/web/messages/en.json` and `apps/web/messages/hi.json`; no user-visible string is hard-coded in components. A key missing in `hi.json` falls back to `en`. | Lint rule `no-literal-string` (eslint-plugin-i18next) on `apps/web/src/components`. Unit test: `hi.json` has no key that `en.json` lacks. |
-| CR-029 | API locale | The API picks the locale from `Accept-Language`: `hi` if the first matching tag starts with `hi`, otherwise `en`. The web app always sends `Accept-Language` equal to the current route locale. Localized API fields: error messages (`error.message`, `parseErrorMessage`, `errorMessage`), job role `name`, experience level `label` and `yearsLabel` (API-002), dimension `name` (API-011), and the notice text (API-003). Score band, importance, section, issue type and status are returned as codes; the web app translates them with the labels in §4.7.4 and §5.5. AI-generated text is always English (ASM-004). | e2e test with `Accept-Language: hi`. |
-| CR-030 | Dates and numbers | The API sends all timestamps as ISO 8601 UTC with milliseconds and `Z` (`2026-10-16T12:00:00.000Z`). The web app shows them in `Asia/Kolkata` with `Intl.DateTimeFormat(locale + '-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' })`. Numbers use `en-IN` grouping. | Unit test of the date formatter. |
+| CR-028 | Locales | Supported locales: `en` (default), `hi` (Hindi) and `ko` (Korean, ASM-016). The web app uses `next-intl` with locale-prefixed routes (`/en/...`, `/hi/...`, `/ko/...`). All UI strings live in `apps/web/messages/en.json`, `hi.json` and `ko.json`; no user-visible string is hard-coded in components. A key missing in `hi.json` or `ko.json` falls back to `en`. | Lint rule `no-literal-string` (eslint-plugin-i18next) on `apps/web/src/components`. Unit test: `hi.json` and `ko.json` have no key that `en.json` lacks. |
+| CR-029 | API locale | The API picks the locale from `Accept-Language`: the first language tag in the header (in its order of preference) whose primary subtag is `en`, `hi` or `ko` decides; if none matches, `en`. The web app always sends `Accept-Language` equal to the current route locale. Localized API fields: error messages (`error.message`, `parseErrorMessage`, `errorMessage`), job role `name`, experience level `label` and `yearsLabel` (API-002), dimension `name` (API-011), and the notice text (API-003). Score band, importance, section, issue type and status are returned as codes; the web app translates them with the labels in §4.7.4 and §5.5. AI-generated text is always English (ASM-004). | e2e test with `Accept-Language: hi`. |
+| CR-030 | Dates and numbers | The API sends all timestamps as ISO 8601 UTC with milliseconds and `Z` (`2026-10-16T12:00:00.000Z`). The web app shows them in `Asia/Kolkata` with `Intl.DateTimeFormat(DATE_LOCALE[locale], { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' })` with `DATE_LOCALE = { en: 'en-IN', hi: 'hi-IN', ko: 'ko-KR' }`, so times are always IST whatever the language. Numbers use `en-IN` grouping in every locale. | Unit test of the date formatter. |
 
 ### 1.7 Environments
 
@@ -352,7 +354,7 @@ Locally and in CI, one `.env` file at the repository root (copied from the commi
 | CR-032 | CI | GitHub Actions workflow `ci.yml` runs on every pull request and every push to `main`, with the jobs listed in §4.12.5. A PR cannot merge unless all jobs pass. | Branch protection on `main` requires every `ci.yml` job. |
 | CR-033 | Release | Workflow `deploy.yml` (steps in §4.12.6): on push to `main`, build two Docker images (`sb-ro-api` and `sb-ro-web`, §4.12.4; the worker uses the `sb-ro-api` image with command `node dist/worker.js`), tag them with the git SHA, push to the ECR repositories of the same names, run migrations as a one-off ECS task (`node dist/database/migrate.js`), then update the ECS services in dev. On tag `v<major>.<minor>.<patch>`, the same images are deployed to staging, then to prod after one approval in the GitHub environment `production` (Tech Lead). After each deploy a smoke test calls API-019 and API-020 (must return 200), `GET /healthz` on the web app (must return 200), and API-002 without a token (must return 401 `AUTH_REQUIRED`, which proves routing and the auth guard without needing a real user token). | Workflow review; deployment history. |
 | CR-034 | Rollback | ECS deployment circuit breaker with automatic rollback is on for every service. Manual rollback: run `deploy.yml` with `workflow_dispatch` inputs `environment` (`dev`, `staging` or `prod`) and `imageTag=<previous SHA>`; it skips the build and migration steps and redeploys that tag. Target: rollback finished within 15 min. Migrations are never rolled back in prod. | Rollback drill in staging once per quarter. |
-| CR-035 | Database migrations | TypeORM `synchronize` is `false` in every environment, including local. Schema changes ship only as TypeORM migration files in `apps/api/src/database/migrations`. A release may only add tables, columns (nullable or with a default) or indexes ("expand"). Dropping or renaming happens in a later release, after no deployed code uses the old shape ("contract"). | Code review checklist; CI runs `migration:run` then `migration:revert` then `migration:run` on an empty DB. |
+| CR-035 | Database migrations | TypeORM `synchronize` is `false` in every environment, including local. Schema changes ship only as TypeORM migration files in `apps/api/src/database/migrations`. A release may only add tables, columns (nullable or with a default) or indexes ("expand"). Dropping or renaming happens in a later release, after no deployed code uses the old shape ("contract"). | Code review checklist; CI runs `migration:run`, then `migration:revert` until no migration is left, then `migration:run` again, on an empty DB (§4.12.5 job 6). |
 | CR-036 | Zero-downtime deploy | ECS rolling deploy with `minimumHealthyPercent: 100`, `maximumPercent: 200`. The ALB target group health check is `GET /api/v1/health/ready` (API) and `GET /healthz` (web: a route handler `app/healthz/route.ts` that returns `200 ok`, excluded from the next-intl middleware matcher), interval 15 s, healthy threshold 2. Worker tasks stop gracefully: on `SIGTERM` they stop taking new jobs and finish running jobs within 120 s (`stopTimeout: 120`). | Staging deploy under load test shows 0 failed requests. |
 
 ---
@@ -417,14 +419,14 @@ surfingbear-resume-optimizer/
 │   │   │   ├── worker.module.ts
 │   │   │   ├── config/           # env.schema.ts (zod), config.module.ts
 │   │   │   ├── common/
-│   │   │   │   ├── constants.ts  # exactly the constants in §0.5
+│   │   │   │   ├── constants.ts  # the constants of §0.5 plus the enums and reference data (§4.7.3, §5.5)
 │   │   │   │   ├── auth/         # jwks.provider.ts, platform-jwt.guard.ts, csrf.guard.ts, roles.guard.ts,
 │   │   │   │   │                 # consent.guard.ts, public.decorator.ts, roles.decorator.ts,
 │   │   │   │   │                 # skip-consent.decorator.ts, current-user.decorator.ts
 │   │   │   │   ├── errors/       # error-codes.ts (enum + en/hi messages), app.exception.ts,
 │   │   │   │   │                 # http-exception.filter.ts
 │   │   │   │   ├── crypto/       # text-cipher.service.ts (AES-256-GCM), ip-hash.ts
-│   │   │   │   ├── i18n/         # locale.ts (Accept-Language → 'en' | 'hi'), labels.ts
+│   │   │   │   ├── i18n/         # locale.ts (Accept-Language → 'en' | 'hi' | 'ko'), labels.ts
 │   │   │   │   ├── pagination/   # page-query.dto.ts, paginate.ts
 │   │   │   │   ├── time/         # clock.ts (injectable Clock), period.ts (period month, resetsAt)
 │   │   │   │   └── logging/      # logger.config.ts
@@ -459,7 +461,7 @@ surfingbear-resume-optimizer/
 │   └── web/                      # Next.js
 │       ├── Dockerfile            # §4.12.4
 │       ├── next.config.ts        # output 'standalone', local rewrite to API_PROXY_TARGET
-│       ├── messages/             # en.json, hi.json
+│       ├── messages/             # en.json, hi.json, ko.json
 │       ├── src/
 │       │   ├── middleware.ts     # next-intl routing + CSP nonce (CR-022); matcher excludes /api, /healthz, static files
 │       │   ├── app/healthz/route.ts  # web health check (CR-036)
@@ -566,11 +568,11 @@ Priority: **Must** = needed for launch; **Should** = planned for launch, can sli
 | ID | Title | Description | Priority | Acceptance criteria |
 |---|---|---|---|---|
 | FR-001 | Platform-authenticated access | Any user logged in to the SurfingBear platform can use the module without a separate login. The module trusts the platform token (§1.1). | Must | 1. A request with a valid token reaches the endpoint and `request.user.userId` equals the token `sub`. 2. A request without a token returns 401 `AUTH_REQUIRED`. 3. A request with an expired, wrongly signed, wrong-issuer or wrong-audience token returns 401 `AUTH_TOKEN_INVALID`. 4. When the web app receives 401 from any API call, it redirects the browser to `PLATFORM_LOGIN_URL?returnTo=<URL-encoded current URL>` within 1 s. 5. `plan: "pro"` gives PRO limits; `plan: "free"`, a missing `plan` or any other value gives FREE limits. 6. `roles` containing `ro_admin` allows API-016 to API-018; otherwise they return 403 `FORBIDDEN`. |
-| FR-002 | Privacy notice and consent | Before any resume is processed, the user reads the privacy notice (§4.9) and gives consent, as required by DPDP Act section 6. Consent is recorded with the notice version. | Must | 1. API-001 returns `consent.required = true` when the user has no `ACTIVE` consent row for `NOTICE_VERSION`. 2. While `consent.required` is true, API-005, API-006, API-007, API-009, API-010, API-011 and API-012 return 403 `CONSENT_REQUIRED`. All other endpoints (API-001 to API-004, API-008, API-013 to API-020) work without consent, so a user can always read the notice, see and delete their data, and admins can manage the catalog. 3. API-004 with `noticeVersion = NOTICE_VERSION` creates one `ACTIVE` row in TBL-002 (locale, hashed IP, timestamp) and returns 201. 4. API-004 with any other `noticeVersion` returns 409 `CONSENT_VERSION_MISMATCH` and creates nothing. 5. Accepting again when an `ACTIVE` row for the same version exists returns 200 with the existing consent and creates nothing. 6. When `NOTICE_VERSION` changes, every older `ACTIVE` consent no longer counts; on acceptance of the new version the old row becomes `SUPERSEDED` with `ended_at = now()`, in the same transaction. 7. The consent check result is cached in Redis key `ro:consent:<NOTICE_VERSION>:<userId>` for `CONSENT_CACHE_TTL_S` seconds with value `1` (active consent for that version) or `0` (none); the key is deleted on accept and on erasure. Because the version is part of the key, changing `NOTICE_VERSION` never reuses an old cached result. If Redis fails, the guard reads TBL-002 directly. If two accept requests race and the second hits the unique index `ux_consents__user_id_active` (SQLSTATE `23505`), it re-reads the active row and returns 200 with it (FR-002.5). 8. The web app shows the notice in the current locale (`en` or `hi`) in a blocking dialog on P-01, P-02 and P-03; the Accept button is enabled only after the user ticks "I have read and agree". |
-| FR-003 | Job role and experience level catalog | The user picks a target job role from a fixed catalog and one of five experience levels. | Must | 1. API-002 returns all job roles with `is_active = true`, ordered by `display_order` then `code`, with `name` in the request locale. 2. API-002 returns exactly the five levels `FRESHER`, `JUNIOR`, `MID`, `SENIOR`, `LEAD` in that order with labels and year ranges from §5.5. 3. Every environment contains the 12 seed roles from §5.5: the migration task (`node dist/database/migrate.js`) runs pending migrations and then the seed, and `npm run db:seed` runs the same seed locally. The seed uses `INSERT … ON CONFLICT (code) DO NOTHING`, so it never changes an existing row (admin edits and deactivations survive) and running it twice leaves 12 rows. 4. The API-002 response is cached in Redis key `ro:catalog:v1:<locale>` for `CATALOG_CACHE_TTL_S` seconds and the cache is deleted when an admin creates or updates a role. 5. Inactive roles never appear in API-002. |
-| FR-004 | Upload resume | The user uploads one resume file. The API checks size and type, stores the raw file in S3 temporarily and queues it for parsing. | Must | 1. Accepted: files whose name ends in `.pdf` (case-insensitive) and whose first 5 bytes are `%PDF-`, or whose name ends in `.docx` and whose first 4 bytes are `50 4B 03 04` (ZIP) or first 8 bytes are `D0 CF 11 E0 A1 B1 1A E1` (encrypted Office file). The client-sent MIME type is ignored. 2. Any other file returns 415 `UNSUPPORTED_FILE_TYPE`, including `.doc`, `.txt`, images and a `.pdf` whose bytes are not PDF. 3. A file larger than `MAX_FILE_SIZE_BYTES` returns 413 `FILE_TOO_LARGE`; a file of exactly `MAX_FILE_SIZE_BYTES` is accepted. 4. A request without a `file` part, or with a 0-byte file, returns 400 `FILE_REQUIRED`. 5. On success, in this order: (a) `PutObject` to S3 key `uploads/<yyyy>/<mm>/<dd>/<resumeId>.<pdf\|docx>` (UTC date of the upload; bucket-default SSE-KMS, no SSE headers sent); (b) insert and commit a TBL-003 row with `parse_status = PENDING` and `expires_at = created_at + RESUME_RETENTION_DAYS`; (c) enqueue job `resume-parse` with `jobId = resumeId`; (d) write audit `RESUME_UPLOADED`; (e) return 201 with the resume (API-005). The row is committed before enqueueing, so the worker always finds it. 6. If any of (a)–(c) fails: delete the TBL-003 row if it was inserted, delete the S3 object (best effort) and return 503 `SERVICE_UNAVAILABLE`; no TBL-003 row and no audit row remain. 7. The original file name is sanitized (path parts removed, control characters removed, trimmed to 255 characters) and stored; it is never logged. 8. Rate limit: 10 uploads per user per hour (CR-021). |
-| FR-005 | Parse and redact resume | The worker extracts text from the file, checks it, removes contact details and ID numbers, encrypts the result and deletes the raw file. | Must | 1. A PDF with more than `MAX_PDF_PAGES` pages becomes `FAILED` with `RESUME_TOO_LONG` without extracting text. 2. A password-protected PDF, or a DOCX that is an encrypted Office file, becomes `FAILED` with `RESUME_ENCRYPTED`. 3. A file that cannot be opened, a DOCX with more than `DOCX_MAX_ZIP_ENTRIES` entries or more than `DOCX_MAX_UNCOMPRESSED_BYTES` uncompressed, a DOCX without `word/document.xml`, or parsing that takes longer than `PARSE_TIMEOUT_MS`, becomes `FAILED` with `RESUME_CORRUPT`. 4. Normalized text (§4.8.3) shorter than `MIN_TEXT_CHARS` becomes `FAILED` with `RESUME_NO_TEXT`; longer than `MAX_TEXT_CHARS` becomes `FAILED` with `RESUME_TOO_LONG`. 5. On success: `parse_status = PARSED`, `char_count`, `page_count` (PDF only), `parsed_at` set; `text_enc` holds the redacted text (§4.8.4) encrypted with AES-256-GCM (§5.6). 6. After success **or** failure (including the `INTERNAL_ERROR` paths of FR-005.8 and §4.8.1) the raw S3 object is deleted and `storage_key` set to NULL. If deletion fails it is logged at `warn` and the S3 lifecycle rule (expiry after `RAW_FILE_LIFECYCLE_DAYS` day) removes the object within `RAW_FILE_MAX_HOURS` hours. 7. The stored redacted text contains no match for the email, URL, Aadhaar, PAN or phone patterns in §4.8.4 (unit tests with fixtures). 8. A resume still `PENDING` `PARSE_STALE_AFTER_MS` after `created_at` is set to `FAILED` with `INTERNAL_ERROR` by the maintenance job (FR-020). 9. p95 time from upload to `PARSED` ≤ 5 s (NFR-003). |
-| FR-006 | Create analysis | The user starts an analysis for a parsed resume, a job role and an experience level. The work runs in the background. | Must | 1. API-009 with a valid body returns 202 with `status = QUEUED` and a `Location` header, inserts a TBL-004 row (`plan_at_creation`, `period_month`, `prompt_version = PROMPT_VERSION`, `expires_at = created_at + ANALYSIS_RETENTION_DAYS`) and enqueues job `resume-analysis` with `jobId = analysisId`. 2. After the global guards (authentication, CSRF, rate limit, consent; CMP-004), checks run in this order and the first failure is returned: body validation (`VALIDATION_FAILED`) → resume exists, is owned and has not expired (`NOT_FOUND`) → resume `PENDING` (`RESUME_NOT_READY`) → resume `FAILED` (`RESUME_PARSE_FAILED`) → job role exists (`NOT_FOUND`) and is active (`JOB_ROLE_UNAVAILABLE`) → same resume + role + level already `QUEUED`/`PROCESSING` (`DUPLICATE_ANALYSIS`) → user already has `MAX_CONCURRENT_ANALYSES` analyses `QUEUED`/`PROCESSING` (`CONCURRENT_ANALYSIS_LIMIT`) → quota (FR-007, `QUOTA_EXCEEDED`). 3. The duplicate, concurrency and quota checks run inside one transaction that holds a row lock on the user's TBL-008 row, so two parallel requests can never both pass when only one slot is left. 4. If enqueueing fails after the row is committed, the analysis is set to `FAILED` with `INTERNAL_ERROR`, the reservation is released, and the API returns 503 `SERVICE_UNAVAILABLE`. 5. Rate limit: 10 creations per user per hour (CR-021). |
+| FR-002 | Privacy notice and consent | Before any resume is processed, the user reads the privacy notice (§4.9) and gives consent, as required by DPDP Act section 6. Consent is recorded with the notice version. | Must | 1. API-001 returns `consent.required = true` when the user has no `ACTIVE` consent row for `NOTICE_VERSION`. 2. While `consent.required` is true, API-005, API-006, API-007, API-009, API-010, API-011 and API-012 return 403 `CONSENT_REQUIRED`. All other endpoints (API-001 to API-004, API-008, API-013 to API-020) work without consent, so a user can always read the notice, see and delete their data, and admins can manage the catalog. 3. API-004 with `noticeVersion = NOTICE_VERSION` creates one `ACTIVE` row in TBL-002 (locale, hashed IP, timestamp) and returns 201. 4. API-004 with any other `noticeVersion` returns 409 `CONSENT_VERSION_MISMATCH` and creates nothing. 5. Accepting again when an `ACTIVE` row for the same version exists returns 200 with the existing consent and creates nothing. 6. When `NOTICE_VERSION` changes, every older `ACTIVE` consent no longer counts; on acceptance of the new version the old row becomes `SUPERSEDED` with `ended_at` = the Clock time (§2.2 rule 6), in the same transaction. 7. The consent check result is cached in Redis key `ro:consent:<NOTICE_VERSION>:<userId>` for `CONSENT_CACHE_TTL_S` seconds with value `1` (active consent for that version) or `0` (none); the key is deleted on accept and on erasure. Because the version is part of the key, changing `NOTICE_VERSION` never reuses an old cached result. The cache is used only for `GET` requests; `POST`, `PATCH`, `PUT` and `DELETE` always read TBL-002. If Redis fails, the guard reads TBL-002 directly. Deleting the key after accept or erasure is best-effort: a failure is logged at `warn` and does not change the response. If two accept requests race and the second hits the unique index `ux_consents__user_id_active` (SQLSTATE `23505`), it re-reads the active row and returns 200 with it (FR-002.5). 8. The web app shows the notice in the current locale (`en`, `hi` or `ko`) in a blocking dialog on P-01, P-02 and P-03; the Accept button is enabled only after the user ticks "I have read and agree". |
+| FR-003 | Job role and experience level catalog | The user picks a target job role from a fixed catalog and one of five experience levels. | Must | 1. API-002 returns all job roles with `is_active = true`, ordered by `display_order` then `code`, with `name` in the request locale. 2. API-002 returns exactly the five levels `FRESHER`, `JUNIOR`, `MID`, `SENIOR`, `LEAD` in that order with labels and year ranges from §5.5. 3. Every environment contains the 12 seed roles from §5.5: the migration task (`node dist/database/migrate.js`) runs pending migrations and then the seed, and `npm run db:seed` runs the same seed locally. The seed uses `INSERT … ON CONFLICT (code) DO NOTHING`, so it never changes an existing row (admin edits and deactivations survive) and running it twice leaves 12 rows. 4. The API-002 response is cached in Redis key `ro:catalog:v1:<locale>` for `CATALOG_CACHE_TTL_S` seconds and the cache is deleted when an admin creates or updates a role. A Redis error on cache read or write falls back to the database with a `warn` log; the delete after an admin change is best-effort. 5. Inactive roles never appear in API-002. |
+| FR-004 | Upload resume | The user uploads one resume file. The API checks size and type, stores the raw file in S3 temporarily and queues it for parsing. | Must | 1. Accepted: files whose name ends in `.pdf` (case-insensitive) and whose first 5 bytes are `%PDF-`, or whose name ends in `.docx` and whose first 4 bytes are `50 4B 03 04` (ZIP) or first 8 bytes are `D0 CF 11 E0 A1 B1 1A E1` (encrypted Office file). The client-sent MIME type is ignored. 2. Any other file returns 415 `UNSUPPORTED_FILE_TYPE`, including `.doc`, `.txt`, images and a `.pdf` whose bytes are not PDF. 3. A file larger than `MAX_FILE_SIZE_BYTES` returns 413 `FILE_TOO_LARGE`; a file of exactly `MAX_FILE_SIZE_BYTES` is accepted. 4. A request without a `file` part, or with a 0-byte file, returns 400 `FILE_REQUIRED`. 5. On success, in this order: (a) `PutObject` to S3 key `uploads/<yyyy>/<mm>/<dd>/<resumeId>.<pdf\|docx>` (UTC date of the upload; bucket-default SSE-KMS, no SSE headers sent); (b) insert and commit a TBL-003 row with `parse_status = PENDING` and `expires_at = created_at + RESUME_RETENTION_DAYS`; (c) enqueue job `resume-parse` with `jobId = resumeId`; (d) write audit `RESUME_UPLOADED` (if this insert fails, it is logged at `error` and the response is still 201, CMP-012); (e) return 201 with the resume (API-005). The row is committed before enqueueing, so the worker always finds it. 6. If any of (a)–(c) fails: delete the TBL-003 row if it was inserted, delete the S3 object (best effort) and return 503 `SERVICE_UNAVAILABLE`; no TBL-003 row and no audit row remain. 7. The original file name is sanitized (path parts removed, control characters removed, trimmed to 255 characters) and stored; it is never logged. 8. Rate limit: 10 uploads per user per hour (CR-021). |
+| FR-005 | Parse and redact resume | The worker extracts text from the file, checks it, removes contact details and ID numbers, encrypts the result and deletes the raw file. | Must | 1. A PDF with more than `MAX_PDF_PAGES` pages becomes `FAILED` with `RESUME_TOO_LONG` without extracting text. 2. A password-protected PDF, or a DOCX that is an encrypted Office file, becomes `FAILED` with `RESUME_ENCRYPTED`. 3. A file that cannot be opened, a DOCX with more than `DOCX_MAX_ZIP_ENTRIES` entries or more than `DOCX_MAX_UNCOMPRESSED_BYTES` uncompressed, a DOCX without `word/document.xml`, or parsing that takes longer than `PARSE_TIMEOUT_MS`, becomes `FAILED` with `RESUME_CORRUPT`. 4. Normalized text (§4.8.3) shorter than `MIN_TEXT_CHARS` becomes `FAILED` with `RESUME_NO_TEXT`; longer than `MAX_TEXT_CHARS` becomes `FAILED` with `RESUME_TOO_LONG`. 5. On success: `parse_status = PARSED`, `char_count`, `page_count` (PDF only), `parsed_at` set; `text_enc` holds the redacted text (§4.8.4) encrypted with AES-256-GCM (§5.6). 6. After success **or** failure (including the `INTERNAL_ERROR` paths of FR-005.8 and §4.8.1) the raw S3 object is deleted and `storage_key` set to NULL. If deletion fails it is logged at `warn` and the S3 lifecycle rule (expiry after `RAW_FILE_LIFECYCLE_DAYS` day) removes the object within `RAW_FILE_MAX_HOURS` hours. 7. Applying the §4.8.4 rules to the stored redacted text changes nothing, i.e. it contains no email, URL, Aadhaar or PAN match and no phone match with 10–13 digits (unit tests with fixtures). 8. A resume still `PENDING` `PARSE_STALE_AFTER_MS` after `created_at` is set to `FAILED` with `INTERNAL_ERROR` by the maintenance job (FR-020). 9. p95 time from upload to `PARSED` ≤ 5 s (NFR-003). |
+| FR-006 | Create analysis | The user starts an analysis for a parsed resume, a job role and an experience level. The work runs in the background. | Must | 1. API-009 with a valid body returns 202 with `status = QUEUED` and a `Location` header, inserts a TBL-004 row (`plan_at_creation`, `period_month`, `prompt_version = PROMPT_VERSION`, `expires_at = created_at + ANALYSIS_RETENTION_DAYS`) and enqueues job `resume-analysis` with `jobId = analysisId`. 2. After the global guards (authentication, CSRF, rate limit, consent; CMP-004), checks run in this order and the first failure is returned: body validation (`VALIDATION_FAILED`) → resume exists, is owned and has not expired (`NOT_FOUND`) → resume `PENDING` (`RESUME_NOT_READY`) → resume `FAILED` (`RESUME_PARSE_FAILED`) → job role exists (`NOT_FOUND`) and is active (`JOB_ROLE_UNAVAILABLE`) → same resume + role + level already `QUEUED`/`PROCESSING` (`DUPLICATE_ANALYSIS`) → user already has `MAX_CONCURRENT_ANALYSES` analyses `QUEUED`/`PROCESSING` (`CONCURRENT_ANALYSIS_LIMIT`) → quota (FR-007, `QUOTA_EXCEEDED`). 3. The duplicate, concurrency and quota checks run inside one transaction that holds a row lock on the user's TBL-008 row, so two parallel requests can never both pass when only one slot is left. Inside that transaction the resume is read again with `SELECT … FOR SHARE` (gone → `NOT_FOUND`), and API-008 locks the resume row `FOR UPDATE` before its `RESUME_IN_USE` check, so a resume cannot be deleted while an analysis of it is being created. 4. If enqueueing fails after the row is committed, the analysis is set to `FAILED` with `INTERNAL_ERROR`, the reservation is released, and the API returns 503 `SERVICE_UNAVAILABLE`. 5. Rate limit: 10 creations per user per hour (CR-021). |
 | FR-007 | Monthly quota | FREE users may complete `FREE_MONTHLY_ANALYSES` analyses per period month and PRO users `PRO_MONTHLY_ANALYSES`. Only completed analyses count. | Must | 1. The period month is the calendar month in `QUOTA_TIME_ZONE` at the moment the analysis is created; an analysis created at 23:59 IST on the 31st counts for that month even if it completes on the 1st. 2. Creating an analysis adds 1 to `reserved_count`; completion moves it to `consumed_count` (reserved −1, consumed +1); failure releases it (reserved −1). Both happen in the same transaction as the status change. 3. Creation is refused with 403 `QUOTA_EXCEEDED` when `consumed_count + reserved_count >= limit(current plan)`; `error.meta` contains `limit`, `used` (= consumed), `inProgress` (= reserved) and `resetsAt`. 4. `resetsAt` is 00:00 IST on the 1st of the next month, as UTC (for October 2026: `2026-10-31T18:30:00.000Z`). 5. The limit uses the plan in the **current** token, so a FREE user who upgrades mid-month to PRO can immediately create up to 30 minus what they already used. 6. Deleting an analysis does not give quota back. 7. API-001 shows `limit`, `used` (= consumed), `inProgress` (= reserved), `remaining = max(0, limit − consumed − reserved)` and `resetsAt`. 8. A failed analysis (any error code) never changes `consumed_count`. 9. Erasure (FR-019) does not delete TBL-008 rows, so erasing data does not reset the current period's usage. |
 | FR-008 | ATS scoring | The worker asks the AI to score the resume on six dimensions and computes the overall score. | Must | 1. Every completed analysis has exactly six TBL-005 rows, one per dimension code in §4.7.3, each with an integer score 0–100 and a rationale of 1–400 characters. 2. The weight stored per row equals the §4.7.3 weight at the time of analysis. 3. `overall_score = floor((Σ score × weight + 50) / 100)`, an integer 0–100 (§4.7.4); with scores 70/50/80/90/60/75 the result is 70. 4. `score_band` is `NEEDS_WORK` (0–49), `FAIR` (50–69), `GOOD` (70–84) or `EXCELLENT` (85–100). 5. The AI is called with the exact prompt in §4.7.1 and structured output schema in §4.7.2. 6. If the AI says `isResume = false` the analysis fails with `NOT_A_RESUME`; if `detectedLanguage` is not `en` it fails with `RESUME_LANGUAGE_UNSUPPORTED`. |
 | FR-009 | Missing skills | The result lists skills that are important for the chosen role and level but are not shown in the resume. | Must | 1. A completed analysis has 0 to `MAX_MISSING_SKILLS` TBL-006 rows ordered by `display_order` starting at 1 with no gaps. 2. Each has `skill` (1–80 chars), `importance` (`CRITICAL`, `IMPORTANT` or `NICE_TO_HAVE`) and `reason` (1–300 chars). 3. Post-processing (§4.7.5) removes duplicates (case-insensitive) and removes any skill whose name appears in the resume text (case-insensitive, whole word). 4. Rows are ordered `CRITICAL`, then `IMPORTANT`, then `NICE_TO_HAVE`, keeping the AI order inside each group. 5. Missing skills are shown in full to FREE and PRO users. |
@@ -583,9 +585,9 @@ Priority: **Must** = needed for launch; **Should** = planned for launch, can sli
 | FR-016 | Delete resume | The user deletes one uploaded resume. | Must | 1. API-008 deletes the TBL-003 row and the S3 object (if `storage_key` is not null) and returns 204. 2. If any analysis using this resume is `QUEUED` or `PROCESSING`, it returns 409 `RESUME_IN_USE` and deletes nothing. 3. Existing analyses of the resume stay; their `resume_id` becomes NULL (FK `ON DELETE SET NULL`) and they keep `resume_filename`. 4. Writes audit action `RESUME_DELETED`. 5. Deleting another user's or a non-existent resume returns 404. |
 | FR-017 | Delete analysis | The user deletes one analysis. | Must | 1. API-013 deletes the TBL-004 row and, by cascade, its TBL-005, TBL-006 and TBL-007 rows, and returns 204. 2. A `QUEUED` or `PROCESSING` analysis returns 409 `ANALYSIS_IN_PROGRESS`. 3. Quota is not returned (FR-007.6). 4. Writes audit action `ANALYSIS_DELETED`. |
 | FR-018 | View my data | The user can see a summary of all personal data the module holds about them and who processes it (DPDP Act section 11). | Must | 1. API-014 returns consents, resumes (metadata only, no text), analyses (metadata and scores), usage rows, retention periods, the list of processors and the grievance email (§6.2). 2. Each list returns at most 1000 items, newest first, with `truncated: true` when more exist. 3. Works without active consent. 4. Writes audit action `DATA_SUMMARY_VIEWED`. 5. P-04 shows this data and the grievance contact. |
-| FR-019 | Withdraw consent and erase all data | The user withdraws consent; the module deletes all their personal data (DPDP Act sections 6(4) and 8(7)). It is as easy as giving consent: one button and one confirmation. | Must | 1. API-015 with body `{ "confirm": "DELETE" }` (exact, case-sensitive) runs in one transaction: deletes all the user's TBL-004 rows (children cascade) and TBL-003 rows, sets every `ACTIVE` TBL-002 row to `WITHDRAWN` with `ended_at = now()`, inserts one TBL-009 row with counts, and writes audit action `DATA_ERASED`. 2. Any other `confirm` value returns 400 `VALIDATION_FAILED`. 3. After the transaction it deletes any remaining raw S3 objects of those resumes; failures are left to the lifecycle rule (removed within `RAW_FILE_MAX_HOURS` hours). 4. It deletes Redis key `ro:consent:<NOTICE_VERSION>:<userId>`. 5. Analyses that were `QUEUED` or `PROCESSING` are deleted too; before deleting them, the same transaction subtracts their count from `reserved_count` of their TBL-008 rows (by `period_month`), so no reservation stays held. The worker discards their results (§4.8.5). 6. The response (200) contains the counts. After it, API-001 shows `consent.required = true`, `usage.used` unchanged and `usage.inProgress = 0`, and the resume and analysis lists are empty. 7. Kept after erasure, with reason: TBL-002 rows (proof that consent was given and withdrawn, `AUDIT_RETENTION_DAYS`), TBL-009 (proof of erasure, `AUDIT_RETENTION_DAYS`), TBL-010 (security logs, DPDP Rules 2025 rule 6), TBL-008 (only the user ID and counts; keeping them stops a user from resetting the FREE limit by erasing; purged by FR-020 after the previous month; stated in the notice). None of these contain resume content. 8. p95 ≤ 2 s for a user with 100 analyses. |
+| FR-019 | Withdraw consent and erase all data | The user withdraws consent; the module deletes all their personal data (DPDP Act sections 6(4) and 8(7)). It is as easy as giving consent: one button and one confirmation. | Must | 1. API-015 with body `{ "confirm": "DELETE" }` (exact, case-sensitive) runs in one transaction: deletes all the user's TBL-004 rows (children cascade) and TBL-003 rows, sets every `ACTIVE` TBL-002 row to `WITHDRAWN` with `ended_at` = the Clock time, inserts one TBL-009 row with counts, and writes audit action `DATA_ERASED`. 2. Any other `confirm` value returns 400 `VALIDATION_FAILED`. 3. After the transaction it deletes any remaining raw S3 objects of those resumes; failures are left to the lifecycle rule (removed within `RAW_FILE_MAX_HOURS` hours). 4. It deletes Redis key `ro:consent:<NOTICE_VERSION>:<userId>`. 5. Analyses that were `QUEUED` or `PROCESSING` are deleted too. The transaction first runs `DELETE FROM analyses WHERE user_id = $1 RETURNING status, period_month` and then, per `period_month`, subtracts the number of returned `QUEUED`/`PROCESSING` rows from `reserved_count`, so no reservation stays held and none is released twice (a worker saving at the same moment locks the analysis row first and then finds it gone). The worker discards their results (§4.8.5). 6. The response (200) contains the counts. After it, API-001 shows `consent.required = true`, `usage.used` unchanged and `usage.inProgress = 0`, and the resume and analysis lists are empty. 7. Kept after erasure, with reason: TBL-002 rows (proof that consent was given and withdrawn, `AUDIT_RETENTION_DAYS`), TBL-009 (proof of erasure, `AUDIT_RETENTION_DAYS`), TBL-010 (security logs, DPDP Rules 2025 rule 6), TBL-008 (only the user ID and counts; keeping them stops a user from resetting the FREE limit by erasing; purged by FR-020 after the previous month; stated in the notice). None of these contain resume content. 8. p95 ≤ 2 s for a user with 100 analyses. |
 | FR-020 | Automatic retention and cleanup | The system deletes data when its retention period ends and closes stuck work. | Must | 1. Job `retention-purge` runs daily at 02:00 IST (BullMQ repeat `{ pattern: '0 2 * * *', tz: 'Asia/Kolkata' }`) and deletes, in batches of 500: TBL-003 rows with `expires_at < now()` that are not used by a `QUEUED`/`PROCESSING` analysis; TBL-004 rows with `expires_at < now()`; TBL-002 rows with status `SUPERSEDED` or `WITHDRAWN` and `ended_at < now() − AUDIT_RETENTION_DAYS`; TBL-009 rows with `expires_at < now()`; TBL-010 rows with `occurred_at < now() − AUDIT_RETENTION_DAYS`; TBL-008 rows whose `period_month` is older than the previous month. 2. Each run writes one audit row `RETENTION_PURGE` with the counts in `metadata`. 3. Job `stale-janitor` runs every minute (`{ every: 60000 }`) and applies FR-005.8 and FR-011.4. 4. Both jobs are safe to run twice at the same time (deletes and updates are idempotent; the janitor updates with `WHERE status IN (...)`). 5. The S3 bucket has a lifecycle rule that expires objects under `uploads/` after `RAW_FILE_LIFECYCLE_DAYS` day. |
-| FR-021 | Manage job role catalog | An admin adds roles, edits them and turns them on or off. | Should | 1. API-016 lists all roles including inactive ones. 2. API-017 creates a role; a duplicate `code` returns 409 `JOB_ROLE_CODE_EXISTS`. 3. API-018 changes `nameEn`, `nameHi`, `description`, `coreSkills`, `isActive` or `displayOrder`; `code` cannot be changed (sending it returns 400 `VALIDATION_FAILED`). 4. Roles are never deleted; deactivated roles disappear from API-002 and are rejected by API-009 with `JOB_ROLE_UNAVAILABLE`, while existing analyses keep showing them. 5. Every create writes audit action `JOB_ROLE_CREATED`. An update writes `JOB_ROLE_UPDATED` with `changedFields`: the API field names (camelCase) whose new value differs from the stored value. If no value differs, API-018 returns 200 with the unchanged role and writes no audit row. 6. Every create and every update that changed a value deletes the catalog cache keys `ro:catalog:v1:en` and `ro:catalog:v1:hi` (FR-003.4). |
+| FR-021 | Manage job role catalog | An admin adds roles, edits them and turns them on or off. | Should | 1. API-016 lists all roles including inactive ones. 2. API-017 creates a role; a duplicate `code` returns 409 `JOB_ROLE_CODE_EXISTS`. 3. API-018 changes `nameEn`, `nameHi`, `nameKo`, `description`, `coreSkills`, `isActive` or `displayOrder`; `code` cannot be changed (sending it returns 400 `VALIDATION_FAILED`). 4. Roles are never deleted; deactivated roles disappear from API-002 and are rejected by API-009 with `JOB_ROLE_UNAVAILABLE`, while existing analyses keep showing them. 5. Every create writes audit action `JOB_ROLE_CREATED`. An update writes `JOB_ROLE_UPDATED` with `changedFields`: the API field names (camelCase) whose new value differs from the stored value (strings compared after trimming and case-sensitively; `coreSkills` compared element by element in order, so a reordering counts as a change). If no value differs, API-018 returns 200 with the unchanged role and writes no audit row. 6. Every create and every update that changed a value deletes the catalog cache keys `ro:catalog:v1:en` and `ro:catalog:v1:hi` (FR-003.4). |
 
 ### 3.2 Non-functional requirements
 
@@ -616,7 +618,7 @@ All performance targets are measured server-side in the AWS region (excluding th
 | NFR-021 | Maintainability | Code is tested and CI is fast. | Line coverage ≥ 80% in `apps/api/src/modules` and `apps/api/src/worker`; CI ≤ 15 min. | Jest coverage threshold in `jest.config.ts`; CI duration metric. |
 | NFR-022 | AI quality | AI results are valid and stable. | ≥ 98% of first AI responses pass the §4.7.2 schema; on a golden set of 50 synthetic resumes analysed twice, the two overall scores differ by ≤ 10 points for ≥ 90% of resumes. | Script `apps/api/test/ai-golden.ts` run against the live model before changing `AI_MODEL` or `PROMPT_VERSION`. |
 | NFR-023 | Compliance | Personal data breaches are reported. | Breach detected → Data Protection Board and affected users informed without delay; detailed report to the Board within 72 h (DPDP Rules 2025 rule 7). Runbook `docs/runbooks/data-breach.md` exists and is tested once a year. | Tabletop exercise record. |
-| NFR-024 | Internationalization | The UI is available in English and Hindi. | 100% of UI strings are in `messages/*.json`; `hi.json` covers 100% of the keys in `en.json` before prod release. | CR-028 lint rule on every PR; key-coverage script `apps/web/scripts/check-messages.ts` runs in the prod deploy job of `deploy.yml` and blocks the prod deploy if a key is missing (on PRs, missing `hi` keys only warn, because CR-028 allows the `en` fallback during development). |
+| NFR-024 | Internationalization | The UI is available in English, Hindi and Korean. | 100% of UI strings are in `messages/*.json`; `hi.json` and `ko.json` each cover 100% of the keys in `en.json` before prod release. | CR-028 lint rule on every PR; key-coverage script `apps/web/scripts/check-messages.ts` runs in the prod deploy job of `deploy.yml` and blocks the prod deploy if a key is missing (on PRs, missing `hi` or `ko` keys only warn, because CR-028 allows the `en` fallback during development). |
 
 ### 3.3 Assumptions and out of scope
 
@@ -627,7 +629,7 @@ All performance targets are measured server-side in the AWS region (excluding th
 | ASM-001 | The platform issues RS256 JWTs, publishes a JWKS, and sets the cookie `sb_access_token` (httpOnly, Secure, `SameSite=Lax`, `Domain=.surfingbear.com`) with the claims in §1.1. | Standard for SSO across subdomains; drives CR-001 to CR-005. |
 | ASM-002 | The platform only allows users aged 18 or over, so this module does not process children's data (DPDP Act section 9). | Job-seeking platform; removes the need for parental consent flows. |
 | ASM-003 | The platform owns billing and the plan. The `plan` claim is always current within one token lifetime (≤ 60 min). | Brief says users are already logged in; drives FR-007 and FR-012. |
-| ASM-004 | Only English resumes are supported in v1, and AI output and the PDF report are in English. The UI is in English and Hindi. | Most Indian tech resumes are English; Hindi PDF needs complex text shaping that `pdfmake` does not support. |
+| ASM-004 | Only English resumes are supported in v1, and AI output and the PDF report are in English. The UI is in English, Hindi and Korean (ASM-016). | Most Indian tech resumes are English; Hindi PDF needs complex text shaping that `pdfmake` does not support, and one PDF language keeps the report layout and its tests simple. |
 | ASM-005 | SurfingBear has commercial terms with Anthropic under which API inputs are not used for model training, and a data processing agreement. Sending redacted text to the US is allowed, because the DPDP Act section 16 restricts transfers only to countries the government notifies, and the US is not notified as of 2026-10-16. | Drives the choice of Claude (§4.5) and the notice (§4.9). |
 | ASM-006 | The Anthropic organization's rate limits allow at least 200 requests/min and 2 million input tokens/min for `claude-opus-5-5`. | Needed for NFR-006 peak (100 analyses/min × up to 2 calls). |
 | ASM-007 | SurfingBear already runs on AWS in `ap-south-1` with ECR, ECS Fargate, RDS, ElastiCache, S3 and Secrets Manager available. | Keeps resume data in India; drives §4.5. |
@@ -639,6 +641,7 @@ All performance targets are measured server-side in the AWS region (excluding th
 | ASM-013 | Names in the resume are not redacted, because no reliable name detector exists for Indian names and the AI needs the rest of the text unchanged. This is stated in the notice (§4.9). | Contact details and ID numbers are redacted (§4.8.4). |
 | ASM-014 | In dev and staging the platform offers test users and a token endpoint `POST <AUTH_ISSUER>/oauth/token` (OAuth 2.0 client credentials, form fields `grant_type=client_credentials`, `client_id`, `client_secret`, `sub`, `plan`), returning `{ "access_token": "<jwt>" }` with the §1.1 claims. It is used only by the k6 scripts against staging, with GitHub secrets `RO_TEST_CLIENT_ID` and `RO_TEST_CLIENT_SECRET`. Prod has no test users. | Needed because this module never issues tokens; all other automated tests use the mock platform (CMP-023). |
 | ASM-015 | The code lives in the GitHub organization `surfingbear`, repository `surfingbear-resume-optimizer`, with the teams named in §2.4. | Needed for the OIDC trust (§4.12.1) and CODEOWNERS. |
+| ASM-016 | Korean (`ko`) is offered as a third UI language, because SurfingBear's owner company has a Korean HQ team that reviews and supports the product, and Korean-speaking job seekers in India are a user group. English stays the binding notice language for the DPDP Act; `hi` and `ko` are translations. | Costs only one message file, one notice translation and one label column per table; the AI output and the PDF stay English (ASM-004). |
 
 **Out of scope** (deliberately not built in this version):
 
@@ -647,7 +650,7 @@ All performance targets are measured server-side in the AWS region (excluding th
 | OOS-001 | Sign-up, login, logout, password reset, session refresh (owned by the platform). |
 | OOS-002 | Payments, plan purchase and billing (owned by the platform). |
 | OOS-003 | OCR for scanned or image-only resumes (they fail with `RESUME_NO_TEXT`). |
-| OOS-004 | Resumes in languages other than English; Hindi PDF reports. |
+| OOS-004 | Resumes in languages other than English; Hindi or Korean PDF reports. |
 | OOS-005 | File types other than PDF and DOCX (`.doc`, `.rtf`, `.txt`, `.odt`, images). |
 | OOS-006 | Editing the resume in the app or automatically applying suggestions; generating a new resume file. |
 | OOS-007 | Job matching, job recommendations, cover letters, interview preparation. |
@@ -728,7 +731,7 @@ flowchart LR
 | CMP-009 | Usage Module | Quota reserve, commit and release on TBL-008 inside the caller's transaction; period month and `resetsAt` calculation. Used by CMP-008, CMP-016, CMP-018. | NestJS provider, Luxon 3 |
 | CMP-010 | Report Module | Builds the PDF in memory on request (API-012, §4.10) and streams it. | `pdfmake` 0.2 (server-side `PdfPrinter`) |
 | CMP-011 | Admin Module | Job role catalog management (API-016 to API-018). | NestJS module |
-| CMP-012 | Audit Module | Writes TBL-010 rows. Called inside the same transaction as the action when one exists. | NestJS provider |
+| CMP-012 | Audit Module | Writes TBL-010 rows. When the action is one database transaction, the audit row is written inside it. The only exception is `RESUME_UPLOADED` (FR-004.5), written after the commit and the enqueue; if that insert fails, the error is logged at `error` level and the API still returns 201. | NestJS provider |
 | CMP-013 | Health and Metrics | Liveness and readiness (API-019, API-020); Prometheus registry served on `METRICS_PORT`. | `@nestjs/terminus` 11, `prom-client` 15 |
 | CMP-014 | Worker Service | Separate process (`node dist/worker.js`) from the same codebase. Consumes BullMQ queues. No public HTTP port. | NestJS 11 standalone application, BullMQ 5, `@nestjs/bullmq` 11 |
 | CMP-015 | Resume Parser | Downloads the raw file, extracts text in an isolated thread, checks limits, normalizes, redacts, encrypts, stores, deletes the raw file (§4.8.2 to §4.8.4). | `pdfjs-dist` 4 (legacy build), `mammoth` 1, `yauzl` 3, Node `worker_threads` |
@@ -884,8 +887,9 @@ sequenceDiagram
   B->>A: POST /api/v1/privacy/erasure {confirm DELETE}
   A->>D: BEGIN
   A->>D: collect storage_key of user's resumes
-  A->>D: release reservations of QUEUED or PROCESSING analyses
-  A->>D: DELETE analyses (children cascade), then resumes
+  A->>D: DELETE analyses RETURNING status and period_month (children cascade)
+  A->>D: release reservations of the deleted QUEUED or PROCESSING rows
+  A->>D: DELETE resumes
   Note over A,D: monthly_usage rows are kept (FR-019.7)
   A->>D: UPDATE consents ACTIVE to WITHDRAWN
   A->>D: INSERT erasure_requests, audit DATA_ERASED, COMMIT
@@ -913,8 +917,10 @@ sequenceDiagram
       A->>A: verify signature and claims
     else kid unknown
       A->>P: GET JWKS (at most once per 60 s)
-      alt platform unreachable and no cached key
+      alt refetch fails, or no usable key set
         A-->>B: 503 SERVICE_UNAVAILABLE
+      else kid still unknown after a successful refetch
+        A-->>B: 401 AUTH_TOKEN_INVALID
       end
     end
     alt invalid or expired
@@ -994,8 +1000,8 @@ No other transitions exist. `COMPLETED` and `FAILED` are final: a later write at
 
 **Global rules**
 
-1. Routes: `/` redirects to `/<locale>` where locale is the `NEXT_LOCALE` cookie if set, else the first `Accept-Language` match of `hi`, else `en`. All pages live under `/[locale]`.
-2. Header on every page: product name, links "New analysis" (P-01), "History" (P-03), "Privacy" (P-04), and a language switcher `EN | हिन्दी` that keeps the current path and sets the `NEXT_LOCALE` cookie.
+1. Routes: `/` redirects to `/<locale>` where locale is the `NEXT_LOCALE` cookie if set, else the locale chosen from `Accept-Language` by the CR-029 rule. All pages live under `/[locale]`.
+2. Header on every page: product name, links "New analysis" (P-01), "History" (P-03), "Privacy" (P-04), and a language switcher `EN | हिन्दी | 한국어` that keeps the current path and sets the `NEXT_LOCALE` cookie.
 3. API client `lib/api/client.ts`: `fetch('/api/v1' + path, { credentials: 'include', headers: { 'Accept-Language': locale, 'X-Requested-With': 'SurfingBearRO' } })`. JSON bodies are sent with `Content-Type: application/json`. On 401 it redirects (FR-001.4). On 5xx or network error it shows a toast with the localized message and the `requestId`. It never retries POST, PATCH or DELETE.
 4. Errors with a code from §6.3 are shown with the API's `error.message` (already localized).
 5. Dates use CR-030 formatting.
@@ -1182,16 +1188,16 @@ Invalid output → one more identical request (`AI_INVALID_OUTPUT_RETRIES = 1`) 
 
 #### 4.7.3 Dimensions and weights
 
-| Code | Weight | Name (`en`) | Name (`hi`) |
-|---|---|---|---|
-| `KEYWORD_MATCH` | 30 | Keyword match | कीवर्ड मिलान |
-| `EXPERIENCE_IMPACT` | 20 | Experience impact | अनुभव का प्रभाव |
-| `ATS_READABILITY` | 15 | ATS readability | ATS पठनीयता |
-| `SECTION_COMPLETENESS` | 15 | Section completeness | सेक्शन की पूर्णता |
-| `LEVEL_ALIGNMENT` | 10 | Level alignment | स्तर अनुरूपता |
-| `LANGUAGE_QUALITY` | 10 | Language quality | भाषा की गुणवत्ता |
+| Code | Weight | Name (`en`) | Name (`hi`) | Name (`ko`) |
+|---|---|---|---|---|
+| `KEYWORD_MATCH` | 30 | Keyword match | कीवर्ड मिलान | 키워드 일치도 |
+| `EXPERIENCE_IMPACT` | 20 | Experience impact | अनुभव का प्रभाव | 경력 성과 |
+| `ATS_READABILITY` | 15 | ATS readability | ATS पठनीयता | ATS 가독성 |
+| `SECTION_COMPLETENESS` | 15 | Section completeness | सेक्शन की पूर्णता | 섹션 완성도 |
+| `LEVEL_ALIGNMENT` | 10 | Level alignment | स्तर अनुरूपता | 경력 수준 적합도 |
+| `LANGUAGE_QUALITY` | 10 | Language quality | भाषा की गुणवत्ता | 문장 품질 |
 
-Weights sum to 100. They are defined once as `DIMENSIONS` (an ordered array of `{ code, weight, nameEn, nameHi }` in the order above) in `common/constants.ts`, so both the API (response order and names) and the worker (scoring) use them. The weight used is copied into each TBL-005 row so old analyses stay correct if weights change; API-011 returns the stored weight.
+Weights sum to 100. They are defined once as `DIMENSIONS` (an ordered array of `{ code, weight, nameEn, nameHi, nameKo }` in the order above) in `common/constants.ts`, so both the API (response order and names) and the worker (scoring) use them. The weight used is copied into each TBL-005 row so old analyses stay correct if weights change; API-011 returns the stored weight.
 
 #### 4.7.4 Overall score and band
 
@@ -1202,12 +1208,12 @@ overallScore = floor((weightedSum + 50) / 100)      // integer, 0..100, half rou
 
 Example: scores 70, 50, 80, 90, 60, 75 → 2100 + 1000 + 1200 + 1350 + 600 + 750 = 7000 → `floor(7050 / 100)` = **70** → band `GOOD`.
 
-| Band | Range | Label `en` | Label `hi` |
-|---|---|---|---|
-| `NEEDS_WORK` | 0–49 | Needs work | सुधार आवश्यक |
-| `FAIR` | 50–69 | Fair | ठीक-ठाक |
-| `GOOD` | 70–84 | Good | अच्छा |
-| `EXCELLENT` | 85–100 | Excellent | उत्कृष्ट |
+| Band | Range | Label `en` | Label `hi` | Label `ko` |
+|---|---|---|---|---|
+| `NEEDS_WORK` | 0–49 | Needs work | सुधार आवश्यक | 개선 필요 |
+| `FAIR` | 50–69 | Fair | ठीक-ठाक | 보통 |
+| `GOOD` | 70–84 | Good | अच्छा | 좋음 |
+| `EXCELLENT` | 85–100 | Excellent | उत्कृष्ट | 우수 |
 
 #### 4.7.5 Post-processing (in this order)
 
@@ -1236,7 +1242,7 @@ Mock results go through the same validation and post-processing as live results.
 
 #### 4.8.1 Queues
 
-All queues use the Redis connection from `REDIS_URL` with `maxRetriesPerRequest: null` and the BullMQ key prefix `ro:bull`. Job payloads contain only IDs, the request ID and the W3C `traceparent` string (§4.11). The `maintenance` queue has one BullMQ Worker for both of its job types, so they share one lock duration.
+All queues use the Redis connection from `REDIS_URL` with `maxRetriesPerRequest: null` and the BullMQ key prefix `ro:bull`. Job payloads contain only IDs, the request ID and the W3C `traceparent` string (§4.11). The `maintenance` queue has one BullMQ Worker for both of its job types, so they share one lock duration. The worker process registers the two repeatable jobs in `WorkerModule.onApplicationBootstrap` with `queue.upsertJobScheduler('retention-purge', { pattern: '0 2 * * *', tz: 'Asia/Kolkata' }, { name: 'retention-purge' })` and `queue.upsertJobScheduler('stale-janitor', { every: 60000 }, { name: 'stale-janitor' })`. Upserting is idempotent, so every worker task may do it; the API never registers them.
 
 | Queue | Job name | `jobId` | Payload | Attempts / backoff | Concurrency per task | Lock duration | Retention of finished jobs |
 |---|---|---|---|---|---|---|---|
@@ -1251,7 +1257,7 @@ Attempts apply only to **unexpected** exceptions (database, Redis or S3 errors, 
 
 1. Load the TBL-003 row. If it does not exist, finish the job. If `parse_status <> 'PENDING'` (a re-run after a crash), go straight to step 8 when `storage_key` is not NULL, otherwise finish the job.
 2. `GetObject` from S3 (`storage_key`).
-3. `parse-runner.ts` starts `parse-thread.mjs` in a `worker_threads` thread (`resourceLimits: { maxOldGenerationSizeMb: 512 }`), posts `{ fileType, buffer }`, and waits for one reply, either `{ ok: true, text, pageCount }` (`pageCount` is `null` for DOCX) or `{ ok: false, errorCode }`. It terminates the thread after `PARSE_TIMEOUT_MS`. A timeout or any abnormal thread exit (for example `ERR_WORKER_OUT_OF_MEMORY` or a non-zero exit code) → `RESUME_CORRUPT`. Inside the thread:
+3. `parse-runner.ts` finds the thread file by walking up from `__dirname` to the directory that contains the `apps/api` `package.json` and taking `dist/worker/parsing/parse-thread.mjs` from there, so the same path works from `dist` and under ts-jest. It starts `parse-thread.mjs` in a `worker_threads` thread (`resourceLimits: { maxOldGenerationSizeMb: 512 }`), posts `{ fileType, buffer }`, and waits for one reply, either `{ ok: true, text, pageCount }` (`pageCount` is `null` for DOCX) or `{ ok: false, errorCode }`. It terminates the thread after `PARSE_TIMEOUT_MS`. A timeout or any abnormal thread exit (for example `ERR_WORKER_OUT_OF_MEMORY` or a non-zero exit code) → `RESUME_CORRUPT`. Inside the thread:
    - **PDF**: `getDocument({ data, isEvalSupported: false, disableFontFace: true, useSystemFonts: false })`. `PasswordException` → `RESUME_ENCRYPTED`; any other load error → `RESUME_CORRUPT`; `numPages > MAX_PDF_PAGES` → `RESUME_TOO_LONG`. For each page, `getTextContent()`; join items with `' '`, add `'\n'` after items with `hasEOL`; join pages with `'\n\n'`.
    - **DOCX**: if the first 8 bytes are `D0 CF 11 E0 A1 B1 1A E1` → `RESUME_ENCRYPTED`. Open with `yauzl.fromBuffer` (`lazyEntries: true`) and read only the central directory: entry count > `DOCX_MAX_ZIP_ENTRIES`, sum of `uncompressedSize` > `DOCX_MAX_UNCOMPRESSED_BYTES`, missing `word/document.xml`, or a ZIP error → `RESUME_CORRUPT`. Then `mammoth.extractRawText({ buffer })`; an error → `RESUME_CORRUPT`.
 4. Normalize the text (§4.8.3). Let `n` = its length. `n < MIN_TEXT_CHARS` → `RESUME_NO_TEXT`; `n > MAX_TEXT_CHARS` → `RESUME_TOO_LONG`.
@@ -1351,6 +1357,24 @@ API-003 returns the text below for `NOTICE_VERSION = RO-NOTICE-2026-10`. `{GRIEV
 
 **आपके अधिकार:** आप Privacy पेज पर कभी भी अपने डेटा का सारांश देख सकते हैं, कोई एक रिज़्यूमे या विश्लेषण हटा सकते हैं, या सहमति वापस लेकर अपने सभी रिज़्यूमे और विश्लेषण हटा सकते हैं। उसके बाद हम केवल आपकी सहमति और हटाने का रिकॉर्ड, सुरक्षा लॉग, और इस महीने आपके द्वारा उपयोग किए गए विश्लेषणों की संख्या रखते हैं (ताकि मासिक सीमा लागू रहे)। इनमें रिज़्यूमे की कोई सामग्री नहीं होती। सहमति वापस लेना उतना ही आसान है जितना देना। प्रश्नों या शिकायतों के लिए हमारे शिकायत अधिकारी को {GRIEVANCE_EMAIL} पर लिखें। आप भारत के डेटा संरक्षण बोर्ड से भी शिकायत कर सकते हैं।
 ```
+
+**Korean (`ko`):**
+
+```markdown
+## Resume Optimizer의 데이터 이용 방법
+
+**수집 항목:** 이력서 파일과 그 안의 텍스트, 선택한 직무와 경력 수준, SurfingBear 사용자 ID, 매월 실행한 분석 횟수.
+
+**이용 목적:** 선택한 직무에 맞춰 이력서를 평가하고, 부족한 기술을 알려 드리고, 개선 문장을 제안하는 데에만 이용합니다. 이력서를 광고에 이용하거나 판매하지 않습니다.
+
+**AI 처리:** 분석 전에 텍스트에서 이메일 주소, 전화번호, 웹 링크, 신분 번호(Aadhaar, PAN 등)를 삭제합니다. 이름이 포함될 수 있는 나머지 텍스트는 AI 서비스 제공업체인 Anthropic(미국)으로 전송되며, Anthropic은 이를 분석 결과를 만드는 데에만 처리하고 모델 학습에는 이용하지 않습니다.
+
+**보관 기간:** 원본 파일은 읽은 즉시 삭제됩니다(삭제에 실패한 경우에도 최대 2일). 이력서 텍스트는 30일 후 삭제됩니다. 파일 이름과 이력서의 짧은 인용문이 포함된 분석 결과는 180일 후 삭제됩니다.
+
+**이용자의 권리:** Privacy 페이지에서 언제든지 내 데이터 요약을 확인하고, 이력서나 분석을 하나씩 삭제하거나, 동의를 철회하고 모든 이력서와 분석을 삭제할 수 있습니다. 그 후에는 동의 및 삭제 기록, 보안 로그, 이번 달에 사용한 분석 횟수(월 한도 적용을 위해)만 보관하며, 여기에는 이력서 내용이 포함되지 않습니다. 동의 철회는 동의만큼 쉽습니다. 문의나 불만 사항은 고충처리 담당자({GRIEVANCE_EMAIL})에게 보내 주세요. 인도 데이터보호위원회(Data Protection Board of India)에 신고할 수도 있습니다.
+```
+
+The English text is the legally binding version for the DPDP Act; `hi` and `ko` are translations of it.
 
 ### 4.10 PDF report layout (CMP-010, FR-013)
 
@@ -1456,7 +1480,7 @@ On start it generates an RSA-2048 key pair in memory (`kid: "dev-1"`; no key fil
 | `GET /pricing` | Static page "Mock pricing page". |
 | `GET /` | Static page "Mock platform home". |
 
-The mock platform is written in TypeScript (`tools/mock-platform/src/server.ts`), runs with `tsx`, and exports `startMockPlatform(port)` so tests can start it in-process.
+The mock platform is written in TypeScript (`tools/mock-platform/src/server.ts`) as CommonJS (no `"type": "module"`), runs with `tsx`, and exports `startMockPlatform(port)` so tests can start it in-process. `server.ts` starts listening on port 4100 only when `require.main === module`. `apps/api/test/global-setup.ts` imports it by relative path (`../../../tools/mock-platform/src/server`).
 
 #### 4.12.4 Docker images
 
@@ -1597,6 +1621,7 @@ Purpose: catalog of target job roles shown to users and used in the AI prompt.
 | code | varchar(50) | NO | UK `ux_job_roles__code` | | `ck_job_roles__code_format`: `code ~ '^[A-Z][A-Z0-9_]{1,49}$'`. Immutable after creation. |
 | name_en | varchar(100) | NO | | | 2–100 chars (DTO) |
 | name_hi | varchar(100) | NO | | | 2–100 chars (DTO) |
+| name_ko | varchar(100) | NO | | | 2–100 chars (DTO) |
 | description | varchar(500) | NO | | | English; inserted into the AI prompt. 10–500 chars (DTO) |
 | core_skills | text[] | NO | | | `ck_job_roles__core_skills_count`: `cardinality(core_skills) BETWEEN 3 AND 30`. Each item 1–80 chars, unique case-insensitive (DTO) |
 | is_active | boolean | NO | | `true` | |
@@ -1612,7 +1637,7 @@ Purpose: record of each consent the user gave to a version of the privacy notice
 | id | uuid | NO | PK | `gen_random_uuid()` | |
 | user_id | varchar(64) | NO | | | Platform `sub` |
 | notice_version | varchar(32) | NO | | | Equals `NOTICE_VERSION` at acceptance |
-| locale | varchar(2) | NO | | | `ck_consents__locale`: `locale IN ('en','hi')`. Locale of the notice shown |
+| locale | varchar(2) | NO | | | `ck_consents__locale`: `locale IN ('en','hi','ko')`. Locale of the notice shown |
 | status | varchar(10) | NO | | `'ACTIVE'` | `ck_consents__status`: `status IN ('ACTIVE','SUPERSEDED','WITHDRAWN')` |
 | accepted_at | timestamptz | NO | | `now()` | |
 | ended_at | timestamptz | YES | | NULL | `ck_consents__ended`: `(status = 'ACTIVE') = (ended_at IS NULL)` |
@@ -1809,7 +1834,9 @@ Primary keys and the unique keys above are not repeated here.
 | analyses (`user_id`, `period_month`) | monthly_usage (`user_id`, `period_month`) | many to one, no FK | No FK, because usage rows are kept after erasure while analyses are deleted, and old usage rows are purged while analyses remain. |
 | audit_events.actor_user_id | platform user | many to zero-or-one, no FK | Never deleted with the user; purged after `AUDIT_RETENTION_DAYS`. |
 
-**When a user erases their data (FR-019)**, in one transaction: `SELECT storage_key FROM resumes WHERE user_id = $1 AND storage_key IS NOT NULL` (kept in memory for the S3 clean-up) → for each `period_month` of the user's `QUEUED`/`PROCESSING` analyses, `UPDATE monthly_usage SET reserved_count = reserved_count - <count> WHERE user_id = $1 AND period_month = <month>` (FR-019.5) → `DELETE FROM analyses WHERE user_id = $1` (children cascade) → `DELETE FROM resumes WHERE user_id = $1` → `UPDATE consents SET status = 'WITHDRAWN', ended_at = $now WHERE user_id = $1 AND status = 'ACTIVE'` → `INSERT INTO erasure_requests` → `INSERT INTO audit_events`. Analyses are deleted before resumes so the SET NULL update is not needed. `monthly_usage` rows are not deleted (FR-019.7).
+**When a user erases their data (FR-019)**, in one transaction: `SELECT storage_key FROM resumes WHERE user_id = $1 AND storage_key IS NOT NULL` (kept in memory for the S3 clean-up) → `DELETE FROM analyses WHERE user_id = $1 RETURNING status, period_month` (children cascade) → for each `period_month` among the returned `QUEUED`/`PROCESSING` rows, `UPDATE monthly_usage SET reserved_count = reserved_count - <count> WHERE user_id = $1 AND period_month = <month>` (FR-019.5) → `DELETE FROM resumes WHERE user_id = $1` → `UPDATE consents SET status = 'WITHDRAWN', ended_at = $now WHERE user_id = $1 AND status = 'ACTIVE'` → `INSERT INTO erasure_requests` → `INSERT INTO audit_events`. Analyses are deleted before resumes so the SET NULL update is not needed. `monthly_usage` rows are not deleted (FR-019.7).
+
+**Lock order:** every transaction that locks both an `analyses` row and a `monthly_usage` row locks the `analyses` row first (worker save, stale janitor, erasure), so they cannot deadlock. API-009 locks the `monthly_usage` row and then the resume row (`FOR SHARE`) and only inserts a new analysis; API-008 locks only the resume row (`FOR UPDATE`).
 
 **When retention ends (FR-020)**: rows are deleted with the same cascades. A resume used by a `QUEUED` or `PROCESSING` analysis is skipped until the next run.
 
@@ -1817,60 +1844,60 @@ Primary keys and the unique keys above are not repeated here.
 
 **Experience levels** (constant in `common/constants.ts`, returned by API-002):
 
-| Code | Order | Label `en` | Label `hi` | Years (prompt text) |
+| Code | Order | Label `en` | Label `hi` | Label `ko` | Years (prompt text) |
+|---|---|---|---|---|---|
+| `FRESHER` | 1 | Fresher | फ्रेशर | 신입 | less than 1 year |
+| `JUNIOR` | 2 | Junior | जूनियर | 주니어 | 1 to 3 years |
+| `MID` | 3 | Mid-level | मिड-लेवल | 미드레벨 | 3 to 6 years |
+| `SENIOR` | 4 | Senior | सीनियर | 시니어 | 6 to 10 years |
+| `LEAD` | 5 | Lead / Principal | लीड / प्रिंसिपल | 리드 / 프린시펄 | 10 or more years |
+
+API-002 also returns `yearsLabel`: `en` as in the last column; `hi`: `1 वर्ष से कम`, `1 से 3 वर्ष`, `3 से 6 वर्ष`, `6 से 10 वर्ष`, `10 या अधिक वर्ष`; `ko`: `1년 미만`, `1~3년`, `3~6년`, `6~10년`, `10년 이상`.
+
+**Labels the web app translates itself** (codes come from the API; texts go into `messages/en.json`, `messages/hi.json` and `messages/ko.json`):
+
+| Group | Code | `en` | `hi` | `ko` |
 |---|---|---|---|---|
-| `FRESHER` | 1 | Fresher | फ्रेशर | less than 1 year |
-| `JUNIOR` | 2 | Junior | जूनियर | 1 to 3 years |
-| `MID` | 3 | Mid-level | मिड-लेवल | 3 to 6 years |
-| `SENIOR` | 4 | Senior | सीनियर | 6 to 10 years |
-| `LEAD` | 5 | Lead / Principal | लीड / प्रिंसिपल | 10 or more years |
-
-API-002 also returns `yearsLabel`: `en` as in the last column; `hi`: `1 वर्ष से कम`, `1 से 3 वर्ष`, `3 से 6 वर्ष`, `6 से 10 वर्ष`, `10 या अधिक वर्ष`.
-
-**Labels the web app translates itself** (codes come from the API; texts go into `messages/en.json` and `messages/hi.json`):
-
-| Group | Code | `en` | `hi` |
-|---|---|---|---|
-| importance | `CRITICAL` | Critical | अत्यावश्यक |
-| importance | `IMPORTANT` | Important | महत्वपूर्ण |
-| importance | `NICE_TO_HAVE` | Nice to have | अतिरिक्त लाभ |
-| section | `SUMMARY` | Summary | सारांश |
-| section | `EXPERIENCE` | Experience | अनुभव |
-| section | `PROJECTS` | Projects | प्रोजेक्ट |
-| section | `EDUCATION` | Education | शिक्षा |
-| section | `SKILLS` | Skills | स्किल्स |
-| section | `OTHER` | Other | अन्य |
-| issue type | `NO_METRIC` | No metric | कोई माप नहीं |
-| issue type | `WEAK_VERB` | Weak verb | कमज़ोर क्रिया |
-| issue type | `VAGUE` | Vague | अस्पष्ट |
-| issue type | `TOO_LONG` | Too long | बहुत लंबा |
-| issue type | `GRAMMAR` | Grammar | व्याकरण |
-| issue type | `PASSIVE_VOICE` | Passive voice | कर्मवाच्य |
-| issue type | `IRRELEVANT` | Irrelevant | अप्रासंगिक |
-| status | `QUEUED` | Queued | कतार में |
-| status | `PROCESSING` | In progress | प्रगति में |
-| status | `COMPLETED` | Completed | पूर्ण |
-| status | `FAILED` | Failed | विफल |
-| level | `FRESHER`, `JUNIOR`, `MID`, `SENIOR`, `LEAD` | labels as in the experience level table above | labels as in the experience level table above |
-| band | (see §4.7.4) | | |
-| errors | `FILE_TOO_LARGE`, `UNSUPPORTED_FILE_TYPE` | the ERR-013 and ERR-014 messages of §6.3 | the ERR-013 and ERR-014 messages of §6.3 |
+| importance | `CRITICAL` | Critical | अत्यावश्यक | 필수 |
+| importance | `IMPORTANT` | Important | महत्वपूर्ण | 중요 |
+| importance | `NICE_TO_HAVE` | Nice to have | अतिरिक्त लाभ | 우대 |
+| section | `SUMMARY` | Summary | सारांश | 요약 |
+| section | `EXPERIENCE` | Experience | अनुभव | 경력 |
+| section | `PROJECTS` | Projects | प्रोजेक्ट | 프로젝트 |
+| section | `EDUCATION` | Education | शिक्षा | 학력 |
+| section | `SKILLS` | Skills | स्किल्स | 기술 |
+| section | `OTHER` | Other | अन्य | 기타 |
+| issue type | `NO_METRIC` | No metric | कोई माप नहीं | 수치 없음 |
+| issue type | `WEAK_VERB` | Weak verb | कमज़ोर क्रिया | 약한 동사 |
+| issue type | `VAGUE` | Vague | अस्पष्ट | 모호함 |
+| issue type | `TOO_LONG` | Too long | बहुत लंबा | 너무 김 |
+| issue type | `GRAMMAR` | Grammar | व्याकरण | 문법 |
+| issue type | `PASSIVE_VOICE` | Passive voice | कर्मवाच्य | 수동태 |
+| issue type | `IRRELEVANT` | Irrelevant | अप्रासंगिक | 관련 없음 |
+| status | `QUEUED` | Queued | कतार में | 대기 중 |
+| status | `PROCESSING` | In progress | प्रगति में | 진행 중 |
+| status | `COMPLETED` | Completed | पूर्ण | 완료 |
+| status | `FAILED` | Failed | विफल | 실패 |
+| level | `FRESHER`, `JUNIOR`, `MID`, `SENIOR`, `LEAD` | labels as in the experience level table above | labels as in the experience level table above | labels as in the experience level table above |
+| band | (see §4.7.4) | | |  |
+| errors | `FILE_TOO_LARGE`, `UNSUPPORTED_FILE_TYPE` | the ERR-013 and ERR-014 messages of §6.3 | the ERR-013 and ERR-014 messages of §6.3 | the ERR-013 and ERR-014 messages of §6.3 |
 
 **Job role seed data** (`database/seeds/job-roles.seed.ts`; `INSERT … ON CONFLICT (code) DO NOTHING` with `is_active = true`, run by `migrate.js` after the migrations and by `npm run db:seed`; existing rows are never changed, FR-003.3):
 
-| display_order | code | name_en | name_hi | description | core_skills |
-|---|---|---|---|---|---|
-| 10 | `BACKEND_ENGINEER` | Backend Software Engineer | बैकएंड सॉफ्टवेयर इंजीनियर | Designs, builds and runs server-side services and APIs. | Server-side language (Java, Node.js, Go or Python); REST API design; SQL databases; Data modelling; Caching (Redis); Message queues; Unit testing; Git; Docker; Cloud platform (AWS, GCP or Azure) |
-| 20 | `FRONTEND_ENGINEER` | Frontend Engineer | फ्रंटएंड इंजीनियर | Builds fast, accessible web user interfaces. | JavaScript (ES6+); TypeScript; React; HTML5; CSS3; Responsive design; State management; REST or GraphQL integration; Web performance optimisation; Web accessibility (WCAG); Unit testing (Jest or Vitest); Git |
-| 30 | `FULLSTACK_ENGINEER` | Full Stack Engineer | फुल स्टैक इंजीनियर | Builds features end to end, from database to user interface. | JavaScript or TypeScript; React or Angular; Node.js; REST API design; SQL databases; NoSQL databases; Authentication and authorization; Docker; CI/CD; Cloud platform (AWS, GCP or Azure); Git; Testing |
-| 40 | `MOBILE_DEVELOPER` | Mobile App Developer | मोबाइल ऐप डेवलपर | Builds and publishes Android and iOS apps. | Kotlin or Java (Android); Swift (iOS); Flutter or React Native; Mobile UI design; REST API integration; Offline storage; Push notifications; App performance; Play Store and App Store publishing; Git |
-| 50 | `DATA_ANALYST` | Data Analyst | डेटा एनालिस्ट | Turns business data into reports and insights. | SQL; Microsoft Excel; Power BI or Tableau; Python (pandas); Statistics; Data cleaning; Dashboard design; A/B testing; Business communication |
-| 60 | `DATA_SCIENTIST` | Data Scientist | डेटा साइंटिस्ट | Builds statistical and machine learning models to solve business problems. | Python; SQL; Statistics; Machine learning (scikit-learn); Deep learning (PyTorch or TensorFlow); Feature engineering; Model evaluation; Data visualisation; Experiment design; Model deployment |
-| 70 | `DEVOPS_ENGINEER` | DevOps Engineer | डेवऑप्स इंजीनियर | Automates build, deployment and operation of cloud systems. | Linux; Shell scripting; CI/CD pipelines; Docker; Kubernetes; Terraform; Cloud platform (AWS, GCP or Azure); Monitoring and alerting; Networking basics; Security best practices |
-| 80 | `QA_ENGINEER` | QA / Test Engineer | QA / टेस्ट इंजीनियर | Plans and runs manual and automated tests to keep software quality high. | Test case design; Manual testing; Test automation (Selenium, Playwright or Cypress); API testing (Postman); SQL; Bug tracking (Jira); Performance testing; CI integration; Agile methods |
-| 90 | `PRODUCT_MANAGER` | Product Manager | प्रोडक्ट मैनेजर | Decides what to build and why, and leads delivery with engineering and design. | Product strategy; Roadmapping; User research; Requirements writing; Prioritisation frameworks; Data analysis; A/B testing; Stakeholder management; Agile and Scrum; Go-to-market planning |
-| 100 | `UI_UX_DESIGNER` | UI/UX Designer | UI/UX डिज़ाइनर | Designs usable and attractive digital products. | Figma; User research; Wireframing; Prototyping; Visual design; Interaction design; Usability testing; Design systems; Accessibility; Information architecture |
-| 110 | `DIGITAL_MARKETING_EXECUTIVE` | Digital Marketing Executive | डिजिटल मार्केटिंग एक्ज़ीक्यूटिव | Plans and runs online marketing campaigns. | SEO; Google Ads; Social media marketing; Content marketing; Email marketing; Google Analytics; Campaign reporting; Copywriting; Marketing automation |
-| 120 | `BUSINESS_ANALYST` | Business Analyst | बिज़नेस एनालिस्ट | Connects business needs with technical solutions. | Requirements gathering; Process mapping; Stakeholder management; SQL; Microsoft Excel; Data analysis; User stories and acceptance criteria; Jira or Confluence; Presentation skills |
+| display_order | code | name_en | name_hi | name_ko | description | core_skills |
+|---|---|---|---|---|---|---|
+| 10 | `BACKEND_ENGINEER` | Backend Software Engineer | बैकएंड सॉफ्टवेयर इंजीनियर | 백엔드 소프트웨어 엔지니어 | Designs, builds and runs server-side services and APIs. | Server-side language (Java, Node.js, Go or Python); REST API design; SQL databases; Data modelling; Caching (Redis); Message queues; Unit testing; Git; Docker; Cloud platform (AWS, GCP or Azure) |
+| 20 | `FRONTEND_ENGINEER` | Frontend Engineer | फ्रंटएंड इंजीनियर | 프론트엔드 엔지니어 | Builds fast, accessible web user interfaces. | JavaScript (ES6+); TypeScript; React; HTML5; CSS3; Responsive design; State management; REST or GraphQL integration; Web performance optimisation; Web accessibility (WCAG); Unit testing (Jest or Vitest); Git |
+| 30 | `FULLSTACK_ENGINEER` | Full Stack Engineer | फुल स्टैक इंजीनियर | 풀스택 엔지니어 | Builds features end to end, from database to user interface. | JavaScript or TypeScript; React or Angular; Node.js; REST API design; SQL databases; NoSQL databases; Authentication and authorization; Docker; CI/CD; Cloud platform (AWS, GCP or Azure); Git; Testing |
+| 40 | `MOBILE_DEVELOPER` | Mobile App Developer | मोबाइल ऐप डेवलपर | 모바일 앱 개발자 | Builds and publishes Android and iOS apps. | Kotlin or Java (Android); Swift (iOS); Flutter or React Native; Mobile UI design; REST API integration; Offline storage; Push notifications; App performance; Play Store and App Store publishing; Git |
+| 50 | `DATA_ANALYST` | Data Analyst | डेटा एनालिस्ट | 데이터 분석가 | Turns business data into reports and insights. | SQL; Microsoft Excel; Power BI or Tableau; Python (pandas); Statistics; Data cleaning; Dashboard design; A/B testing; Business communication |
+| 60 | `DATA_SCIENTIST` | Data Scientist | डेटा साइंटिस्ट | 데이터 사이언티스트 | Builds statistical and machine learning models to solve business problems. | Python; SQL; Statistics; Machine learning (scikit-learn); Deep learning (PyTorch or TensorFlow); Feature engineering; Model evaluation; Data visualisation; Experiment design; Model deployment |
+| 70 | `DEVOPS_ENGINEER` | DevOps Engineer | डेवऑप्स इंजीनियर | 데브옵스 엔지니어 | Automates build, deployment and operation of cloud systems. | Linux; Shell scripting; CI/CD pipelines; Docker; Kubernetes; Terraform; Cloud platform (AWS, GCP or Azure); Monitoring and alerting; Networking basics; Security best practices |
+| 80 | `QA_ENGINEER` | QA / Test Engineer | QA / टेस्ट इंजीनियर | QA / 테스트 엔지니어 | Plans and runs manual and automated tests to keep software quality high. | Test case design; Manual testing; Test automation (Selenium, Playwright or Cypress); API testing (Postman); SQL; Bug tracking (Jira); Performance testing; CI integration; Agile methods |
+| 90 | `PRODUCT_MANAGER` | Product Manager | प्रोडक्ट मैनेजर | 프로덕트 매니저 | Decides what to build and why, and leads delivery with engineering and design. | Product strategy; Roadmapping; User research; Requirements writing; Prioritisation frameworks; Data analysis; A/B testing; Stakeholder management; Agile and Scrum; Go-to-market planning |
+| 100 | `UI_UX_DESIGNER` | UI/UX Designer | UI/UX डिज़ाइनर | UI/UX 디자이너 | Designs usable and attractive digital products. | Figma; User research; Wireframing; Prototyping; Visual design; Interaction design; Usability testing; Design systems; Accessibility; Information architecture |
+| 110 | `DIGITAL_MARKETING_EXECUTIVE` | Digital Marketing Executive | डिजिटल मार्केटिंग एक्ज़ीक्यूटिव | 디지털 마케팅 담당자 | Plans and runs online marketing campaigns. | SEO; Google Ads; Social media marketing; Content marketing; Email marketing; Google Analytics; Campaign reporting; Copywriting; Marketing automation |
+| 120 | `BUSINESS_ANALYST` | Business Analyst | बिज़नेस एनालिस्ट | 비즈니스 분석가 | Connects business needs with technical solutions. | Requirements gathering; Process mapping; Stakeholder management; SQL; Microsoft Excel; Data analysis; User stories and acceptance criteria; Jira or Confluence; Presentation skills |
 
 `core_skills` items are separated by `;` in this table only; in the database they are array elements.
 
@@ -2067,7 +2094,7 @@ Rules: `consent.acceptedVersion` and `acceptedAt` come from the user's `ACTIVE` 
 
 | Field | In | Type | Required | Validation |
 |---|---|---|---|---|
-| `locale` | query | string | no | `en` or `hi`; default from `Accept-Language` |
+| `locale` | query | string | no | `en`, `hi` or `ko`; default from `Accept-Language` |
 
 **Response 200**
 
@@ -2094,7 +2121,7 @@ Rules: `consent.acceptedVersion` and `acceptedAt` come from the user's `ACTIVE` 
 | Field | In | Type | Required | Validation |
 |---|---|---|---|---|
 | `noticeVersion` | body | string | yes | 1–32 chars; must equal `NOTICE_VERSION` (else 409) |
-| `locale` | body | string | yes | `en` or `hi` |
+| `locale` | body | string | yes | `en`, `hi` or `ko` |
 
 ```json
 { "noticeVersion": "RO-NOTICE-2026-10", "locale": "en" }
@@ -2575,6 +2602,7 @@ A user with no data gets 200 with all counts 0 (a TBL-009 row is still written).
       "code": "BACKEND_ENGINEER",
       "nameEn": "Backend Software Engineer",
       "nameHi": "बैकएंड सॉफ्टवेयर इंजीनियर",
+      "nameKo": "백엔드 소프트웨어 엔지니어",
       "description": "Designs, builds and runs server-side services and APIs.",
       "coreSkills": ["Server-side language (Java, Node.js, Go or Python)", "REST API design", "SQL databases"],
       "isActive": true,
@@ -2604,6 +2632,7 @@ A user with no data gets 200 with all counts 0 (a TBL-009 row is still written).
 | `code` | body | string | yes | `^[A-Z][A-Z0-9_]{1,49}$` |
 | `nameEn` | body | string | yes | 2–100 chars |
 | `nameHi` | body | string | yes | 2–100 chars |
+| `nameKo` | body | string | yes | 2–100 chars |
 | `description` | body | string | yes | 10–500 chars |
 | `coreSkills` | body | string[] | yes | 3–30 items, each 1–80 chars, unique (case-insensitive) |
 | `isActive` | body | boolean | no | default `true` |
@@ -2623,7 +2652,7 @@ A user with no data gets 200 with all counts 0 (a TBL-009 row is still written).
 - **Auth / role:** `RO_ADMIN`. **Consent:** not required. **Rate limit:** default.
 - **Implements:** FR-021
 
-**Request:** path `jobRoleId` (UUID v4). Body: any non-empty subset of `nameEn`, `nameHi`, `description`, `coreSkills`, `isActive`, `displayOrder`, with the same validation as API-017. An empty body or a `code` field returns 400 `VALIDATION_FAILED`.
+**Request:** path `jobRoleId` (UUID v4). Body: any non-empty subset of `nameEn`, `nameHi`, `nameKo`, `description`, `coreSkills`, `isActive`, `displayOrder`, with the same validation as API-017. An empty body or a `code` field returns 400 `VALIDATION_FAILED`.
 
 **Response 200:** `{ "data": JobRoleAdmin }`. If at least one value changed, writes audit `JOB_ROLE_UPDATED` with `changedFields` and deletes the catalog cache; otherwise writes nothing (FR-021.5).
 
@@ -2662,42 +2691,42 @@ Checks, each with a 1000 ms timeout: PostgreSQL `SELECT 1`, Redis `PING`.
 
 "Surface" says where the code appears: **HTTP** = an error response; **parse** = `Resume.parseErrorCode`; **analysis** = `Analysis.errorCode`. Messages with numbers must be updated together with the constant they mention.
 
-| ID | Code | HTTP | Surface | Message (`en`) | Message (`hi`) | When it happens |
-|---|---|---|---|---|---|---|
-| ERR-001 | `AUTH_REQUIRED` | 401 | HTTP | Please sign in to SurfingBear to continue. | जारी रखने के लिए कृपया SurfingBear में साइन इन करें। | No cookie and no Bearer token (CR-001). |
-| ERR-002 | `AUTH_TOKEN_INVALID` | 401 | HTTP | Your session has expired or is invalid. Please sign in again. | आपका सत्र समाप्त हो गया है या अमान्य है। कृपया फिर से साइन इन करें। | Any CR-002 check fails. |
-| ERR-003 | `FORBIDDEN` | 403 | HTTP | You do not have permission to perform this action. | आपको यह कार्य करने की अनुमति नहीं है। | Admin route without `RO_ADMIN` (CR-008). |
-| ERR-004 | `CSRF_CHECK_FAILED` | 403 | HTTP | The request could not be verified. Please reload the page and try again. | अनुरोध सत्यापित नहीं हो सका। कृपया पेज रीलोड करके फिर से प्रयास करें। | Missing `X-Requested-With` or wrong `Origin` on a mutating request (CR-004). |
-| ERR-005 | `CONSENT_REQUIRED` | 403 | HTTP | Please read and accept the privacy notice before using the Resume Optimizer. | Resume Optimizer का उपयोग करने से पहले कृपया गोपनीयता सूचना पढ़ें और स्वीकार करें। | Consent-gated endpoint without active consent (FR-002.2). |
-| ERR-006 | `VALIDATION_FAILED` | 400 | HTTP | Some of the information you sent is not valid. | आपके द्वारा भेजी गई कुछ जानकारी मान्य नहीं है। | DTO, query or path validation fails; unknown fields; malformed JSON. |
-| ERR-007 | `PAYLOAD_TOO_LARGE` | 413 | HTTP | The request is too large. | अनुरोध बहुत बड़ा है। | JSON body > `JSON_BODY_LIMIT`. |
-| ERR-008 | `NOT_FOUND` | 404 | HTTP | We could not find what you were looking for. | आप जो ढूंढ रहे थे वह हमें नहीं मिला। | Unknown route; resource missing or owned by another user (CR-007). |
-| ERR-009 | `RATE_LIMITED` | 429 | HTTP | Too many requests. Please wait a moment and try again. | बहुत अधिक अनुरोध। कृपया थोड़ी देर रुककर फिर से प्रयास करें। | CR-021 limit exceeded. |
-| ERR-010 | `INTERNAL_ERROR` | 500 | HTTP, parse, analysis | Something went wrong on our side. Please try again. | हमारी ओर से कुछ गड़बड़ हो गई। कृपया फिर से प्रयास करें। | Unexpected exception (CR-015); stale parse (FR-005.8); worker retries exhausted (FR-011.5); enqueue failure (FR-006.4). |
-| ERR-011 | `SERVICE_UNAVAILABLE` | 503 | HTTP | The service is temporarily unavailable. Please try again in a few minutes. | सेवा अस्थायी रूप से उपलब्ध नहीं है। कृपया कुछ मिनट बाद प्रयास करें। | PostgreSQL, Redis, S3 or JWKS unavailable; readiness failure. |
-| ERR-012 | `FILE_REQUIRED` | 400 | HTTP | Please choose a resume file to upload. | कृपया अपलोड करने के लिए रिज़्यूमे फ़ाइल चुनें। | No file part or 0-byte file (FR-004.4). |
-| ERR-013 | `FILE_TOO_LARGE` | 413 | HTTP | The file is larger than 5 MB. Please upload a smaller file. | फ़ाइल 5 MB से बड़ी है। कृपया छोटी फ़ाइल अपलोड करें। | File > `MAX_FILE_SIZE_BYTES` (FR-004.3). |
-| ERR-014 | `UNSUPPORTED_FILE_TYPE` | 415 | HTTP | Only PDF and DOCX files are supported. | केवल PDF और DOCX फ़ाइलें समर्थित हैं। | Extension or magic bytes not allowed (FR-004.2). |
-| ERR-015 | `RESUME_CORRUPT` | — | parse | We could not open this file. It may be damaged. | हम यह फ़ाइल नहीं खोल सके। यह क्षतिग्रस्त हो सकती है। | Unreadable file, ZIP limits, parse timeout (FR-005.3). |
-| ERR-016 | `RESUME_ENCRYPTED` | — | parse | This file is password-protected. Please upload a version without a password. | यह फ़ाइल पासवर्ड से सुरक्षित है। कृपया बिना पासवर्ड वाली फ़ाइल अपलोड करें। | Password-protected PDF or encrypted DOCX (FR-005.2). |
-| ERR-017 | `RESUME_NO_TEXT` | — | parse | We could not find readable text in this file. Scanned images are not supported. | इस फ़ाइल में पढ़ने योग्य टेक्स्ट नहीं मिला। स्कैन की गई इमेज समर्थित नहीं हैं। | Text shorter than `MIN_TEXT_CHARS` (FR-005.4). |
-| ERR-018 | `RESUME_TOO_LONG` | — | parse | The resume is too long. Upload a resume of at most 5 pages and 20,000 characters. | रिज़्यूमे बहुत लंबा है। अधिकतम 5 पेज और 20,000 अक्षरों का रिज़्यूमे अपलोड करें। | More than `MAX_PDF_PAGES` pages or `MAX_TEXT_CHARS` characters (FR-005.1, FR-005.4). |
-| ERR-019 | `RESUME_NOT_READY` | 409 | HTTP | Your resume is still being read. Please wait a few seconds. | आपका रिज़्यूमे अभी पढ़ा जा रहा है। कृपया कुछ सेकंड प्रतीक्षा करें। | API-009 with a `PENDING` resume. |
-| ERR-020 | `RESUME_PARSE_FAILED` | 409 | HTTP | This resume could not be read, so it cannot be analysed. Please upload another file. | यह रिज़्यूमे पढ़ा नहीं जा सका, इसलिए इसका विश्लेषण नहीं हो सकता। कृपया दूसरी फ़ाइल अपलोड करें। | API-009 with a `FAILED` resume. |
-| ERR-021 | `RESUME_IN_USE` | 409 | HTTP | This resume is being analysed right now. Try again after the analysis finishes. | इस रिज़्यूमे का अभी विश्लेषण हो रहा है। विश्लेषण पूरा होने के बाद फिर से प्रयास करें। | API-008 while an analysis of it is active (FR-016.2). |
-| ERR-022 | `JOB_ROLE_UNAVAILABLE` | 422 | HTTP | The selected job role is no longer available. Please choose another role. | चुनी गई जॉब भूमिका अब उपलब्ध नहीं है। कृपया दूसरी भूमिका चुनें। | API-009 with an inactive role (FR-021.4). |
-| ERR-023 | `QUOTA_EXCEEDED` | 403 | HTTP | You have used all your analyses for this month. | आपने इस महीने के सभी विश्लेषण उपयोग कर लिए हैं। | FR-007.3. |
-| ERR-024 | `CONCURRENT_ANALYSIS_LIMIT` | 409 | HTTP | You already have 2 analyses in progress. Please wait for one to finish. | आपके 2 विश्लेषण पहले से चल रहे हैं। कृपया किसी एक के पूरा होने की प्रतीक्षा करें। | `MAX_CONCURRENT_ANALYSES` reached (FR-006.2). |
-| ERR-025 | `DUPLICATE_ANALYSIS` | 409 | HTTP | The same analysis is already in progress. | यही विश्लेषण पहले से चल रहा है। | Same resume + role + level already active (FR-006.2). |
-| ERR-026 | `NOT_A_RESUME` | — | analysis | This document does not look like a resume. Please upload your resume. | यह दस्तावेज़ रिज़्यूमे जैसा नहीं लगता। कृपया अपना रिज़्यूमे अपलोड करें। | AI returned `isResume: false` (FR-008.6). |
-| ERR-027 | `RESUME_LANGUAGE_UNSUPPORTED` | — | analysis | Only resumes written in English are supported right now. | अभी केवल अंग्रेज़ी में लिखे रिज़्यूमे समर्थित हैं। | AI-detected language is not English (FR-008.6). |
-| ERR-028 | `AI_UNAVAILABLE` | — | analysis | Our analysis service is busy right now. Please try again in a few minutes. | हमारी विश्लेषण सेवा अभी व्यस्त है। कृपया कुछ मिनट बाद प्रयास करें। | AI timeouts/429/5xx/auth errors after retries (FR-011.2). |
-| ERR-029 | `AI_OUTPUT_INVALID` | — | analysis | We could not complete the analysis. Please try again. | हम विश्लेषण पूरा नहीं कर सके। कृपया फिर से प्रयास करें। | Invalid AI output after the extra attempt (FR-011.3). |
-| ERR-030 | `ANALYSIS_TIMEOUT` | — | analysis | The analysis took too long and was stopped. Please try again. | विश्लेषण में बहुत अधिक समय लगा और उसे रोक दिया गया। कृपया फिर से प्रयास करें। | Not finished `ANALYSIS_STALE_AFTER_MS` after queueing (FR-011.4). |
-| ERR-031 | `ANALYSIS_NOT_COMPLETED` | 409 | HTTP | The report is available only after the analysis is complete. | रिपोर्ट विश्लेषण पूरा होने के बाद ही उपलब्ध होगी। | API-012 for a non-completed analysis (FR-013.3). |
-| ERR-032 | `ANALYSIS_IN_PROGRESS` | 409 | HTTP | This analysis is still running and cannot be deleted yet. | यह विश्लेषण अभी चल रहा है और अभी हटाया नहीं जा सकता। | API-013 for an active analysis (FR-017.2). |
-| ERR-033 | `CONSENT_VERSION_MISMATCH` | 409 | HTTP | The privacy notice has been updated. Please read the latest version and accept again. | गोपनीयता सूचना अपडेट हो गई है। कृपया नवीनतम संस्करण पढ़कर फिर से स्वीकार करें। | API-004 with an old notice version (FR-002.4). |
-| ERR-034 | `JOB_ROLE_CODE_EXISTS` | 409 | HTTP | A job role with this code already exists. | इस कोड वाली जॉब भूमिका पहले से मौजूद है। | API-017 with a used code (FR-021.2). |
+| ID | Code | HTTP | Surface | Message (`en`) | Message (`hi`) | Message (`ko`) | When it happens |
+|---|---|---|---|---|---|---|---|
+| ERR-001 | `AUTH_REQUIRED` | 401 | HTTP | Please sign in to SurfingBear to continue. | जारी रखने के लिए कृपया SurfingBear में साइन इन करें। | 계속하려면 SurfingBear에 로그인해 주세요. | No cookie and no Bearer token (CR-001). |
+| ERR-002 | `AUTH_TOKEN_INVALID` | 401 | HTTP | Your session has expired or is invalid. Please sign in again. | आपका सत्र समाप्त हो गया है या अमान्य है। कृपया फिर से साइन इन करें। | 세션이 만료되었거나 유효하지 않습니다. 다시 로그인해 주세요. | Any CR-002 check fails. |
+| ERR-003 | `FORBIDDEN` | 403 | HTTP | You do not have permission to perform this action. | आपको यह कार्य करने की अनुमति नहीं है। | 이 작업을 수행할 권한이 없습니다. | Admin route without `RO_ADMIN` (CR-008). |
+| ERR-004 | `CSRF_CHECK_FAILED` | 403 | HTTP | The request could not be verified. Please reload the page and try again. | अनुरोध सत्यापित नहीं हो सका। कृपया पेज रीलोड करके फिर से प्रयास करें। | 요청을 확인할 수 없습니다. 페이지를 새로고침한 후 다시 시도해 주세요. | Missing `X-Requested-With` or wrong `Origin` on a mutating request (CR-004). |
+| ERR-005 | `CONSENT_REQUIRED` | 403 | HTTP | Please read and accept the privacy notice before using the Resume Optimizer. | Resume Optimizer का उपयोग करने से पहले कृपया गोपनीयता सूचना पढ़ें और स्वीकार करें। | Resume Optimizer를 사용하기 전에 개인정보 처리 안내를 읽고 동의해 주세요. | Consent-gated endpoint without active consent (FR-002.2). |
+| ERR-006 | `VALIDATION_FAILED` | 400 | HTTP | Some of the information you sent is not valid. | आपके द्वारा भेजी गई कुछ जानकारी मान्य नहीं है। | 전송한 정보 중 일부가 올바르지 않습니다. | DTO, query or path validation fails; unknown fields; malformed JSON. |
+| ERR-007 | `PAYLOAD_TOO_LARGE` | 413 | HTTP | The request is too large. | अनुरोध बहुत बड़ा है। | 요청이 너무 큽니다. | JSON body > `JSON_BODY_LIMIT`. |
+| ERR-008 | `NOT_FOUND` | 404 | HTTP | We could not find what you were looking for. | आप जो ढूंढ रहे थे वह हमें नहीं मिला। | 요청하신 항목을 찾을 수 없습니다. | Unknown route; resource missing or owned by another user (CR-007). |
+| ERR-009 | `RATE_LIMITED` | 429 | HTTP | Too many requests. Please wait a moment and try again. | बहुत अधिक अनुरोध। कृपया थोड़ी देर रुककर फिर से प्रयास करें। | 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요. | CR-021 limit exceeded. |
+| ERR-010 | `INTERNAL_ERROR` | 500 | HTTP, parse, analysis | Something went wrong on our side. Please try again. | हमारी ओर से कुछ गड़बड़ हो गई। कृपया फिर से प्रयास करें। | 서버에서 문제가 발생했습니다. 다시 시도해 주세요. | Unexpected exception (CR-015); stale parse (FR-005.8); worker retries exhausted (FR-011.5); enqueue failure (FR-006.4). |
+| ERR-011 | `SERVICE_UNAVAILABLE` | 503 | HTTP | The service is temporarily unavailable. Please try again in a few minutes. | सेवा अस्थायी रूप से उपलब्ध नहीं है। कृपया कुछ मिनट बाद प्रयास करें। | 서비스를 일시적으로 사용할 수 없습니다. 몇 분 후 다시 시도해 주세요. | PostgreSQL, Redis, S3 or JWKS unavailable; readiness failure. |
+| ERR-012 | `FILE_REQUIRED` | 400 | HTTP | Please choose a resume file to upload. | कृपया अपलोड करने के लिए रिज़्यूमे फ़ाइल चुनें। | 업로드할 이력서 파일을 선택해 주세요. | No file part or 0-byte file (FR-004.4). |
+| ERR-013 | `FILE_TOO_LARGE` | 413 | HTTP | The file is larger than 5 MB. Please upload a smaller file. | फ़ाइल 5 MB से बड़ी है। कृपया छोटी फ़ाइल अपलोड करें। | 파일이 5MB보다 큽니다. 더 작은 파일을 업로드해 주세요. | File > `MAX_FILE_SIZE_BYTES` (FR-004.3). |
+| ERR-014 | `UNSUPPORTED_FILE_TYPE` | 415 | HTTP | Only PDF and DOCX files are supported. | केवल PDF और DOCX फ़ाइलें समर्थित हैं। | PDF와 DOCX 파일만 지원합니다. | Extension or magic bytes not allowed (FR-004.2). |
+| ERR-015 | `RESUME_CORRUPT` | — | parse | We could not open this file. It may be damaged. | हम यह फ़ाइल नहीं खोल सके। यह क्षतिग्रस्त हो सकती है। | 이 파일을 열 수 없습니다. 파일이 손상되었을 수 있습니다. | Unreadable file, ZIP limits, parse timeout (FR-005.3). |
+| ERR-016 | `RESUME_ENCRYPTED` | — | parse | This file is password-protected. Please upload a version without a password. | यह फ़ाइल पासवर्ड से सुरक्षित है। कृपया बिना पासवर्ड वाली फ़ाइल अपलोड करें। | 비밀번호로 보호된 파일입니다. 비밀번호가 없는 파일을 업로드해 주세요. | Password-protected PDF or encrypted DOCX (FR-005.2). |
+| ERR-017 | `RESUME_NO_TEXT` | — | parse | We could not find readable text in this file. Scanned images are not supported. | इस फ़ाइल में पढ़ने योग्य टेक्स्ट नहीं मिला। स्कैन की गई इमेज समर्थित नहीं हैं। | 이 파일에서 읽을 수 있는 텍스트를 찾지 못했습니다. 스캔한 이미지는 지원하지 않습니다. | Text shorter than `MIN_TEXT_CHARS` (FR-005.4). |
+| ERR-018 | `RESUME_TOO_LONG` | — | parse | The resume is too long. Upload a resume of at most 5 pages and 20,000 characters. | रिज़्यूमे बहुत लंबा है। अधिकतम 5 पेज और 20,000 अक्षरों का रिज़्यूमे अपलोड करें। | 이력서가 너무 깁니다. 최대 5페이지, 20,000자 이내의 이력서를 업로드해 주세요. | More than `MAX_PDF_PAGES` pages or `MAX_TEXT_CHARS` characters (FR-005.1, FR-005.4). |
+| ERR-019 | `RESUME_NOT_READY` | 409 | HTTP | Your resume is still being read. Please wait a few seconds. | आपका रिज़्यूमे अभी पढ़ा जा रहा है। कृपया कुछ सेकंड प्रतीक्षा करें। | 이력서를 아직 읽는 중입니다. 몇 초만 기다려 주세요. | API-009 with a `PENDING` resume. |
+| ERR-020 | `RESUME_PARSE_FAILED` | 409 | HTTP | This resume could not be read, so it cannot be analysed. Please upload another file. | यह रिज़्यूमे पढ़ा नहीं जा सका, इसलिए इसका विश्लेषण नहीं हो सकता। कृपया दूसरी फ़ाइल अपलोड करें। | 이 이력서를 읽을 수 없어 분석할 수 없습니다. 다른 파일을 업로드해 주세요. | API-009 with a `FAILED` resume. |
+| ERR-021 | `RESUME_IN_USE` | 409 | HTTP | This resume is being analysed right now. Try again after the analysis finishes. | इस रिज़्यूमे का अभी विश्लेषण हो रहा है। विश्लेषण पूरा होने के बाद फिर से प्रयास करें। | 이 이력서는 현재 분석 중입니다. 분석이 끝난 후 다시 시도해 주세요. | API-008 while an analysis of it is active (FR-016.2). |
+| ERR-022 | `JOB_ROLE_UNAVAILABLE` | 422 | HTTP | The selected job role is no longer available. Please choose another role. | चुनी गई जॉब भूमिका अब उपलब्ध नहीं है। कृपया दूसरी भूमिका चुनें। | 선택한 직무는 더 이상 제공되지 않습니다. 다른 직무를 선택해 주세요. | API-009 with an inactive role (FR-021.4). |
+| ERR-023 | `QUOTA_EXCEEDED` | 403 | HTTP | You have used all your analyses for this month. | आपने इस महीने के सभी विश्लेषण उपयोग कर लिए हैं। | 이번 달 분석 횟수를 모두 사용했습니다. | FR-007.3. |
+| ERR-024 | `CONCURRENT_ANALYSIS_LIMIT` | 409 | HTTP | You already have 2 analyses in progress. Please wait for one to finish. | आपके 2 विश्लेषण पहले से चल रहे हैं। कृपया किसी एक के पूरा होने की प्रतीक्षा करें। | 이미 2건의 분석이 진행 중입니다. 하나가 끝날 때까지 기다려 주세요. | `MAX_CONCURRENT_ANALYSES` reached (FR-006.2). |
+| ERR-025 | `DUPLICATE_ANALYSIS` | 409 | HTTP | The same analysis is already in progress. | यही विश्लेषण पहले से चल रहा है। | 동일한 분석이 이미 진행 중입니다. | Same resume + role + level already active (FR-006.2). |
+| ERR-026 | `NOT_A_RESUME` | — | analysis | This document does not look like a resume. Please upload your resume. | यह दस्तावेज़ रिज़्यूमे जैसा नहीं लगता। कृपया अपना रिज़्यूमे अपलोड करें। | 이 문서는 이력서로 보이지 않습니다. 이력서를 업로드해 주세요. | AI returned `isResume: false` (FR-008.6). |
+| ERR-027 | `RESUME_LANGUAGE_UNSUPPORTED` | — | analysis | Only resumes written in English are supported right now. | अभी केवल अंग्रेज़ी में लिखे रिज़्यूमे समर्थित हैं। | 현재는 영어로 작성된 이력서만 지원합니다. | AI-detected language is not English (FR-008.6). |
+| ERR-028 | `AI_UNAVAILABLE` | — | analysis | Our analysis service is busy right now. Please try again in a few minutes. | हमारी विश्लेषण सेवा अभी व्यस्त है। कृपया कुछ मिनट बाद प्रयास करें। | 현재 분석 서비스가 혼잡합니다. 몇 분 후 다시 시도해 주세요. | AI timeouts/429/5xx/auth errors after retries (FR-011.2). |
+| ERR-029 | `AI_OUTPUT_INVALID` | — | analysis | We could not complete the analysis. Please try again. | हम विश्लेषण पूरा नहीं कर सके। कृपया फिर से प्रयास करें। | 분석을 완료하지 못했습니다. 다시 시도해 주세요. | Invalid AI output after the extra attempt (FR-011.3). |
+| ERR-030 | `ANALYSIS_TIMEOUT` | — | analysis | The analysis took too long and was stopped. Please try again. | विश्लेषण में बहुत अधिक समय लगा और उसे रोक दिया गया। कृपया फिर से प्रयास करें। | 분석 시간이 너무 오래 걸려 중단되었습니다. 다시 시도해 주세요. | Not finished `ANALYSIS_STALE_AFTER_MS` after queueing (FR-011.4). |
+| ERR-031 | `ANALYSIS_NOT_COMPLETED` | 409 | HTTP | The report is available only after the analysis is complete. | रिपोर्ट विश्लेषण पूरा होने के बाद ही उपलब्ध होगी। | 보고서는 분석이 완료된 후에만 제공됩니다. | API-012 for a non-completed analysis (FR-013.3). |
+| ERR-032 | `ANALYSIS_IN_PROGRESS` | 409 | HTTP | This analysis is still running and cannot be deleted yet. | यह विश्लेषण अभी चल रहा है और अभी हटाया नहीं जा सकता। | 이 분석은 아직 진행 중이어서 삭제할 수 없습니다. | API-013 for an active analysis (FR-017.2). |
+| ERR-033 | `CONSENT_VERSION_MISMATCH` | 409 | HTTP | The privacy notice has been updated. Please read the latest version and accept again. | गोपनीयता सूचना अपडेट हो गई है। कृपया नवीनतम संस्करण पढ़कर फिर से स्वीकार करें। | 개인정보 처리 안내가 변경되었습니다. 최신 내용을 읽고 다시 동의해 주세요. | API-004 with an old notice version (FR-002.4). |
+| ERR-034 | `JOB_ROLE_CODE_EXISTS` | 409 | HTTP | A job role with this code already exists. | इस कोड वाली जॉब भूमिका पहले से मौजूद है। | 이 코드를 사용하는 직무가 이미 있습니다. | API-017 with a used code (FR-021.2). |
 
 ---
 
@@ -2751,7 +2780,7 @@ Every FR and NFR appears here. `—` means the item genuinely has no element of 
 | NFR-021 | CMP-003, CMP-014, CMP-001 | — (code property) | — (code property) | Jest coverage threshold; CI duration |
 | NFR-022 | CMP-016, CMP-017 | TBL-004, TBL-005 | — (offline evaluation) | `ai-golden.ts` report |
 | NFR-023 | CMP-022, CMP-012 | TBL-010 | — (process requirement) | Annual tabletop record |
-| NFR-024 | CMP-001, CMP-003 | TBL-001 (`name_hi`) | API-002, API-003, API-011 | `no-literal-string` lint; key-coverage script |
+| NFR-024 | CMP-001, CMP-003 | TBL-001 (`name_hi`, `name_ko`) | API-002, API-003, API-011 | `no-literal-string` lint; key-coverage script |
 
 ---
 
@@ -2772,3 +2801,5 @@ Every FR and NFR appears here. `—` means the item genuinely has no element of 
 | v0.1 | 2026-10-16 | Neeraj Gurjar | First complete draft of sections 0 to 8. | Round 1 of the spec homework. | Created: CR-001–CR-036, FR-001–FR-021, NFR-001–NFR-024, ASM-001–ASM-013, OOS-001–OOS-013, CMP-001–CMP-023, TBL-001–TBL-010, API-001–API-020, ERR-001–ERR-034, P-01–P-04 |
 | v0.2 | 2026-10-16 | Neeraj Gurjar | Fixes from a simulated build test and a consistency review. (1) Erasure keeps `monthly_usage`, so it cannot reset the FREE limit. (2) One meaning for `used` (= consumed) and `inProgress` (= reserved) everywhere. (3) Worker concurrency 20 in AWS, with the capacity arithmetic. (4) JWKS fallback with a 24 h last-good key set. (5) Nonce-based CSP for Next.js and a `/healthz` web health check. (6) Environment-neutral web image with runtime config and per-env platform URLs. (7) Upload write order with clean-up on failure. (8) Expired rows behave as deleted. (9) New constants `RAW_FILE_MAX_HOURS` and the split poll constants. (10) Docker images, CI jobs, deploy steps, Terraform layout, metrics pipeline and alarm routing (§4.12.4–§4.12.6, §4.11). (11) Notice text, mock AI, mock platform, audit metadata keys, CHECK names, ERD cardinality, and migration naming made exact. | Remove places where a builder would have to guess, and remove contradictions. | Changed: CR-005, CR-007, CR-009, CR-011, CR-017, CR-019, CR-021, CR-022, CR-023, CR-029, CR-032, CR-033, CR-034, CR-036, FR-002, FR-003, FR-004, FR-005, FR-006, FR-007, FR-011, FR-013, FR-014, FR-015, FR-019, FR-021, NFR-003, NFR-006, NFR-008, NFR-013, NFR-014, NFR-015, NFR-016, NFR-017, NFR-024, CMP-017, TBL-002, TBL-004, TBL-009, TBL-010, API-002, API-005, API-006, API-009, API-010, API-011, API-014, API-018, ERR-028, ERR-029, ERR-030, P-01, P-02, P-04. Added: ASM-014, `ix_consents__user_id_accepted_at`. |
 | v0.3 | 2026-10-16 | Neeraj Gurjar | Second simulated build test. (1) Erasure releases the reservations of the in-progress analyses it deletes. (2) One rule for 503 versus 500, a fail-open rate limiter, and consent-cache fallback. (3) Local env loading for the web app; fixed placeholder secrets in `.env.example`; one `METRICS_PORT` with a local override for the worker. (4) CommonJS build with an ESM-only parse thread for `pdfjs-dist`; exact `apps/api` and root npm scripts. (5) Terraform shared root (ECR, OIDC), first-setup steps, manual apply; GitHub environment and OIDC subject mapping; CODEOWNERS teams. (6) Metrics through the ADOT `awsemf` exporter; NFR-016 checked by a CI log scan. (7) The CSP adds `'unsafe-eval'` in development only; AI errors carry token data; Clock rule made exact; BullMQ and throttler key prefixes; re-run of a parse job deletes the raw file. | Remove the remaining build-test guesses (tooling, deployment) and three contradictions. | Changed: CR-015, CR-021, CR-022, FR-002, FR-019, NFR-016, CMP-017, §0.6, §1.7, §2.1, §2.2, §2.4, §2.5, §4.4, §4.7, §4.8, §4.11, §4.12. Added: ASM-015. |
+| v0.4 | 2026-10-19 | Neeraj Gurjar | Third simulated build test. (1) Erasure deletes analyses with `RETURNING` and then releases reservations, with one lock order for analyses and usage (no deadlock, no double release). (2) Redis failures on caches and cache deletes fall back to the database or are best-effort; consent is always read from the database on writes; client timeouts given. (3) Per-process env schemas and env loading outside Nest. (4) Who registers the repeatable maintenance jobs; how the parse thread file is found; mock platform module format. (5) Resume row locks between API-008 and API-009; `changedFields` comparison rule; audit failure after upload keeps the 201. (6) Contradictions removed: migration test steps, `constants.ts` contents, the redaction check, `ended_at` time source, audit transaction rule, JWKS failure diagram. | Remove the remaining build-test guesses. | Changed: CR-015, CR-018, CR-035, FR-002, FR-003, FR-004, FR-005, FR-006, FR-019, FR-021, CMP-012, §2.2, §4.3.4, §4.3.5, §4.8.1, §4.8.2, §4.12.3, §5.4. |
+| v0.5 | 2026-10-19 | Neeraj Gurjar | Korean (`ko`) added as a third UI language: locale rules, routes, date format, Korean error messages, notice, dimension, band, level and label texts, job role names (`name_ko`, `nameKo`) and the consent locale check. The role × permission table now uses ✔️ / ✗ marks instead of Yes / No. | Let the Korean HQ team use and review the product in Korean (ASM-016); make the permission table easier to scan. | Changed: CR-016, CR-028, CR-029, CR-030, FR-002, FR-021, NFR-024, ASM-004, OOS-004, TBL-001, TBL-002, API-003, API-004, API-016, API-017, API-018, ERR-001–ERR-034 (messages), §1.2, §4.6, §4.7.3, §4.7.4, §4.9, §5.5. Added: ASM-016. |
