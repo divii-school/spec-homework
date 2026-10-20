@@ -3,9 +3,9 @@
 | Field | Value |
 |---|---|
 | Author | Vaishali Naruka |
-| Version | v0.6 |
+| Version | v1.0 |
 | Last updated | 2026-10-20 |
-| Status | Draft |
+| Status | Review (round 1 submission) |
 
 **What this document is.** The single source for building the SurfingBear Resume Optimizer ("RO") module: a Next.js web client, a NestJS API, a NestJS background worker, PostgreSQL and Redis. A developer must be able to build, test and deploy RO from this file alone. If this file is silent on something, that is a defect in this file: raise it, do not guess.
 
@@ -39,7 +39,7 @@ RO has no sign-up or login of its own. The main SurfingBear platform ("the platf
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-001 | Authentication | The platform sets the access token as a cookie with `HttpOnly; Secure; SameSite=Lax; Path=/`. Name and domain differ per environment so tokens never cross environments: `prod` `sb_access` on `.surfingbear.com`; `staging` `sb_access_staging` on `.staging.surfingbear.com`; `dev` `sb_access_dev` on `.dev.surfingbear.com`; `local`/`test` `sb_access` on `localhost`. RO reads the name from `AUTH_COOKIE_NAME` (§4.6). This document says `sb_access` for short. RO reads the token **only** from this cookie. RO never reads tokens from `localStorage`, query strings or the `Authorization` header in deployed environments (`dev`, `staging`, `prod`). In `local` and `test`, `Authorization: Bearer <jwt>` is also accepted so e2e tests can call the API directly. | e2e test: request with valid token in `Authorization` header to `staging` returns 401; same token in cookie returns 200 |
+| CR-001 | Authentication | The platform sets the access token as a cookie with `HttpOnly; Secure; SameSite=Lax; Path=/`. Name and domain differ per environment so tokens never cross environments: `prod` `sb_access` on `.surfingbear.com`; `staging` `sb_access_staging` on `.staging.surfingbear.com`; `dev` `sb_access_dev` on `.dev.surfingbear.com`; `local`/`test` `sb_access` on `localhost`. RO reads the name from `AUTH_COOKIE_NAME` (§4.6). This document says `sb_access` for short. RO reads the token **only** from this cookie. RO never reads tokens from `localStorage`, query strings or the `Authorization` header in deployed environments (`dev`, `staging`, `prod`). In `local` and `test`, `Authorization: Bearer <jwt>` is also accepted so e2e tests can call the API directly. | Unit test of the token extractor for each `APP_ENV`; `scripts/smoke.ts` after each `staging` deploy: the canary token (NFR-005) in `Authorization` returns 401, the same token in the cookie returns 200 |
 | CR-002 | Authentication | The token is a JWT signed with **RS256**. RO verifies it with the platform's public keys from `AUTH_JWKS_URL` (§4.6). Keys are cached in memory for `CFG-21` (10 min); on an unknown `kid` the cache is refreshed at most once per `CFG-22` (60 s). | Unit test of `JwtVerifier` with rotated key fixture |
 | CR-003 | Authentication | A token is valid only if: signature is valid; `alg` is `RS256` (any other value, including `none`, is rejected); `iss` equals `AUTH_ISSUER`; `aud` contains `AUTH_AUDIENCE`; `exp` is in the future and `nbf`/`iat` are not in the future, with a clock skew tolerance of `CFG-23` (30 s); `sub` is a UUID. Any failure → `401 UNAUTHENTICATED` (ERR-001). | Unit tests, one per rule |
 | CR-004 | Authentication | Claims RO uses: `sub` (platform user ID, UUID) → `userId`; `plan` (`"free"` or `"pro"`) → plan; `roles` (array of strings) → roles. A missing or unknown `plan` value is treated as `"free"`. A missing `roles` claim is treated as `[]`. RO never stores the token. | Unit test with claim fixtures |
@@ -107,7 +107,7 @@ Every API error uses this **one** response body, with `Content-Type: application
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
 | CR-014 | Errors | A single global NestJS exception filter (`AppExceptionFilter`) produces every error body. Controllers and services throw `AppError(code, details?)`; the filter maps `code` → HTTP status and message from the table in §6.3. | Unit test: every code in §6.3 maps to the listed status |
-| CR-015 | Errors | Framework errors are mapped: class-validator failure → 400 `VALIDATION_FAILED`; unknown route → 404 `NOT_FOUND`; JSON body over `CFG-24` (100 KB) or malformed JSON → 400 `VALIDATION_FAILED` with `issue: "body_too_large"` or `issue: "type"`; Multer file over `CFG-01` → 413 `FILE_TOO_LARGE`; throttler → 429 `RATE_LIMITED`; anything else → 500 `INTERNAL_ERROR` with the generic message, and the stack is logged at `error`. | e2e tests |
+| CR-015 | Errors | Framework errors are mapped: class-validator failure → 400 `VALIDATION_FAILED`; unknown route → 404 `NOT_FOUND`; JSON body over `CFG-24` (100 KiB) or malformed JSON → 400 `VALIDATION_FAILED` with `issue: "body_too_large"` or `issue: "type"`; Multer file over `CFG-01` → 413 `FILE_TOO_LARGE`; throttler → 429 `RATE_LIMITED`; anything else → 500 `INTERNAL_ERROR` with the generic message, and the stack is logged at `error`. | e2e tests |
 | CR-016 | Errors | `429` responses carry `Retry-After` (seconds, integer). `503` responses carry `Retry-After: 30`. | e2e test |
 | CR-017 | Errors | Background failures are not HTTP errors. A failed analysis is stored with `status = "failed"` and a `failureCode` from §6.3 (ERR-022 – ERR-024), which the client reads from API-011. | e2e test with AI mock in failure mode |
 
@@ -121,8 +121,8 @@ Every API error uses this **one** response body, with `Content-Type: application
 | CR-021 | CSRF | For every `POST`, `PUT`, `PATCH`, `DELETE`, the API requires the `Origin` header to equal `WEB_ORIGIN` (§4.6). Missing or different → `403 FORBIDDEN` (ERR-002). Combined with `SameSite=Lax` on the cookie (CR-001), this blocks cross-site form posts. | e2e test |
 | CR-022 | Input validation | Every request body, query and path parameter is validated with `class-validator` DTOs and `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true })`. Unknown fields → 400 `VALIDATION_FAILED` with `issue: "unknown_field"`. Path IDs must be UUIDs, else 404 `NOT_FOUND`. Constraint → `issue` mapping: `isDefined`/`isNotEmpty` → `required`; `isString`/`isInt`/`isBoolean`/`isUUID`/`isArray` → `type`; `min`/`arrayMinSize` → `min`; `max`/`arrayMaxSize` → `max`; `minLength` → `min_length`; `maxLength` → `max_length`; `matches` → `pattern`; `isIn`/`isEnum` → `enum`; whitelist violation → `unknown_field`. `field` is the property path, e.g. `skills[3].name`. | Unit tests per DTO |
 | CR-023 | File validation | Uploaded files are checked by **content**, not by name or `Content-Type`: magic bytes `%PDF-` (PDF) or ZIP header `PK\x03\x04` **and** a `word/document.xml` entry (DOCX). A file starting with the OLE magic `D0 CF 11 E0 A1 B1 1A E1` that contains an `EncryptionInfo` stream (read with the `cfb` package) is a password-protected Office file → `422 FILE_ENCRYPTED` (ERR-009); any other OLE file (e.g. legacy `.doc`) → 415. Files are processed in memory only and never written to disk or object storage (FR-004). DOCX unzip is limited to `CFG-25` (20 MiB) total uncompressed size and `CFG-26` (500) entries to stop zip bombs; exceeding either → `415 UNSUPPORTED_FILE_TYPE` (ERR-008). | Unit tests with fixtures in §3.7 |
-| CR-024 | Rate limiting | Per-user limits, counted in Redis (fixed window): all API routes `CFG-15` (120 requests / 60 s); `POST /resumes` `CFG-16` (10 / hour); `POST /analyses` `CFG-17` (20 / hour). Unauthenticated requests are limited per client IP at 60 / 60 s. Over the limit → 429 `RATE_LIMITED` (ERR-018). | e2e test |
-| CR-025 | Headers | The web app sends `Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-<per-request>'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`, plus `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. The API uses `helmet()` defaults. | Deploy smoke test checks headers |
+| CR-024 | Rate limiting | Per-user limits, counted in Redis (fixed window): all API routes `CFG-15` (120 requests / 60 s); `POST /resumes` `CFG-16` (10 / hour); `POST /analyses` `CFG-17` (20 / hour). Unauthenticated requests are limited per client IP at `CFG-33` (60 / 60 s). Over the limit → 429 `RATE_LIMITED` (ERR-018). Implementation: `@nestjs/throttler` with a custom Redis storage; keys `rl:<group>:<userId>:<windowStart>` (`group` = `default`, `upload`, `analysis`) or `rl:anon:ip:<addr>:<windowStart>`; TTL = window. `ThrottlerGuard` runs after `AuthGuard` so it can key by `userId`. Express `trust proxy = 1`, so the client IP is the one the ALB puts in `X-Forwarded-For`. | e2e test |
+| CR-025 | Headers | The web app sends `Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-<per-request>'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`, plus `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. The API uses `helmet({ hsts: { maxAge: 31536000, includeSubDomains: true } })` (CR-019); the web sets the same `Strict-Transport-Security` header in `next.config.ts` `headers()`. | Deploy smoke test checks headers |
 | CR-026 | Data at rest | RDS and ElastiCache use AWS KMS encryption at rest. In addition, resume text is encrypted in the application with AES-256-GCM before it is written to PostgreSQL (§5.2, TBL-004). | Schema + code review |
 | CR-027 | Data retention | Retention is fixed (DPDP purpose limitation): a resume (its redacted text and metadata) is deleted `CFG-09` (30 days) after upload; an analysis and its children are deleted `CFG-10` (180 days) after creation; audit events are kept `CFG-11` (365 days). The deletion is a hard delete (FR-021). The user can delete earlier at any time (FR-006, FR-016, FR-020). | Purge job test with clock fixture |
 | CR-028 | DPDP | RO processes personal data only for the stated purpose (resume analysis), only after recorded consent (FR-002), stores data only in AWS `ap-south-1` (Mumbai), sends only **redacted** text to the AI provider (FR-005), and offers erasure (FR-020). The privacy notice names the Grievance Officer contact `grievance@surfingbear.com`. | Checklist review before release |
@@ -156,9 +156,9 @@ Every API error uses this **one** response body, with `Content-Type: application
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-036 | CI | GitHub Actions workflow `.github/workflows/ci.yml` runs on every PR and push: `pnpm install --frozen-lockfile` → `pnpm lint` → `pnpm typecheck` → `pnpm test` (unit) → `pnpm test:e2e` (API e2e against Postgres 16 + Redis 7 service containers, `AI_MODE=mock`) → `pnpm build` → `gitleaks`. A PR cannot merge unless all are green. | Branch protection on `main` |
+| CR-036 | CI | GitHub Actions workflow `.github/workflows/ci.yml` runs on every PR and push: `pnpm install --frozen-lockfile` → `pnpm lint` → `pnpm format:check` → `pnpm typecheck` → `prisma validate` → `pnpm test` (unit) → `pnpm test:e2e` (API e2e against Postgres 16 + Redis 7 service containers, `AI_MODE=mock`) → `pnpm build` → Docker build + Trivy scan (NFR-009) → `gitleaks` → `scripts/check-ids.ts` (NFR-020). A PR cannot merge unless all are green. | Branch protection on `main` |
 | CR-037 | Build | One Docker image per app: `ro-web`, `ro-api` (the worker uses the `ro-api` image with command `node dist/worker.js`). Images are tagged with the git SHA and pushed to ECR. | Workflow review |
-| CR-038 | Release | `deploy.yml`: merge to `main` → deploy to `dev`; tag `vX.Y.Z-rc.N` → `staging`; tag `vX.Y.Z` → `prod` after a manual approval in the GitHub `prod` environment by one of the 2 named release approvers. Deploy order: run DB migrations (one-off ECS task `node dist/migrate.js`) → update `ro-worker` → update `ro-api` → update `ro-web`. ECS rolling update with `minimumHealthyPercent=100`, `maximumPercent=200`. | Workflow review |
+| CR-038 | Release | `deploy.yml`: merge to `main` → deploy to `dev`; tag `vX.Y.Z-rc.N` → `staging`; tag `vX.Y.Z` → `prod` after a manual approval in the GitHub `prod` environment by one of the 2 named release approvers. Deploy order: run DB migrations (one-off ECS task `node dist/migrate.js`, connecting as DB role `ro_migrator` via `MIGRATION_DATABASE_URL`; the services connect as `ro_app`, which has DML rights only and no `UPDATE` on `audit_events`; `prisma` is a runtime dependency of `@ro/api`, so the CLI is in the image) → update `ro-worker` → update `ro-api` → update `ro-web`. ECS rolling update with `minimumHealthyPercent=100`, `maximumPercent=200`. | Workflow review |
 | CR-039 | Migrations | Migrations are forward-only and **backward compatible with the previous release** (expand → migrate → contract over two releases). A column is never renamed or dropped in the same release that stops using it. | Code review checklist |
 | CR-040 | Rollback | Rollback = redeploy the previous image tag (`deploy.yml` with input `image_tag`). Because migrations are backward compatible (CR-039), no down-migration is needed. ECS deployment circuit breaker with auto-rollback is enabled: if new tasks fail `/health/ready` for 5 minutes, ECS rolls back by itself. | Quarterly rollback drill on `staging` |
 | CR-041 | Smoke test | After every deploy, `deploy.yml` runs `scripts/smoke.ts` against the environment: `GET /api/health/ready` = 200, web `/` = 200, security headers present (CR-019, CR-025). On failure the deploy job fails and alerts `#ro-alerts`. | Workflow review |
@@ -199,12 +199,12 @@ resume-optimizer/
 │   ├── api/                         # NestJS 11 — API (main.ts) and worker (worker.ts)
 │   │   ├── src/
 │   │   │   ├── main.ts              # HTTP entrypoint
-│   │   │   ├── worker.ts            # BullMQ worker + scheduler entrypoint (no HTTP)
+│   │   │   ├── worker.ts            # BullMQ worker + scheduler entrypoint (HTTP only for /metrics and /health/live on METRICS_PORT)
 │   │   │   ├── migrate.ts           # runs `prisma migrate deploy`, then exits
 │   │   │   ├── app.module.ts
 │   │   │   ├── worker.module.ts
 │   │   │   ├── common/              # AppError, AppExceptionFilter, guards, interceptors, request-id
-│   │   │   ├── config/              # env schema (zod), typed ConfigService
+│   │   │   ├── config/              # env schemas (zod): apiEnv, workerEnv; typed ConfigService
 │   │   │   ├── auth/                # CMP-003 JwtVerifier, AuthGuard, RolesGuard, OriginGuard
 │   │   │   ├── consents/            # CMP-004
 │   │   │   ├── resumes/             # CMP-005, CMP-006 extractor/, CMP-007 redactor/
@@ -236,13 +236,15 @@ resume-optimizer/
 │       │   ├── lib/api/             # typed fetch client, error mapper
 │       │   ├── lib/format/          # date / number formatters (CR-030, CR-031)
 │       │   └── middleware.ts        # CSP nonce (CR-025)
+│       ├── e2e/                     # Playwright specs (NFR-016, NFR-017)
 │       └── messages/en.json
 ├── packages/
 │   └── shared/                      # @ro/shared: config constants, API types, enums, zod schemas
 ├── tools/
 │   └── mock-platform/               # §4.8 local JWT issuer + JWKS
 ├── infra/                           # Terraform; envs/<env>.tfvars
-├── scripts/                         # smoke.ts, check-log-pii.ts, check-ids.ts
+├── scripts/                         # smoke.ts, check-log-pii.ts, check-ids.ts, make-fixtures.ts
+├── perf/                            # k6 scripts: api.js, upload.js, report.js, soak.js
 ├── docker-compose.yml               # postgres:16, redis:7, mock-platform
 ├── .github/workflows/               # ci.yml, deploy.yml
 └── pnpm-workspace.yaml
@@ -292,7 +294,7 @@ Package manager: **pnpm 9**; Node.js **22 LTS** pinned in `.nvmrc` and `package.
 | Resume | One uploaded file after text extraction. RO stores only its **redacted, encrypted text** and metadata, never the file (FR-004). |
 | Analysis | One run of scoring + missing skills + suggestions for one resume, one job role and one experience level. |
 | Job role | An entry in the job-role catalogue (TBL-001) with its skill list (TBL-002), e.g. "Frontend Developer". |
-| Experience level | One of `entry` (0–2 years), `mid` (3–5), `senior` (6–9), `lead` (10+). Ordered `entry < mid < senior < lead`. |
+| Experience level | One of `entry` (0–2 years), `mid` (3–5), `senior` (6–9), `lead` (10+). Ordered `entry < mid < senior < lead`. Display labels (SCR-03, SCR-05, PDF): `Entry (0–2 years)`, `Mid (3–5 years)`, `Senior (6–9 years)`, `Lead (10+ years)`. Explanation templates use the bare key (`mid`). |
 | Dimension | One of the 5 ATS score parts in §3.5.3. |
 | Suggestion | A proposed rewrite of one weak line of the resume (§3.5.5). |
 | Quota period | Calendar month in `Asia/Kolkata`, written `YYYY-MM` (§3.5.6). |
@@ -303,13 +305,13 @@ Package manager: **pnpm 9**; Node.js **22 LTS** pinned in `.nvmrc` and `package.
 | ID | Title | Description | Priority | Acceptance criteria |
 |---|---|---|---|---|
 | FR-001 | Authenticated access | Every RO screen and API (except health checks) requires a valid platform token. | Must | 1. A request without the `sb_access` cookie, or with a token failing any CR-003 rule, returns `401 UNAUTHENTICATED` (ERR-001). 2. The web app on any 401 redirects to `PLATFORM_LOGIN_URL?returnTo=<current URL>` (CR-005). 3. `GET /api/v1/me` (API-001) with a valid token returns `userId` equal to the token `sub`. 4. A token with `plan` missing is treated as `free` (CR-004). |
-| FR-002 | Privacy notice and consent | Before the first upload, the user reads the privacy notice (§3.5.7) and gives explicit consent. Consent is recorded with the notice version. | Must | 1. `POST /resumes` (API-004) without a consent row for the current notice version `CFG-30` returns `403 CONSENT_REQUIRED` (ERR-005). 2. The consent screen (SCR-02) shows the notice text and an unticked checkbox "I agree…"; the "Continue" button is disabled until it is ticked. 3. `POST /consents` (API-003) stores one TBL-003 row with `notice_version`, `accepted_at`; repeating it for the same version returns 200 with the existing row, not a duplicate. 4. When `CFG-30` changes, every user must consent again before the next upload (criterion 1 applies). Existing resumes and analyses stay readable. 5. API-001 returns `consent.required = true` while there is no consent for the current version. |
-| FR-003 | Upload resume | The user uploads one PDF or DOCX file. | Must | 1. Accepted types are decided by content (CR-023): PDF or DOCX. Anything else → `415 UNSUPPORTED_FILE_TYPE` (ERR-008). 2. Max size `CFG-01` (5 MiB = 5,242,880 bytes); larger → `413 FILE_TOO_LARGE` (ERR-007); the web app checks size before upload and shows the same message without calling the API. 3. A PDF with more than `CFG-02` (5) pages → `422 TOO_MANY_PAGES` (ERR-010). 4. Password-protected PDF or encrypted DOCX → `422 FILE_ENCRYPTED` (ERR-009). 5. Request without a `file` part → `400 FILE_REQUIRED` (ERR-006). 6. A user with `CFG-18` (10) stored, non-expired resumes gets `409 RESUME_LIMIT_REACHED` (ERR-013). 7. On success the API returns `201` with the resume summary (API-004), within `NFR-002`. 8. Uploading a file whose normalised text has the same SHA-256 as one of the user's existing, non-expired resumes returns `200` with that existing resume and `duplicate: true`; no new row is created. If the matching row is expired (`expires_at <= now()`, not yet purged), it is deleted in the same transaction and the upload continues as a new resume. 9. The checks run in this order and the first failure is returned: consent (FR-002) → file present → size → type → encryption → page count → extraction and text length (FR-004) → duplicate (returns 200, AC 8) → resume limit (AC 6). The limit is checked last so that re-uploading an existing resume still works at the limit. 10. The steps after extraction (duplicate lookup, expired-row delete, count, insert) run in one transaction that first takes `pg_advisory_xact_lock(hashtext(user_id::text))`, so one user's concurrent uploads are serialised; a unique violation on `ux_resumes_user_sha` is still answered with the AC 8 duplicate response. |
-| FR-004 | Extract and store text | The API extracts plain text from the file in memory, normalises it, collects layout signals, redacts it (FR-005), encrypts it and stores it. The file itself is discarded. | Must | 1. PDF text is extracted with `pdfjs-dist`; DOCX with `mammoth` (`extractRawText`) plus a scan of `word/document.xml` for signals (§3.5.1). 2. Extraction runs in a `worker_threads` pool (`piscina`, size = number of vCPUs of the task) so CPU-bound parsing never blocks the API event loop; the thread is terminated after `CFG-19` (10 s) → `422 TEXT_NOT_EXTRACTABLE` (ERR-011). 3. Normalised text shorter than `CFG-03` (400) characters (e.g. a scanned PDF with no text layer) → `422 TEXT_NOT_EXTRACTABLE` (ERR-011) with message suggesting a text-based file. 4. Normalised text longer than `CFG-04` (30,000) characters → `422 TEXT_TOO_LONG` (ERR-012). 5. The original bytes are never written to disk, object storage, logs or the database; after the request the buffer is released. 6. TBL-004 stores: redacted text encrypted (AES-256-GCM, §5.2), `text_sha256` of the **normalised un-redacted** text, signals JSON, page count, file type, size, display name, `expires_at = created_at + CFG-09 (30 days)`. |
+| FR-002 | Privacy notice and consent | Before the first upload, the user reads the privacy notice (§3.5.7) and gives explicit consent. Consent is recorded with the notice version. | Must | 1. `POST /resumes` (API-004) and `POST /analyses` (API-009) without a consent row for the current notice version `CFG-30` return `403 CONSENT_REQUIRED` (ERR-005). 2. The consent screen (SCR-02) shows the notice text and an unticked checkbox "I agree…"; the "Continue" button is disabled until it is ticked. 3. `POST /consents` (API-003) stores one TBL-003 row with `notice_version`, `accepted_at`; repeating it for the same version returns 200 with the existing row, not a duplicate. 4. When `CFG-30` changes, every user must consent again before the next upload or analysis (criterion 1 applies). Existing resumes and analyses stay readable. 5. API-001 returns `consent.required = true` while there is no consent for the current version. |
+| FR-003 | Upload resume | The user uploads one PDF or DOCX file. | Must | 1. Accepted types are decided by content (CR-023): PDF or DOCX. Anything else → `415 UNSUPPORTED_FILE_TYPE` (ERR-008). 2. Max size `CFG-01` (5 MiB = 5,242,880 bytes); larger → `413 FILE_TOO_LARGE` (ERR-007); the web app checks size before upload and shows the same message without calling the API. 3. A PDF with more than `CFG-02` (5) pages → `422 TOO_MANY_PAGES` (ERR-010). 4. Password-protected PDF or encrypted DOCX → `422 FILE_ENCRYPTED` (ERR-009). 5. Request without a `file` part → `400 FILE_REQUIRED` (ERR-006). 6. A user with `CFG-18` (10) stored, non-expired resumes gets `409 RESUME_LIMIT_REACHED` (ERR-013). 7. On success the API returns `201` with the resume summary (API-004). (Timing is a p95 target: NFR-002.) 8. Uploading a file whose normalised text has the same SHA-256 as one of the user's existing, non-expired resumes returns `200` with that existing resume and `duplicate: true`; no new row is created. If the matching row is expired (`expires_at <= now()`, not yet purged), it is deleted in the same transaction and the upload continues as a new resume. 9. The checks run in this order and the first failure is returned: consent (FR-002) → file present → size → type → encryption → page count → extraction and text length (FR-004) → duplicate (returns 200, AC 8) → resume limit (AC 6). The limit is checked last so that re-uploading an existing resume still works at the limit. 10. The steps after extraction (duplicate lookup, expired-row delete, count, insert) run in one transaction that first takes `pg_advisory_xact_lock(hashtext(user_id::text))`, so one user's concurrent uploads are serialised; a unique violation on `ux_resumes_user_sha` is still answered with the AC 8 duplicate response. |
+| FR-004 | Extract and store text | The API extracts plain text from the file in memory, normalises it, collects layout signals, redacts it (FR-005), encrypts it and stores it. The file itself is discarded. | Must | 1. PDF text is extracted with `pdfjs-dist`; DOCX with `mammoth` (`extractRawText`) plus a scan of `word/document.xml` for signals (§3.5.1). 2. Extraction runs in a `worker_threads` pool (`piscina`, size = number of vCPUs of the task) so CPU-bound parsing never blocks the API event loop; the thread is terminated after `CFG-19` (10 s) → `422 TEXT_NOT_EXTRACTABLE` (ERR-011). 3. Normalised text shorter than `CFG-03` (400) characters (e.g. a scanned PDF with no text layer) → `422 TEXT_NOT_EXTRACTABLE` (ERR-011) with message suggesting a text-based file. 4. Normalised text longer than `CFG-04` (30,000) characters → `422 TEXT_TOO_LONG` (ERR-012). 5. The original bytes are never written to disk, object storage, logs or the database (unit test spies on `fs` write functions, the logger and Prisma, and asserts that no call receives the buffer or the raw text; the codebase has no object-storage client). 6. TBL-004 stores: redacted text encrypted (AES-256-GCM, §5.2), `text_sha256` of the **normalised un-redacted** text, signals JSON, page count, file type, size, display name, `expires_at = created_at + CFG-09 (30 days)`. |
 | FR-005 | Redact personal data | Contact details and identity numbers are removed from the text before it is stored or sent to the AI. | Must | 1. The redaction rules of §3.5.2 are applied in the listed order. 2. Before redaction, the presence of an email or phone is saved as signal `hasContact` (used by §3.5.3 D2). 3. The fixture `resume-contact.pdf` (§3.7) after redaction contains none of its email, phone, LinkedIn URL, PAN or Aadhaar strings and contains `[EMAIL]` ×1, `[PHONE]` ×1, `[URL]` ×1, `[ID]` ×2 (PAN and Aadhaar) and `[NAME]` ×1. 4. Text sent to the AI is always the stored redacted text; there is no code path that sends un-redacted text (checked by unit test that spies on the AI client). |
 | FR-006 | Manage resumes | The user lists, views and deletes their stored resumes. | Must | 1. `GET /resumes` (API-005) returns the user's resumes, newest first, without the text. 2. `GET /resumes/{id}` (API-006) returns metadata and `expiresAt`; RO does not return the text to the client in v1. 3. `DELETE /resumes/{id}` (API-007) hard-deletes the row and returns 204; analyses made from it stay, with `resumeId = null` and `resumeDisplayName` kept. 4. Deleting a resume that has an in-flight analysis returns `409 ANALYSIS_IN_PROGRESS` (ERR-015). 5. Another user's resume ID → 404 (CR-008). |
 | FR-007 | Choose job role and experience level | The user picks a target job role from the catalogue and an experience level. | Must | 1. `GET /job-roles` (API-008) returns all **active** roles ordered by `sort_order`, then `name`. 2. Each role shows `name`, `slug`, `description`. 3. The four experience levels and their year ranges are fixed (§3.0) and shown in SCR-03 as radio buttons; default selection is none (user must choose). |
-| FR-008 | Start analysis | The user starts an analysis for one stored resume, one active job role and one level. | Must | 1. `POST /analyses` (API-009) with valid input returns `202` with `status = "queued"` within `NFR-001`. 2. A user with an in-flight analysis gets `409 ANALYSIS_IN_PROGRESS` (ERR-015); enforced by a partial unique index (TBL-005) so it also holds under concurrent requests. 3. An unknown or inactive `jobRoleId` → `422 INVALID_JOB_ROLE` (ERR-016). 4. Unknown `resumeId` or one owned by another user → `404 NOT_FOUND` (ERR-004). 5. Quota is checked and reserved **in the same DB transaction** as the insert (FR-009). 6. A job `run-analysis` with `{ analysisId, requestId, traceContext }` (§4.11) is added to queue `analysis` after the transaction commits. The API's BullMQ connection uses `enableOfflineQueue: false` and `queue.add` must finish within `CFG-45` (2 s). If adding the job fails or times out, the analysis is set to `failed` with `AI_UNAVAILABLE` (ERR-022) and `completed_at = now()`, quota is released, and the API returns `503 SERVICE_UNAVAILABLE` (ERR-019). |
+| FR-008 | Start analysis | The user starts an analysis for one stored resume, one active job role and one level. | Must | 1. `POST /analyses` (API-009) with valid input returns `202` with `status = "queued"`. (Timing is a p95 target: NFR-001.) 2. A user with an in-flight analysis gets `409 ANALYSIS_IN_PROGRESS` (ERR-015); enforced by a partial unique index (TBL-005) so it also holds under concurrent requests. 3. An unknown or inactive `jobRoleId` → `422 INVALID_JOB_ROLE` (ERR-016). 4. Unknown `resumeId` or one owned by another user → `404 NOT_FOUND` (ERR-004). 5. Quota is checked and reserved **in the same DB transaction** as the insert (FR-009). 6. A job `run-analysis` with `{ analysisId, requestId, traceContext }` (§4.11) is added to queue `analysis` after the transaction commits. The API's BullMQ connection uses `enableOfflineQueue: false` and `queue.add` must finish within `CFG-45` (2 s). If adding the job fails or times out, the analysis is set to `failed` with `AI_UNAVAILABLE` (ERR-022) and `completed_at = now()`, quota is released, and the API returns `503 SERVICE_UNAVAILABLE` (ERR-019). |
 | FR-009 | Monthly quota | Free users get `CFG-05` (3) analyses per quota period, Pro users `CFG-06` (50). | Must | 1. `used` is `usage_counters.used` for (user, current quota period): +1 when an analysis is created, −1 when it ends `failed` (§3.5.6). Deleting an analysis does not change it (FR-016 AC 3). 2. When `used >= limit` for the plan **at request time**, API-009 returns `403 QUOTA_EXCEEDED` (ERR-014) with `details: [{ field: "quota", issue: "max", limit: <limit> }]`. 3. A failed analysis releases its reservation (FR-018). 4. API-001 returns `quota: { period, limit, used, remaining, resetsAt }`; `resetsAt` = first instant of the next month in `Asia/Kolkata`, in UTC. 5. A user who upgrades mid-month to Pro gets limit 50 with the already-used count kept (e.g. used 3 → remaining 47). 6. 10 parallel `POST /analyses` from a Free user with `used = 2` result in exactly one accepted request (the others get 409 or 403). |
 | FR-010 | ATS score | The system scores the resume out of 100 on 5 dimensions for the chosen role and level. | Must | 1. Dimensions, weights and formulas are exactly those in §3.5.3. 2. Each dimension score is an integer 0–100; `overallScore = round(Σ weight × score / 100)` (half up). 3. The band is set from `overallScore` per §3.5.3. 4. Each dimension has a one-sentence explanation (templates in §3.5.3; D4 from the AI). 5. Running the same analysis twice with `AI_MODE=mock` gives identical scores (D1, D2, D3, D5 are deterministic). 6. Fixture `resume-frontend-good.pdf` for role `frontend-developer`, level `mid` scores D1 = 86 (§3.7). |
 | FR-011 | Missing skills | The system lists the role's skills not found in the resume. | Must | 1. The skill set and matching rules are in §3.5.4. 2. Each missing skill shows `name` and `importance` (`must_have` / `nice_to_have`). 3. Order: `must_have` first, then `nice_to_have`; within each, catalogue `sort_order`. 4. Missing skills come **only** from the catalogue; the AI does not add skills. 5. Free and Pro users see the full list. |
@@ -318,10 +320,10 @@ Package manager: **pnpm 9**; Node.js **22 LTS** pinned in `.nvmrc` and `package.
 | FR-014 | View analysis status and result | The user sees progress and then the result. | Must | 1. `GET /analyses/{id}` (API-011) returns `status`; when `completed` it also returns scores, missing skills and suggestions; when `failed` it returns `failureCode` and `failureMessage` (§6.3). 2. SCR-04 polls API-011 every `CFG-20` (2 s) while status is `queued` or `processing`, and stops on `completed`/`failed` or after 5 minutes (then shows "This is taking longer than usual. We'll keep working — check History later."). 3. Polling pauses while the browser tab is hidden (`document.visibilityState = "hidden"`) and resumes when visible. |
 | FR-015 | Analysis history | The user sees past analyses. | Must | 1. `GET /analyses` (API-010) returns the user's analyses newest first, cursor-paginated (§6.1), default page size 20, max 50. 2. Each item shows role name, level, status, overall score (null unless completed), resume display name, created date. 3. Optional filter `status`. |
 | FR-016 | Delete analysis | The user deletes one analysis. | Must | 1. `DELETE /analyses/{id}` (API-012) hard-deletes the analysis and its scores, missing skills and suggestions; returns 204. 2. An in-flight analysis cannot be deleted → `409 ANALYSIS_IN_PROGRESS` (ERR-015). 3. Deleting does **not** give quota back (quota counts analyses run, FR-009). |
-| FR-017 | Download PDF report | The user downloads a completed analysis as a PDF. | Must | 1. `GET /analyses/{id}/report.pdf` (API-013) returns `200`, `Content-Type: application/pdf`, `Content-Disposition: attachment; filename="resume-analysis-<YYYY-MM-DD>-<roleSlug>.pdf"` (date = analysis `completedAt` in IST). 2. Layout and content per §4.9. 3. Analysis not `completed` → `409 ANALYSIS_NOT_READY` (ERR-017). 4. The PDF is generated on request and never stored. 5. Generated within `NFR-003`. 6. Free user's PDF shows only the first `CFG-07` (3) suggestions and the line "N more suggestions are available with SurfingBear Pro." |
-| FR-018 | AI failure handling | AI timeouts, errors and invalid output do not leave analyses stuck and do not cost quota. | Must | 1. Each AI call has a timeout `CFG-12` (45 s). 2. A call that times out, returns HTTP 429/5xx, or returns output failing the §4.7 schema is retried up to `CFG-13` (3 attempts total) with delays 2 s and 8 s. 3. After the last failed attempt the analysis becomes `failed` with `AI_UNAVAILABLE` (ERR-022) for timeouts/429/5xx or `AI_INVALID_OUTPUT` (ERR-023) for schema failures. 4. On `failed`, the quota reservation is released in the same transaction (`quota_released = true`). 5. While the AI circuit breaker is open (§4.7.4), new analyses are still accepted and queued; the worker delays jobs until it closes. An analysis that is still not finished `CFG-14` (10 min) after creation is failed by the sweep (FR-019) with `PROCESSING_TIMEOUT` and its quota is released. 6. SCR-04 for a failed analysis shows the failure message and a "Try again" button that starts a new analysis with the same inputs. |
+| FR-017 | Download PDF report | The user downloads a completed analysis as a PDF. | Must | 1. `GET /analyses/{id}/report.pdf` (API-013) returns `200`, `Content-Type: application/pdf`, `Content-Disposition: attachment; filename="resume-analysis-<YYYY-MM-DD>-<roleSlug>.pdf"` (date = analysis `completedAt` in IST). 2. Layout and content per §4.9. 3. Analysis not `completed` → `409 ANALYSIS_NOT_READY` (ERR-017). 4. The PDF is generated on request and never stored. 5. Generated within `NFR-003`. 6. Free user's PDF shows only the first `CFG-07` (3) suggestions and, only when N = `suggestionsLocked` > 0, the line "N more suggestions are available with SurfingBear Pro." |
+| FR-018 | AI failure handling | AI timeouts, errors and invalid output do not leave analyses stuck and do not cost quota. | Must | 1. Each AI call has a timeout `CFG-12` (45 s). 2. A call that times out, returns HTTP 429/5xx, or returns output failing the §4.7 schema is retried up to `CFG-13` (3 attempts total) with delays 2 s and 8 s. 3. After the last failed attempt the analysis becomes `failed` with `AI_UNAVAILABLE` (ERR-022) for timeouts/429/5xx or `AI_INVALID_OUTPUT` (ERR-023) for schema failures. 4. On `failed`, the quota reservation is released in the same transaction (`quota_released = true`). 5. While the AI circuit breaker is open (§4.7.4), new analyses are still accepted and queued; the worker delays jobs until it closes. An analysis that is still not finished `CFG-14` (10 min) after creation is failed by the sweep (FR-019) with `PROCESSING_TIMEOUT` and its quota is released. 6. SCR-04 for a failed analysis shows the failure message and a "Try again" button that starts a new analysis with the same inputs (hidden when the resume was deleted, `resumeId = null`). |
 | FR-019 | Stuck analysis recovery | Analyses that never finish are failed automatically. | Must | 1. Every 1 minute the scheduler (CMP-014) sets every analysis in `queued` or `processing` for longer than `CFG-14` (10 min) since `created_at` to `failed` with `PROCESSING_TIMEOUT` (ERR-024), sets `completed_at = now()` and releases quota. 2. A worker that later finishes such an analysis does not overwrite it: the final update has `WHERE status = 'processing'` and its result is discarded if 0 rows change. |
-| FR-020 | Erase all my data | The user withdraws consent and erases all their RO data. | Must | 1. SCR-06 "Delete all my data" asks the user to type `DELETE` to confirm. 2. `DELETE /me/data` (API-015) deletes, in one transaction, all the user's TBL-003, TBL-004, TBL-005 (with children) and TBL-008 rows, and returns `204`. 3. In-flight analyses are deleted too; the worker treats a missing analysis as "drop the job" without error. 4. The user's Redis keys (`rl:*:<userId>`) are deleted. 5. One TBL-009 audit row `data_erased` is written with `user_hash` only (§5.2). 6. After erasure, API-001 shows `consent.required = true` and `quota.used = 0` — note: quota resets because the counter row is erased (accepted, see A-09). |
+| FR-020 | Erase all my data | The user withdraws consent and erases all their RO data. | Must | 1. SCR-06 "Delete all my data" asks the user to type `DELETE` to confirm. 2. `DELETE /me/data` (API-015) deletes, in one transaction, all the user's TBL-003, TBL-004, TBL-005 (with children) and TBL-008 rows, and returns `204`. 3. In-flight analyses are deleted too; the worker treats a missing analysis as "drop the job" without error. 4. The user's Redis keys (`rl:*:<userId>:*`, CR-024) are deleted. 5. One TBL-009 audit row `data_erased` is written with `user_hash` only (§5.2). 6. After erasure, API-001 shows `consent.required = true` and `quota.used = 0` — note: quota resets because the counter row is erased (accepted, see A-09). |
 | FR-021 | Automatic retention purge | Data is deleted when its retention ends. | Must | 1. Daily at 02:00 Asia/Kolkata the purge job hard-deletes: resumes with `expires_at <= now()` that have no in-flight analysis (those are picked up the next day); analyses with `created_at <= now() - CFG-10 (180 days)` (children cascade); audit rows older than `CFG-11` (365 days); usage counters for periods older than 13 months. 2. Deletes run in batches of 1,000 rows. 3. The job logs counts only (no IDs of personal data rows other than UUIDs). 4. A resume past `expires_at` but not yet purged is treated as deleted by every API (404), and is not counted for `CFG-18` or API-001 `limits.storedResumes`. |
 | FR-022 | Admin: manage job-role catalogue | An admin adds and edits job roles and their skills. | Should | 1. API-016 lists all roles including inactive. 2. API-017 creates a role; `slug` must match `^[a-z0-9]+(-[a-z0-9]+)*$`, 3–60 chars, unique → else `409 ROLE_SLUG_TAKEN` (ERR-021). 3. API-018 edits name, description, sort order, active flag; slug cannot change. 4. API-019 replaces a role's skill list (1–40 skills). 5. Roles are never deleted (analyses reference them); deactivate instead. 6. Every change writes a TBL-009 audit row `job_role_changed` with the admin's `user_hash`. 7. Non-admin → `403 FORBIDDEN` (ERR-002). |
 | FR-023 | My data summary | The user sees what RO stores about them (DPDP right to information). | Should | 1. `GET /me/data-summary` (API-014) returns counts of resumes and analyses, the consent version and date, the retention rules (`CFG-09`, `CFG-10`), and the Grievance Officer email. 2. SCR-06 shows it. |
@@ -335,7 +337,7 @@ Package manager: **pnpm 9**; Node.js **22 LTS** pinned in `.nvmrc` and `package.
 | NFR-002 | Performance | Upload + extraction + redaction (API-004) | p95 < 4 s for a 5 MiB, 5-page PDF | k6 with fixture `resume-5mb.pdf` |
 | NFR-003 | Performance | PDF report generation (API-013) | p95 < 3 s | k6 |
 | NFR-004 | Performance | End-to-end analysis time (`completed_at - created_at`) | p95 < 45 s, p50 < 20 s, measured over 7 days in `prod` | Prometheus histogram `ro_analysis_duration_seconds` |
-| NFR-005 | Availability | Monthly availability of API (`/api/health/ready` + API-001 synthetic check every 60 s) | ≥ 99.5 % per calendar month (≤ 3 h 39 m downtime) | CloudWatch Synthetics canary |
+| NFR-005 | Availability | Monthly availability of API (`/api/health/ready` + API-001 synthetic check every 60 s; API-001 is called with a platform service-account token for a fixed canary user, read from Secrets Manager `ro/canary-token`, which the platform rotates) | ≥ 99.5 % per calendar month (≤ 3 h 39 m downtime) | CloudWatch Synthetics canary |
 | NFR-006 | Availability | Degraded mode when the AI provider is down | Upload, history, view and PDF of past analyses keep working (0 errors on those endpoints); analyses created during the outage complete after recovery if the outage ends within `CFG-14` (10 min) of their creation, otherwise they end `failed` / `PROCESSING_TIMEOUT` with quota released (FR-018 AC 5) | Outage test: block Bedrock egress on `staging` for 5 min, then for 15 min |
 | NFR-007 | Scalability | Load the design must carry without code change | 2,000 analyses/day, 100 concurrent in-flight analyses, 500 concurrent web users; worker scales horizontally (ECS auto-scaling on queue depth > 20 waiting jobs for 2 min → +1 task, max 6) | k6 soak test 1 h on `staging` |
 | NFR-008 | Security | OWASP ASVS L2 controls for auth, session, input, files | 0 high/critical findings in OWASP ZAP baseline scan and `pnpm audit --prod` | CI weekly job + pre-release |
@@ -393,15 +395,15 @@ All values live in `packages/shared/src/config.ts`. Values marked _env_ can be o
 | CFG-13 | `AI_MAX_ATTEMPTS` | 3 (delays 2,000 ms then 8,000 ms) | — | FR-018 |
 | CFG-14 | `ANALYSIS_STUCK_MINUTES` | 10 | — | FR-019, NFR-013 |
 | CFG-15 | `RATE_LIMIT_DEFAULT` | 120 requests / 60 s / user | — | CR-024 |
-| CFG-16 | `RATE_LIMIT_UPLOAD` | 10 requests / 3,600 s / user | — | CR-024 |
-| CFG-17 | `RATE_LIMIT_ANALYSIS` | 20 requests / 3,600 s / user | — | CR-024 |
+| CFG-16 | `RATE_LIMIT_UPLOAD` | 10 requests / 3,600 s / user | `RATE_LIMIT_UPLOAD_PER_HOUR` (`test`: 1000) | CR-024 |
+| CFG-17 | `RATE_LIMIT_ANALYSIS` | 20 requests / 3,600 s / user | `RATE_LIMIT_ANALYSIS_PER_HOUR` (`test`: 1000) | CR-024 |
 | CFG-18 | `MAX_STORED_RESUMES` | 10 per user | — | FR-003, ERR-013 |
 | CFG-19 | `EXTRACT_TIMEOUT_MS` | 10,000 | — | FR-004 |
 | CFG-20 | `POLL_INTERVAL_MS` | 2,000 (stop after 300,000) | — | FR-014 |
 | CFG-21 | `JWKS_CACHE_MS` | 600,000 (10 min) | — | CR-002 |
 | CFG-22 | `JWKS_MIN_REFRESH_MS` | 60,000 | — | CR-002 |
 | CFG-23 | `JWT_CLOCK_SKEW_S` | 30 | — | CR-003 |
-| CFG-24 | `MAX_JSON_BODY_BYTES` | 102,400 (100 KB) | — | CR-015 |
+| CFG-24 | `MAX_JSON_BODY_BYTES` | 102,400 (100 KiB) | — | CR-015 |
 | CFG-25 | `DOCX_MAX_UNCOMPRESSED_BYTES` | 20,971,520 (20 MiB) | — | CR-023 |
 | CFG-26 | `DOCX_MAX_ENTRIES` | 500 | — | CR-023 |
 | CFG-27 | `AI_DAILY_CALL_CAP` | unlimited in `prod`/`staging`; 200 in `dev` | `AI_DAILY_CALL_CAP` (0 = unlimited) | §1.7, §4.7.4 |
@@ -410,6 +412,20 @@ All values live in `packages/shared/src/config.ts`. Values marked _env_ can be o
 | CFG-30 | `CONSENT_NOTICE_VERSION` | `"2026-10-v1"` | — | FR-002, §3.5.7 |
 | CFG-31 | `MAX_DISPLAY_NAME_CHARS` | 120 | — | FR-004, TBL-004 |
 | CFG-32 | `PAGE_SIZE` | default 20, max 50 | — | §6.1 |
+| CFG-33 | `RATE_LIMIT_ANON` | 60 requests / 60 s / client IP | — | CR-024 |
+| CFG-34 | `RETRY_AFTER_503_S` | 30 | — | CR-016 |
+| CFG-35 | `JWKS_FETCH_TIMEOUT_MS` | 3,000 | — | §4.4 |
+| CFG-36 | `PURGE_BATCH_SIZE` | 1,000 rows | — | FR-021 |
+| CFG-37 | `USAGE_COUNTER_RETENTION_MONTHS` | 13 | — | FR-021 |
+| CFG-38 | `MAX_SKILLS_PER_ROLE` | 40 (min 1) | — | FR-022, API-017, API-019 |
+| CFG-39 | `AI_MAX_TOKENS` | 4,000 output tokens | — | §4.7.1 |
+| CFG-40 | `HEALTH_CHECK_TIMEOUT_MS` | 1,000 | — | API-021 |
+| CFG-41 | `WORKER_CONCURRENCY` | 5 jobs per worker task | `WORKER_CONCURRENCY` | CMP-010 |
+| CFG-42 | `SUGGESTION_TEXT_LIMITS` | rewrite 10–300 chars; rationale 1–200 chars | — | §3.5.5, TBL-010 |
+| CFG-43 | `JOB_ATTEMPTS` | 3 job attempts, exponential backoff starting at 5,000 ms | — | §4.11 |
+| CFG-44 | `MAX_CANDIDATE_LINE_CHARS` | 1,000 | — | §3.5.5, TBL-010 |
+| CFG-45 | `ENQUEUE_TIMEOUT_MS` | 2,000 | — | FR-008 |
+| CFG-46 | `JWKS_BOOT_RETRY_MS` | 5,000 | — | §4.4 |
 
 ### 3.5 Processing and scoring rules
 
@@ -520,7 +536,7 @@ Shown on SCR-02 and returned by API-002 (`noticeMarkdown`). Stored in `apps/api/
 > - **Why:** only to score your resume, list missing skills and suggest better wording.
 > - **What we remove first:** your name (first line), email, phone number, links, PAN and Aadhaar numbers are replaced before the text is saved or analysed.
 > - **Who processes it:** the text is analysed by an AI model running on Amazon Web Services in Mumbai, India. It is not used to train any AI model.
-> - **How long we keep it:** resume text for 30 days, analysis results for 180 days. You can delete any item, or all your data, at any time from Privacy settings.
+> - **How long we keep it:** resume text for 30 days, analysis results for 180 days. Deleted data may remain in encrypted database backups for up to 7 more days. You can delete any resume or analysis from History or Privacy, or all your data from Privacy, at any time.
 > - **Your rights:** you may withdraw consent at any time by deleting all your data. For questions or complaints, contact our Grievance Officer at grievance@surfingbear.com.
 >
 > ☐ I have read this notice and I agree to SurfingBear processing my resume for this purpose.
@@ -534,7 +550,7 @@ All screens use the root layout: header with "Resume Optimizer" logo (links to S
 | SCR-01 | `/` | Dashboard (FR-024) | API-001, API-010 `pageSize=5` | Loading skeleton; empty state "No analyses yet" + "New analysis" button; quota card "{remaining} of {limit} analyses left this month · resets {resetsAt date}". |
 | SCR-02 | `/consent?next=<path>` | Privacy notice + consent (FR-002) | API-002, API-003 | Shown automatically when the user goes to SCR-03 and API-001 `consent.required = true`. After API-003 succeeds, navigate to `next` (only relative paths starting with `/` are accepted; otherwise `/`). |
 | SCR-03 | `/analyses/new` | Upload or pick resume, choose role and level, start (FR-003, FR-007, FR-008) | API-005, API-004, API-008, API-009 | Step 1: drop zone (`data-testid="upload-dropzone"`, accepts `.pdf,.docx`, also keyboard-operable "Choose file" button) or a list of stored resumes as radio buttons. Client-side size check (CFG-01). Upload shows a progress bar. Step 2: role `<select>` (API-008) and level radio group. Step 3: "Analyse" button → API-009 → navigate to SCR-04. Each error code shows its `errors.<CODE>` text inline under the relevant control. |
-| SCR-04 | `/analyses/[analysisId]` | Progress and result (FR-010 – FR-014, FR-017) | API-011 polling, API-013 | `queued`/`processing`: spinner with "Analysing your resume… usually under a minute." (`aria-live="polite"`). `completed`: score gauge (overall + band), 5 dimension bars with explanations, missing skills chips grouped by importance, suggestion cards (original → rewrite, issue tag, rationale; placeholders highlighted), locked cards for Free users with "Unlock all suggestions with Pro" (link `PLATFORM_UPGRADE_URL`), "Download PDF" button. `failed`: message for `failureCode` and "Try again". |
+| SCR-04 | `/analyses/[analysisId]` | Progress and result (FR-010 – FR-014, FR-017) | API-011 polling, API-013 | `queued`/`processing`: spinner with "Analysing your resume… usually under a minute." (`aria-live="polite"`). `completed`: score gauge (overall + band), 5 dimension bars with explanations, missing skills chips grouped by importance, suggestion cards (original → rewrite, issue tag, rationale; placeholders highlighted), locked cards for Free users with "Unlock all suggestions with Pro" (link `PLATFORM_UPGRADE_URL`), "Download PDF" button. `failed`: message for `failureCode` and "Try again" (calls API-009 with the same resume, role and level and shows any error inline; hidden when `resumeId` is null). |
 | SCR-05 | `/history` | History (FR-015, FR-016) | API-010, API-012 | Table: date, role, level, score, status, resume name, actions (View, Delete with confirm dialog). "Load more" button for the next cursor. Status filter. |
 | SCR-06 | `/privacy` | My data (FR-006, FR-020, FR-023) | API-014, API-005, API-007, API-015 | Data summary; stored resumes with Delete; "Delete all my data" danger zone (type `DELETE` to enable). After API-015 success, show "All your data has been deleted." and link to `/`. |
 | SCR-07 | `/admin/job-roles` | Catalogue admin (FR-022) | API-016 – API-019 | Only reachable when `isAdmin`; otherwise render a 403 page. Table of roles; edit drawer with name, description, sort order, active toggle, and a skills editor (name, aliases comma-separated, importance, min level). |
@@ -550,7 +566,7 @@ Stored in `apps/api/test/fixtures/` and generated by `pnpm fixtures` (`scripts/m
 | `resume-frontend-good.pdf` | 2 pages, ≥ 1,200 characters per page; sections Summary, Experience (8 bullets, 5 with numbers), Skills (JavaScript, TypeScript, React, Next.js, HTML, CSS, Redux, Jest, Git, REST APIs, Tailwind), Education; email + phone. Contains none of the terms of Accessibility, Web performance, CI/CD (§5.5) | 201; for `frontend-developer`/`mid`: D1 = 86 (18 of 21 weight points; missing Accessibility, Web performance, CI/CD), D2 = 100, D3 = 100, D5 = 100 |
 | `resume-encrypted.docx` | DOCX saved with password `test` (OLE container with `EncryptionInfo`) | 422 FILE_ENCRYPTED |
 | `resume-contact.pdf` | Line 1 `Asha Verma`; contains `asha.verma@example.com`, `+91 98765 43210`, `linkedin.com/in/ashaverma`, `ABCDE1234F`, `1234 5678 9012` | Redaction per FR-005 AC 3 |
-| `resume-docx-tables.docx` | Skills in a table, one text box, 3 images | 201; D3 = 100 − 25 − 25 − 10 = 40 |
+| `resume-docx-tables.docx` | `docProps/app.xml` with `<Pages>1</Pages>` (written explicitly by `make-fixtures.ts`); ≥ 1,500 characters; skills in a table, one text box, 3 pictures (`<w:drawing>` with `<pic:pic>`) | 201; D3 = 100 − 25 − 25 − 10 = 40 |
 | `resume-6mb.pdf` | 6,291,456 bytes | 413 FILE_TOO_LARGE |
 | `resume-7-pages.pdf` | 7 pages | 422 TOO_MANY_PAGES |
 | `resume-encrypted.pdf` | Password `test` | 422 FILE_ENCRYPTED |
@@ -607,7 +623,7 @@ The browser only talks to `resume.surfingbear.com`. The ALB routes by path, so w
 |---|---|---|---|
 | CMP-001 | Web app (`ro-web`) | Screens SCR-01 – SCR-07, client-side file checks, polling, error display, CSP nonce | Next.js 15 App Router, React 19, TanStack Query 5, Tailwind CSS 4, next-intl |
 | CMP-002 | API app (`ro-api`) | HTTP entrypoint: global prefix `/api`, versioned routes `/api/v1`, validation pipe, exception filter, request-id, logging, rate limiting, health | NestJS 11, Express adapter, `@nestjs/throttler` with Redis storage |
-| CMP-003 | Auth | Read `sb_access`, verify JWT (CR-001 – CR-004), build `RequestUser { userId, plan, roles, isAdmin }`; `AuthGuard` (global), `RolesGuard` (`@Roles('ro_admin')`), `OriginGuard` (CR-021) | `jose` (JWKS + verify) |
+| CMP-003 | Auth | Read `sb_access`, verify JWT (CR-001 – CR-004), build `RequestUser { userId, plan, roles, isAdmin }`; `AuthGuard` (global), `RolesGuard` (`@Roles('ro_admin')`), `OriginGuard` (CR-021), `ConsentGuard` (FR-002; on API-004 and API-009) | `jose` (JWKS + verify) |
 | CMP-004 | Consents | Serve notice, record consent, `ConsentService.hasCurrentConsent(userId)` | NestJS module, TBL-003 |
 | CMP-005 | Resumes | Upload pipeline (FR-003 order), dedupe, encrypt, list/get/delete | NestJS module, Multer memory storage, Node `crypto` (AES-256-GCM), TBL-004 |
 | CMP-006 | Text extractor | PDF/DOCX → normalised text + signals (§3.5.1), with timeout `CFG-19` | `pdfjs-dist` 4 (legacy build), `mammoth`, `yauzl` (zip limits), `cfb` (OLE check), `piscina` (worker threads) |
@@ -643,7 +659,12 @@ sequenceDiagram
   A-->>B: 200 { version, noticeMarkdown }
   B->>A: POST /api/v1/consents { noticeVersion }
   A->>DB: INSERT consents ON CONFLICT DO NOTHING
-  A-->>B: 201 consent
+  alt row inserted
+    A->>DB: INSERT audit_events (consent_given)
+    A-->>B: 201 consent
+  else already accepted
+    A-->>B: 200 existing consent
+  end
   B->>B: check size ≤ CFG-01 and extension .pdf/.docx
   B->>A: POST /api/v1/resumes (multipart, file)
   A->>DB: has consent for CFG-30?
@@ -787,7 +808,7 @@ sequenceDiagram
   A->>DB: DELETE resumes, consents, usage_counters WHERE user_id
   A->>DB: INSERT audit_events (data_erased, user_hash)
   A->>DB: COMMIT
-  A->>RD: DEL rl:*:<userId> (SCAN + DEL)
+  A->>RD: DEL rl:*:<userId>:* (SCAN + DEL)
   A-->>B: 204
   Note over A: a queued job for a deleted analysis finds no row and ends without error
 ```
@@ -841,7 +862,7 @@ Only these transitions are allowed. Every transition to `completed` or `failed` 
 
 ### 4.6 Configuration (environment variables)
 
-Validated at start-up with a `zod` schema in `apps/api/src/config/env.schema.ts`; an invalid or missing required variable stops the process with exit code 1 and a log line naming the variable (never its value).
+Validated at start-up with the entrypoint's `zod` schema (`apiEnv` for `main.ts`, `workerEnv` for `worker.ts`, both in `apps/api/src/config/env.schema.ts`; a variable is required only by the entrypoints in its "Used by" column); an invalid or missing required variable stops the process with exit code 1 and a log line naming the variable (never its value).
 
 | Variable | Used by | Required | Example / default | Notes |
 |---|---|---|---|---|
@@ -859,11 +880,17 @@ Validated at start-up with a `zod` schema in `apps/api/src/config/env.schema.ts`
 | `PLATFORM_LOGIN_URL` | web | yes | `https://surfingbear.com/login` | Read **at runtime** by the root layout (server component) and passed to client components through a `PublicConfigProvider` React context. No `NEXT_PUBLIC_*` variables exist, so one web image works in every environment (CR-037) |
 | `PLATFORM_UPGRADE_URL` | web | yes | `https://surfingbear.com/pricing` | Same as `PLATFORM_LOGIN_URL` |
 | `RESUME_TEXT_KEY` | api, worker | yes | 32 random bytes, base64 | AES-256-GCM key (TBL-004) |
-| `RESUME_TEXT_KEY_ID` | api, worker | yes | `k1` | Stored with each row; a rotation adds `RESUME_TEXT_KEY_PREVIOUS` + `_ID` for reading old rows |
+| `RESUME_TEXT_KEY_ID` | api, worker | yes | `k1` | Stored with each row (`enc_key_id`) |
+| `RESUME_TEXT_KEY_PREVIOUS` | api, worker | no | base64 key | Only during a key rotation: rows whose `enc_key_id` equals `RESUME_TEXT_KEY_PREVIOUS_ID` are decrypted with it; new rows always use `RESUME_TEXT_KEY`. Old rows expire within 30 days, so no re-encryption job is needed |
+| `RESUME_TEXT_KEY_PREVIOUS_ID` | api, worker | with the above | `k0` | |
+| `MIGRATION_DATABASE_URL` | migrate.js | yes for migrations | `postgresql://ro_migrator:***@host:5432/ro?sslmode=require` | CR-038 |
+| `RATE_LIMIT_UPLOAD_PER_HOUR` | api | no | `10` (`test`: `1000`) | CFG-16 |
+| `RATE_LIMIT_ANALYSIS_PER_HOUR` | api | no | `20` (`test`: `1000`) | CFG-17 |
+| `MOCK_KEY_PATH` | mock-platform | no | `./tools/mock-platform/.key.json` | §4.8; local/test only |
 | `AI_MODE` | worker | yes | `bedrock` \| `mock` | `mock` only allowed when `APP_ENV` is `local` or `test` (start-up check) |
 | `AI_MOCK_FAILURE` | worker | no | `none` \| `timeout` \| `error` \| `invalid` | Only in `mock` mode (§4.7.5) |
 | `AWS_REGION` | worker | yes | `ap-south-1` | Start-up check: must be `ap-south-1` when `APP_ENV=prod` |
-| `BEDROCK_MODEL_ID` | worker | yes in `bedrock` mode | the Claude Sonnet model ID / inference profile ID enabled in the account | Recorded per analysis (`ai_model`) |
+| `BEDROCK_MODEL_ID` | worker | yes in `bedrock` mode | an **in-region** Claude Sonnet model ID enabled in `ap-south-1`, set per environment in `infra/envs/<env>.tfvars`. Cross-region inference profiles (IDs starting `apac.`, `global.`, `us.`, `eu.`) are forbidden (NFR-011); a start-up check rejects them | Recorded per analysis (`ai_model`) |
 | `AI_TIMEOUT_MS` | worker | no | `45000` | CFG-12 |
 | `AI_DAILY_CALL_CAP` | worker | no | `0` (unlimited) | CFG-27; `200` in `dev` |
 | `FREE_MONTHLY_ANALYSES` | api | no | `3` | CFG-05 |
@@ -995,13 +1022,13 @@ Mock platform (CMP-019, `tools/mock-platform/server.ts`):
 - On start, generates an RS256 key pair (`kid` = `mock-1`) unless `MOCK_KEY_PATH` points to a saved JWK.
 - `GET /.well-known/jwks.json` → public JWKS.
 - `GET /login?userId=<uuid>&plan=free|pro&admin=0|1&returnTo=<url>` → signs a JWT (`iss=http://localhost:4010`, `aud=resume-optimizer`, `exp` = now + 15 min, `roles` = `["ro_admin"]` if `admin=1`), sets cookie `sb_access` (`HttpOnly; SameSite=Lax; Path=/`, domain `localhost`), and redirects to `returnTo` (default `http://localhost:3000/`).
-- `POST /token` with JSON `{ userId, plan, admin, expiresInSec }` → `{ token }` for e2e tests (sent as `Authorization: Bearer`, allowed in `local`/`test` per CR-001).
+- `POST /token` with JSON `{ userId, plan, admin, expiresInSec, overrides? }` → `{ token }`. `overrides` may set `alg` (`HS256` or `none` produce a deliberately invalid token), `iss`, `aud`, `nbf`, `iat`, `sub`, and `omit` (claim names to leave out), so every CR-003 rule can be tested. for e2e tests (sent as `Authorization: Bearer`, allowed in `local`/`test` per CR-001).
 - Local `.env`: `AUTH_JWKS_URL=http://localhost:4010/.well-known/jwks.json`, `AUTH_ISSUER=http://localhost:4010`, `WEB_ORIGIN=http://localhost:3000`, `PLATFORM_LOGIN_URL=http://localhost:4010/login`.
 - Next.js `next.config.ts` (local only, `APP_ENV=local`): `rewrites: [{ source: '/api/:path*', destination: 'http://localhost:4000/api/:path*' }]` so the browser sees one origin, as in production.
 
 ### 4.9 PDF report layout (CMP-013, FR-017)
 
-A4 portrait, margins 48 pt, font Helvetica (built into pdfkit; no font files), black text on white, accent colour `#1E5EFF` for bars.
+A4 portrait, margins 48 pt, fonts Noto Sans and Noto Sans Devanagari embedded from `apps/api/assets/fonts/*.ttf` (OFL licence; Helvetica cannot draw `₹` or Devanagari). A text run containing code points U+0900–U+097F uses Noto Sans Devanagari, all other text Noto Sans, black text on white, accent colour `#1E5EFF` for bars.
 
 1. **Header:** "SurfingBear Resume Optimizer — ATS Report" (18 pt bold); line below: "{roleName} · {level label} · {completedAt as `20 Oct 2026, 2:45 pm IST`}" (10 pt); resume display name (10 pt, grey `#555555`).
 2. **Overall score:** large number "{overallScore}/100" (36 pt bold) and band label.
@@ -1056,14 +1083,14 @@ A4 portrait, margins 48 pt, font Helvetica (built into pdfkit; no font files), b
 
 1. Load the analysis by ID. Not found → return (erased, FR-020 AC 3). Status `completed`/`failed` → return.
 2. Claim: `UPDATE analyses SET status='processing', started_at=COALESCE(started_at, now()) WHERE id=$1 AND status IN ('queued','processing')`. 0 rows → return. (`processing` is allowed so a BullMQ retry or stalled-job recovery of the **same** job can continue; BullMQ's job lock guarantees one active run per `jobId`.)
-3. Load the resume. Not found (deleted by erasure) → return.
+3. Load the resume. Not found and the analysis row still exists (resume deleted in a race) → step 7 with `AI_UNAVAILABLE`; analysis also gone (erasure) → return. To prevent the race, API-007 reads the resume with `SELECT … FOR UPDATE` before its in-flight check, and API-009 reads it with `SELECT … FOR SHARE` inside its transaction.
 4. Decrypt the text, split lines (§3.5.1 step 4), run CMP-011 (D1, D2, D3, D5, missing skills, candidate lines).
 5. Call CMP-012 (§4.7) with its own 3 attempts. AI failure → step 7.
 6. Save in one transaction: delete any existing child rows for this analysis (idempotent retry), insert TBL-006/TBL-007/TBL-010 rows, `UPDATE analyses SET status='completed', overall_score, band, completed_at=now(), ai_model, prompt_version, ai_input_tokens, ai_output_tokens WHERE id=$1 AND status='processing'`. 0 rows → rollback, return (the sweep already failed it, FR-019 AC 2).
 7. Fail: in one transaction `UPDATE analyses SET status='failed', failure_code=$2, completed_at=now() WHERE id=$1 AND status='processing'` and, if 1 row changed, release quota (§3.5.6).
 8. Any other exception (DB, Redis, decrypt) is thrown, so BullMQ retries the job (max 3 job attempts). After the last job attempt, the processor's `failed` event handler runs step 7 with `AI_UNAVAILABLE`; if that also fails, the stuck sweep (FR-019) fails it within 10 min.
 
-Worker graceful shutdown: on `SIGTERM`, `worker.close()` waits up to 60 s for active jobs (ECS `stopTimeout: 90`).
+Worker graceful shutdown: on `SIGTERM`, `worker.close()` waits up to 60 s for active jobs (ECS `stopTimeout: 90`). Worker ECS container health check: `curl -f http://localhost:9464/health/live`.
 
 ---
 
@@ -1085,7 +1112,7 @@ erDiagram
   job_roles ||--o{ job_role_skills : "has"
   job_roles ||--o{ analyses : "target of"
   resumes |o--o{ analyses : "analysed in (SET NULL on delete)"
-  analyses ||--|{ analysis_dimension_scores : "has 5 (when completed)"
+  analyses ||--o{ analysis_dimension_scores : "has 0 or 5 (5 when completed)"
   analyses ||--o{ analysis_missing_skills : "has"
   analyses ||--o{ analysis_suggestions : "has 0..10"
   consents }o..|| PLATFORM_USER : "user_id"
@@ -1205,7 +1232,7 @@ Purpose: one uploaded resume, as encrypted redacted text plus metadata (FR-003 �
 |---|---|---|---|---|---|
 | id | uuid | NO | PK | `gen_random_uuid()` | |
 | user_id | uuid | NO | | — | |
-| display_name | text | NO | | — | Original file name with any path removed, control characters stripped, cut to `CFG-31` (120) chars; personal data (never logged). `CHECK (char_length(display_name) BETWEEN 1 AND 120)` |
+| display_name | text | NO | | — | `Buffer.from(file.originalname, 'latin1').toString('utf8')` (Multer decodes names as latin1), then any path removed, control characters stripped, trimmed, cut to `CFG-31` (120) chars; if empty → `resume.pdf` / `resume.docx`; personal data (never logged). `CHECK (char_length(display_name) BETWEEN 1 AND 120)` |
 | file_type | text | NO | | — | `CHECK (file_type IN ('pdf','docx'))` — from magic bytes |
 | file_size_bytes | integer | NO | | — | `CHECK (file_size_bytes BETWEEN 1 AND 5242880)` (CFG-01) |
 | page_count | smallint | NO | | — | `CHECK (page_count >= 1)`; PDF ≤ 5 is enforced by the API (CFG-02), DOCX may be estimated (§3.5.1) |
@@ -1338,6 +1365,7 @@ Purpose: rewrite suggestions of a completed analysis, all of them, regardless of
 | analyses | `ix_analyses_job_role_id` | `(job_role_id)` | FK `RESTRICT` check |
 | analysis_missing_skills | `ux_missing_skills_analysis_position` (unique) | `(analysis_id, position)` | Load in order; FK cascade lookup |
 | analysis_suggestions | `ux_suggestions_analysis_rank` (unique) | `(analysis_id, rank)` | Load in rank order; FK cascade lookup |
+| analysis_suggestions | `ux_suggestions_analysis_line` (unique) | `(analysis_id, line_index)` | At most one suggestion per line (§3.5.5 rule 1) |
 | audit_events | `ix_audit_events_created_at` | `(created_at)` | Purge (FR-021) |
 
 ### 5.4 Relationships and delete rules
@@ -1469,7 +1497,7 @@ Note: the term `java` matches only the whole word, so `JavaScript` does not coun
 - **Base path:** `/api/v1` for all business endpoints; health at `/api/health/*` (unversioned). Host: same as the web (`https://resume.surfingbear.com`).
 - **Auth:** cookie `sb_access` (CR-001 – CR-004). Every endpoint except API-020/API-021 requires it; the global `AuthGuard` applies unless a route has `@Public()`. Admin endpoints (`/api/v1/admin/*`) additionally require `ro_admin` (`RolesGuard`, 403 `FORBIDDEN` otherwise).
 - **CSRF:** `Origin` check on `POST`/`PUT`/`PATCH`/`DELETE` (CR-021).
-- **Content type:** request and response bodies are `application/json; charset=utf-8`, except API-004 (request `multipart/form-data`) and API-013 (response `application/pdf`). Max JSON body `CFG-24` (100 KB).
+- **Content type:** request and response bodies are `application/json; charset=utf-8`, except API-004 (request `multipart/form-data`) and API-013 (response `application/pdf`). Max JSON body `CFG-24` (100 KiB).
 - **IDs:** UUID strings. A path ID that is not a UUID → `404 NOT_FOUND`.
 - **Field names:** `camelCase`. Absent optional values are returned as `null`, never omitted.
 - **Date/time:** ISO-8601 UTC strings with milliseconds and `Z`, e.g. `"2026-10-20T09:15:00.000Z"` (CR-030).
@@ -1719,7 +1747,7 @@ Order: `sort_order ASC, name ASC`. Skills are not returned (users don't need the
 
 #### API-009 `POST /api/v1/analyses`
 - **Purpose:** start an analysis.
-- **Auth / role:** any authenticated user.
+- **Auth / role:** any authenticated user **with current consent** (`ConsentGuard`, as API-004 — sending text to the AI is processing).
 - **Implements:** FR-008, FR-009
 
 **Request**
@@ -1734,7 +1762,7 @@ Order: `sort_order ASC, name ASC`. Skills are not returned (users don't need the
 { "resumeId": "0b9f7a52-2f4c-4c7e-8d0e-3a4b5c6d7e8f", "jobRoleId": "3c6e0b8a-1d2f-4a5b-9c8d-7e6f5a4b3c2d", "experienceLevel": "mid" }
 ```
 
-Check order: body validation → resume (404) → role (422) → in-flight (409, pre-check with a `SELECT`, then enforced by the unique index on insert) → quota (403). Processing per §3.5.6 and §4.3.2.
+Check order: consent (403) → body validation → resume (404) → role (422) → in-flight (409, pre-check with a `SELECT`, then enforced by the unique index on insert) → quota (403). Processing per §3.5.6 and §4.3.2.
 
 **Response 202** with header `Location: /api/v1/analyses/{id}`
 
@@ -1758,6 +1786,7 @@ Check order: body validation → resume (404) → role (422) → in-flight (409,
 
 | HTTP | Error code | When |
 |---|---|---|
+| 403 | CONSENT_REQUIRED | No consent for `CFG-30` |
 | 404 | NOT_FOUND | Resume unknown, expired or not owned |
 | 422 | INVALID_JOB_ROLE | Role unknown or inactive |
 | 409 | ANALYSIS_IN_PROGRESS | User already has an in-flight analysis |
@@ -1789,7 +1818,7 @@ Check order: body validation → resume (404) → role (422) → in-flight (409,
       "experienceLevel": "mid",
       "resumeId": "0b9f7a52-2f4c-4c7e-8d0e-3a4b5c6d7e8f",
       "resumeDisplayName": "Asha_Verma_Resume.pdf",
-      "overallScore": 72,
+      "overallScore": 77,
       "band": "good",
       "failureCode": null,
       "createdAt": "2026-10-20T09:17:00.000Z",
@@ -1823,7 +1852,7 @@ Check order: body validation → resume (404) → role (422) → in-flight (409,
   "experienceLevel": "mid",
   "resumeId": "0b9f7a52-2f4c-4c7e-8d0e-3a4b5c6d7e8f",
   "resumeDisplayName": "Asha_Verma_Resume.pdf",
-  "overallScore": 72,
+  "overallScore": 77,
   "band": "good",
   "failureCode": null,
   "failureMessage": null,
@@ -1831,7 +1860,7 @@ Check order: body validation → resume (404) → role (422) → in-flight (409,
   "completedAt": "2026-10-20T09:17:19.400Z",
   "result": {
     "dimensions": [
-      { "key": "keyword_match", "label": "Keyword match", "weight": 30, "score": 75, "explanation": "Found 9 of 12 skills expected for a mid Frontend Developer." },
+      { "key": "keyword_match", "label": "Keyword match", "weight": 30, "score": 86, "explanation": "Found 11 of 13 skills expected for a mid Frontend Developer." },
       { "key": "section_structure", "label": "Section structure", "weight": 15, "score": 80, "explanation": "Found: Experience, Education, Skills, Contact details. Missing: Summary." },
       { "key": "parseability", "label": "ATS parseability", "weight": 15, "score": 100, "explanation": "No layout problems found." },
       { "key": "experience_relevance", "label": "Experience relevance", "weight": 20, "score": 70, "explanation": "Most roles involve building React interfaces, matching the target role." },
@@ -2065,7 +2094,7 @@ Checks (each with a `CFG-40` (1 s) timeout): `db` = `SELECT 1`; `redis` = `PING`
 | ERR-002 | FORBIDDEN | 403 | You do not have permission to do this. | Non-admin on admin API; `Origin` check failed (CR-021) |
 | ERR-003 | VALIDATION_FAILED | 400 | Some fields are missing or invalid. | DTO validation, bad cursor, unknown field, body too large |
 | ERR-004 | NOT_FOUND | 404 | We could not find what you were looking for. | Unknown route or ID, other user's resource (CR-008), expired resume |
-| ERR-005 | CONSENT_REQUIRED | 403 | Please review and accept the privacy notice before uploading. | API-004 without current consent (FR-002) |
+| ERR-005 | CONSENT_REQUIRED | 403 | Please review and accept the privacy notice before uploading. | API-004 or API-009 without current consent (FR-002) |
 | ERR-006 | FILE_REQUIRED | 400 | Please choose a file to upload. | API-004 without a file part |
 | ERR-007 | FILE_TOO_LARGE | 413 | The file is larger than 5 MB. | File > `CFG-01` |
 | ERR-008 | UNSUPPORTED_FILE_TYPE | 415 | Please upload a PDF or Word (.docx) file. | Not PDF/DOCX by content; zip limits exceeded |
@@ -2113,7 +2142,7 @@ Test files are under `apps/api/test/` (`*.e2e-spec.ts`), `apps/api/src/**` (`*.s
 | FR-015 | CMP-001 (SCR-05), CMP-008 | TBL-005 | API-010 | `analyses.e2e-spec.ts` FR-015.1–3 (pagination with 45 rows) |
 | FR-016 | CMP-001 (SCR-05), CMP-008 | TBL-005, TBL-006, TBL-007, TBL-008, TBL-010 | API-012 | `analyses.e2e-spec.ts` FR-016.1–3 |
 | FR-017 | CMP-001 (SCR-04), CMP-013 | TBL-005, TBL-006, TBL-007, TBL-010 | API-013 | `reports.e2e-spec.ts` FR-017.1–6 (text extracted from the PDF with `pdfjs-dist`) |
-| FR-018 | CMP-010, CMP-012, CMP-009, CMP-017 | TBL-005, TBL-008 | API-011 (`failureCode`) | `worker.e2e-spec.ts` FR-018.1–5 with `AI_MOCK_FAILURE`; web FR-018.6 |
+| FR-018 | CMP-001 (SCR-04), CMP-010, CMP-012, CMP-009, CMP-017 | TBL-005, TBL-008 | API-011 (`failureCode`) | `worker.e2e-spec.ts` FR-018.1–5 with `AI_MOCK_FAILURE`; web FR-018.6 |
 | FR-019 | CMP-014, CMP-009 | TBL-005, TBL-008 | API-011 (`failureCode`) | `sweep.spec.ts` FR-019.1–2 (fake clock) |
 | FR-020 | CMP-001 (SCR-06), CMP-014, CMP-017 | TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-008, TBL-009, TBL-010 | API-015, API-001 | `privacy.e2e-spec.ts` FR-020.1–6 (row counts per table = 0 after) |
 | FR-021 | CMP-014 | TBL-004, TBL-005, TBL-008, TBL-009 (+ cascades) | — (scheduled job, no user action; effect visible through API-005/API-010 returning fewer items) | `purge.spec.ts` FR-021.1–4 (fake clock) |
@@ -2145,7 +2174,7 @@ Test files are under `apps/api/test/` (`*.e2e-spec.ts`), `apps/api/src/**` (`*.s
 
 | Element | Used by |
 |---|---|
-| CMP-001 | FR-001 – FR-003, FR-006, FR-007, FR-009, FR-013 – FR-017, FR-020, FR-022 – FR-024, NFR-016 – NFR-018 |
+| CMP-001 | FR-001 – FR-003, FR-006, FR-007, FR-009, FR-013 – FR-018, FR-020, FR-022 – FR-024, NFR-016 – NFR-018 |
 | CMP-002 | FR-001, NFR-001, NFR-005, NFR-007, NFR-008, NFR-010 |
 | CMP-003 | FR-001, FR-022, NFR-008 |
 | CMP-004 | FR-002 |
@@ -2203,3 +2232,4 @@ Every `ERR-` code is referenced by at least one FR or CR (§6.3 "When it happens
 | v0.4 | 2026-10-20 | Vaishali Naruka | Section 5: ERD, TBL-001 – TBL-010, indexes, delete rules, erase order, seed catalogue (6 roles) | First draft | TBL-001 – TBL-010 |
 | v0.5 | 2026-10-20 | Vaishali Naruka | Section 6: common API rules, shared objects, API-001 – API-021, error list ERR-001 – ERR-024. Upload check order changed so duplicate and resume-limit checks come after extraction (FR-003 AC 9, §4.3.1); `duplicate` added to `details[].issue` (§1.4); zip-limit error named in CR-023 | First draft; the duplicate check needs the extracted text, so the old order could not be implemented | API-001 – API-021, ERR-001 – ERR-024, FR-003, CR-023 |
 | v0.6 | 2026-10-20 | Vaishali Naruka | Section 7: forward traceability for FR-001 – FR-024 and NFR-001 – NFR-020, reverse check for every CMP, TBL and API | First draft | all FR, NFR |
+| v1.0 | 2026-10-20 | Vaishali Naruka | Fixes from a simulated build test (44 findings). Main changes: encrypted DOCX detected as OLE in the type check (CR-023, §3.5.1, new fixture); fixture `resume-frontend-good.pdf` and FR-010 AC 6 corrected to D1 = 86; FR-005 AC 3 counts; locked-suggestion shape unified (FR-013, API-011); platform URLs read at runtime, no `NEXT_PUBLIC_*` (§4.6); per-environment cookie name `AUTH_COOKIE_NAME` (CR-001); expired resumes ignored by duplicate and count checks, uploads serialised by advisory lock (FR-003 AC 6/8/10, FR-021 AC 4); every transition to `failed` sets `completed_at` (FR-008, FR-019, §4.3.7); rationale rule 7 and 1,000-char candidate limit (§3.5.5); readiness no longer depends on Redis, JWKS fetched at boot (API-021, §4.4); extraction in worker threads (FR-004); API-009 requires consent (FR-002, ERR-005); breaker rules clarified (§4.7.4); quota defined by the counter (FR-009 AC 1); cursor precision (TBL-005); D1 empty-set rule; `details` always present and validator mapping (§1.4, CR-022); throttler keys and test overrides (CR-024, CFG-16/17); in-region Bedrock model only; HSTS; mock token overrides and canary token; two DB roles; level labels; worker health/metrics; Noto fonts in PDF; notice mentions backups; new constants CFG-33 – CFG-46; example values corrected | The build test showed places where a builder would guess or where the spec contradicted itself; three would have failed deterministically | CR-001, CR-015, CR-019, CR-022 – CR-025, CR-036, CR-038, FR-002 – FR-005, FR-008 – FR-010, FR-013, FR-017 – FR-019, FR-021, NFR-005, NFR-006, API-009, API-011, API-021, ERR-005, TBL-004, TBL-005, CFG-16, CFG-17, CFG-33 – CFG-46 |
