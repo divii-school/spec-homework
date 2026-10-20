@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Author | Vaishali Naruka |
-| Version | v0.5 |
+| Version | v0.6 |
 | Last updated | 2026-10-20 |
 | Status | Draft |
 
@@ -2085,7 +2085,106 @@ Checks (each with a 1 s timeout): `db` = `SELECT 1`; `redis` = `PING`; `jwks` = 
 
 ## 7. Traceability matrix
 
-_Written in a later revision._
+Test files are under `apps/api/test/` (`*.e2e-spec.ts`), `apps/api/src/**` (`*.spec.ts`, unit) and `apps/web/e2e/` (Playwright). Per NFR-020, every test name starts with the requirement ID and criterion number (e.g. `FR-003.2`), so `scripts/check-ids.ts` can prove every criterion has a test.
+
+### 7.1 Requirements → design
+
+| Requirement | Component(s) | Table(s) | API(s) | Verified by |
+|---|---|---|---|---|
+| FR-001 | CMP-001, CMP-002, CMP-003, CMP-019 | — (no user table by design, CR-006) | API-001 (and the guard on every API except API-020/021) | `auth.e2e-spec.ts` FR-001.1–4; web `auth.spec.ts` FR-001.2 |
+| FR-002 | CMP-001 (SCR-02), CMP-004 | TBL-003, TBL-009 | API-001, API-002, API-003, API-004 | `consents.e2e-spec.ts` FR-002.1–5; web `consent.spec.ts` FR-002.2 |
+| FR-003 | CMP-001 (SCR-03), CMP-005, CMP-006 | TBL-004 | API-004 | `resumes.e2e-spec.ts` FR-003.1–9 with §3.7 fixtures |
+| FR-004 | CMP-005, CMP-006 | TBL-004 | API-004 | `extractor.spec.ts` FR-004.1–4; `resumes.e2e-spec.ts` FR-004.5–6 |
+| FR-005 | CMP-005, CMP-007, CMP-012 | TBL-004 | API-004 | `redactor.spec.ts` FR-005.1–3; `ai-client.spec.ts` FR-005.4 |
+| FR-006 | CMP-001 (SCR-03, SCR-06), CMP-005 | TBL-004, TBL-005 | API-005, API-006, API-007 | `resumes.e2e-spec.ts` FR-006.1–5 |
+| FR-007 | CMP-001 (SCR-03), CMP-015 | TBL-001 | API-008 | `job-roles.e2e-spec.ts` FR-007.1–2; web FR-007.3 |
+| FR-008 | CMP-008, CMP-009, CMP-017 | TBL-001, TBL-004, TBL-005, TBL-008 | API-009 | `analyses.e2e-spec.ts` FR-008.1–6 |
+| FR-009 | CMP-001 (SCR-01), CMP-009 | TBL-005, TBL-008 | API-001, API-009 | `quota.spec.ts` (period function); `analyses.e2e-spec.ts` FR-009.1–6 (AC 6 = 10 parallel requests) |
+| FR-010 | CMP-010, CMP-011, CMP-012 | TBL-002, TBL-005, TBL-006 | API-011 | `scoring.spec.ts` FR-010.1–4, 6; `worker.e2e-spec.ts` FR-010.5 |
+| FR-011 | CMP-011 | TBL-002, TBL-007 | API-011 | `scoring.spec.ts` FR-011.1–4; `analyses.e2e-spec.ts` FR-011.5 |
+| FR-012 | CMP-010, CMP-012 | TBL-010 | API-011 | `suggestion-validator.spec.ts` FR-012.1–4; `worker.e2e-spec.ts` FR-012.5 |
+| FR-013 | CMP-001 (SCR-04), CMP-008, CMP-013 | TBL-010 | API-011, API-013 | `analyses.e2e-spec.ts` FR-013.1–3, 5; `reports.e2e-spec.ts` FR-013.4 |
+| FR-014 | CMP-001 (SCR-04), CMP-008 | TBL-005 | API-011 | `analyses.e2e-spec.ts` FR-014.1; web `analysis.spec.ts` FR-014.2–3 (fake timers) |
+| FR-015 | CMP-001 (SCR-05), CMP-008 | TBL-005 | API-010 | `analyses.e2e-spec.ts` FR-015.1–3 (pagination with 45 rows) |
+| FR-016 | CMP-001 (SCR-05), CMP-008 | TBL-005, TBL-006, TBL-007, TBL-008, TBL-010 | API-012 | `analyses.e2e-spec.ts` FR-016.1–3 |
+| FR-017 | CMP-001 (SCR-04), CMP-013 | TBL-005, TBL-006, TBL-007, TBL-010 | API-013 | `reports.e2e-spec.ts` FR-017.1–6 (text extracted from the PDF with `pdfjs-dist`) |
+| FR-018 | CMP-010, CMP-012, CMP-009, CMP-017 | TBL-005, TBL-008 | API-011 (`failureCode`) | `worker.e2e-spec.ts` FR-018.1–5 with `AI_MOCK_FAILURE`; web FR-018.6 |
+| FR-019 | CMP-014, CMP-009 | TBL-005, TBL-008 | API-011 (`failureCode`) | `sweep.spec.ts` FR-019.1–2 (fake clock) |
+| FR-020 | CMP-001 (SCR-06), CMP-014, CMP-017 | TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-008, TBL-009, TBL-010 | API-015, API-001 | `privacy.e2e-spec.ts` FR-020.1–6 (row counts per table = 0 after) |
+| FR-021 | CMP-014 | TBL-004, TBL-005, TBL-008, TBL-009 (+ cascades) | — (scheduled job, no user action; effect visible through API-005/API-010 returning fewer items) | `purge.spec.ts` FR-021.1–4 (fake clock) |
+| FR-022 | CMP-001 (SCR-07), CMP-003, CMP-015 | TBL-001, TBL-002, TBL-009 | API-016, API-017, API-018, API-019 | `admin-job-roles.e2e-spec.ts` FR-022.1–7 |
+| FR-023 | CMP-001 (SCR-06), CMP-014 | TBL-003, TBL-004, TBL-005 | API-014 | `privacy.e2e-spec.ts` FR-023.1; web FR-023.2 |
+| FR-024 | CMP-001 (SCR-01) | TBL-005, TBL-008 | API-001, API-010 | web `dashboard.spec.ts` FR-024.1–2 |
+| NFR-001 | CMP-002, CMP-016, CMP-017 | all (indexes §5.3) | API-001 – API-003, API-005 – API-012, API-014 – API-019 | k6 `perf/api.js` |
+| NFR-002 | CMP-005, CMP-006, CMP-007 | TBL-004 | API-004 | k6 with `resume-5mb.pdf` |
+| NFR-003 | CMP-013 | TBL-005, TBL-006, TBL-007, TBL-010 | API-013 | k6 |
+| NFR-004 | CMP-010, CMP-011, CMP-012 | TBL-005 | API-009, API-011 | `ro_analysis_duration_seconds` |
+| NFR-005 | CMP-002, CMP-016, CMP-017, CMP-018 | — (no data; health checks only) | API-020, API-021, API-001 | CloudWatch Synthetics |
+| NFR-006 | CMP-010, CMP-012, CMP-014 | TBL-005, TBL-008 | API-004 – API-013 | Bedrock egress block test |
+| NFR-007 | CMP-002, CMP-010, CMP-017 | TBL-005 | API-009, API-011 | k6 soak test |
+| NFR-008 | CMP-002, CMP-003, CMP-005 | — (applies to code, not data) | all | ZAP baseline + `pnpm audit` |
+| NFR-009 | CMP-001, CMP-002, CMP-010 | — (applies to images) | — (applies to images, not endpoints) | Trivy in CI |
+| NFR-010 | CMP-002, CMP-010, CMP-018 | — (logs are not in the DB) | all | `scripts/check-log-pii.ts` |
+| NFR-011 | CMP-012, CMP-016, CMP-017 | all | — (deployment property) | Terraform review, AWS Config rule |
+| NFR-012 | CMP-014 | TBL-004, TBL-005 | — (scheduled job) | Daily CloudWatch alarm query |
+| NFR-013 | CMP-010, CMP-014 | TBL-005 | API-011 | Stuck-analysis alarm |
+| NFR-014 | CMP-016 | all | — (infrastructure) | Restore drill |
+| NFR-015 | CMP-018 | — (metrics are not in the DB) | API-021 | Alert test |
+| NFR-016 | CMP-001 | — (UI only) | — (UI only) | `@axe-core/playwright` on SCR-01 – SCR-07 |
+| NFR-017 | CMP-001 | — (UI only) | — (UI only) | Playwright browser projects + screenshots |
+| NFR-018 | CMP-001 | — (UI only) | API-001, API-010 (data for SCR-01) | Lighthouse CI |
+| NFR-019 | CMP-012 | TBL-005 (`ai_input_tokens`, `ai_output_tokens`) | — (cost metric) | Monthly bill ÷ analyses; `ro_ai_tokens_total` |
+| NFR-020 | all | — (applies to code) | — (applies to code) | Jest coverage gate, `scripts/check-ids.ts` |
+
+### 7.2 Reverse check (every design element has a requirement)
+
+| Element | Used by |
+|---|---|
+| CMP-001 | FR-001 – FR-003, FR-006, FR-007, FR-009, FR-013 – FR-017, FR-020, FR-022 – FR-024, NFR-016 – NFR-018 |
+| CMP-002 | FR-001, NFR-001, NFR-005, NFR-007, NFR-008, NFR-010 |
+| CMP-003 | FR-001, FR-022, NFR-008 |
+| CMP-004 | FR-002 |
+| CMP-005 | FR-003 – FR-006, NFR-002, NFR-008 |
+| CMP-006 | FR-003, FR-004, NFR-002 |
+| CMP-007 | FR-005, NFR-002 |
+| CMP-008 | FR-008, FR-013 – FR-016 |
+| CMP-009 | FR-008, FR-009, FR-018, FR-019 |
+| CMP-010 | FR-010, FR-012, FR-018, NFR-004, NFR-006, NFR-007, NFR-013 |
+| CMP-011 | FR-010, FR-011, NFR-004 |
+| CMP-012 | FR-005, FR-010, FR-012, FR-018, NFR-004, NFR-006, NFR-011, NFR-019 |
+| CMP-013 | FR-013, FR-017, NFR-003 |
+| CMP-014 | FR-019 – FR-021, FR-023, NFR-006, NFR-012, NFR-013 |
+| CMP-015 | FR-007, FR-022 |
+| CMP-016 | NFR-001, NFR-005, NFR-011, NFR-014 (system of record for every TBL) |
+| CMP-017 | FR-008, FR-018, FR-020, NFR-001, NFR-005, NFR-007, NFR-011 |
+| CMP-018 | NFR-005, NFR-010, NFR-015 |
+| CMP-019 | FR-001 (local/test only) |
+| TBL-001 | FR-007, FR-008, FR-022 |
+| TBL-002 | FR-010, FR-011, FR-022 |
+| TBL-003 | FR-002, FR-020, FR-023 |
+| TBL-004 | FR-003 – FR-006, FR-008, FR-020, FR-021, FR-023 |
+| TBL-005 | FR-006, FR-008 – FR-010, FR-013 – FR-021, FR-023, FR-024 |
+| TBL-006 | FR-010, FR-016, FR-017, FR-020 |
+| TBL-007 | FR-011, FR-016, FR-017, FR-020 |
+| TBL-008 | FR-008, FR-009, FR-016, FR-018 – FR-021, FR-024 |
+| TBL-009 | FR-002, FR-020 – FR-022 |
+| TBL-010 | FR-012, FR-013, FR-016, FR-017, FR-020 |
+| API-001 | FR-001, FR-002, FR-009, FR-020, FR-024 |
+| API-002, API-003 | FR-002 |
+| API-004 | FR-002 – FR-005 |
+| API-005 – API-007 | FR-006 |
+| API-008 | FR-007 |
+| API-009 | FR-008, FR-009 |
+| API-010 | FR-015, FR-024 |
+| API-011 | FR-010 – FR-014, FR-018, FR-019 |
+| API-012 | FR-016 |
+| API-013 | FR-013, FR-017 |
+| API-014 | FR-023 |
+| API-015 | FR-020 |
+| API-016 – API-019 | FR-022 |
+| API-020, API-021 | NFR-005, NFR-015 |
+
+Every `ERR-` code is referenced by at least one FR or CR (§6.3 "When it happens" column).
 
 ---
 
