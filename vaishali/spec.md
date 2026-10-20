@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Author | Vaishali Naruka |
-| Version | v0.4 |
+| Version | v0.5 |
 | Last updated | 2026-10-20 |
 | Status | Draft |
 
@@ -102,7 +102,7 @@ Every API error uses this **one** response body, with `Content-Type: application
 | `error.code` | string | yes | One of the codes in §6.3. UPPER_SNAKE_CASE. Stable: clients branch on it. |
 | `error.message` | string | yes | English, one sentence, safe to show to the user. Exact text per code in §6.3. Never contains stack traces, SQL, file content or other users' data. |
 | `error.requestId` | string (UUID) | yes | Same as the `X-Request-Id` response header. |
-| `error.details` | array | no | Present only for `VALIDATION_FAILED` and the file errors. Each item: `field` (string, request field name), `issue` (string, one of `required`, `type`, `min`, `max`, `min_length`, `max_length`, `pattern`, `enum`, `max_size`, `unknown_field`, `body_too_large`), optional `limit` (number). |
+| `error.details` | array | no | Present only for `VALIDATION_FAILED` and the file errors. Each item: `field` (string, request field name), `issue` (string, one of `required`, `type`, `min`, `max`, `min_length`, `max_length`, `pattern`, `enum`, `max_size`, `unknown_field`, `body_too_large`, `duplicate`), optional `limit` (number). |
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
@@ -120,7 +120,7 @@ Every API error uses this **one** response body, with `Content-Type: application
 | CR-020 | CORS | Web and API are served from the **same origin** (`https://resume.surfingbear.com`, `/api/*` routed to the API, §4.1). The API therefore enables **no** CORS: it sends no `Access-Control-Allow-Origin` header, so cross-origin browser calls fail. | e2e test: preflight from other origin gets no ACAO header |
 | CR-021 | CSRF | For every `POST`, `PUT`, `PATCH`, `DELETE`, the API requires the `Origin` header to equal `WEB_ORIGIN` (§4.6). Missing or different → `403 FORBIDDEN` (ERR-002). Combined with `SameSite=Lax` on the cookie (CR-001), this blocks cross-site form posts. | e2e test |
 | CR-022 | Input validation | Every request body, query and path parameter is validated with `class-validator` DTOs and `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true })`. Unknown fields → 400 `VALIDATION_FAILED` with `issue: "unknown_field"`. Path IDs must be UUIDs, else 404 `NOT_FOUND`. | Unit tests per DTO |
-| CR-023 | File validation | Uploaded files are checked by **content**, not by name or `Content-Type`: magic bytes `%PDF-` (PDF) or ZIP header `PK\x03\x04` **and** a `word/document.xml` entry (DOCX). Files are processed in memory only and never written to disk or object storage (FR-004). DOCX unzip is limited to `CFG-25` (20 MB) total uncompressed size and `CFG-26` (500) entries to stop zip bombs. | Unit tests with fixtures in §3.7 |
+| CR-023 | File validation | Uploaded files are checked by **content**, not by name or `Content-Type`: magic bytes `%PDF-` (PDF) or ZIP header `PK\x03\x04` **and** a `word/document.xml` entry (DOCX). Files are processed in memory only and never written to disk or object storage (FR-004). DOCX unzip is limited to `CFG-25` (20 MB) total uncompressed size and `CFG-26` (500) entries to stop zip bombs; exceeding either → `415 UNSUPPORTED_FILE_TYPE` (ERR-008). | Unit tests with fixtures in §3.7 |
 | CR-024 | Rate limiting | Per-user limits, counted in Redis (fixed window): all API routes `CFG-15` (120 requests / 60 s); `POST /resumes` `CFG-16` (10 / hour); `POST /analyses` `CFG-17` (20 / hour). Unauthenticated requests are limited per client IP at 60 / 60 s. Over the limit → 429 `RATE_LIMITED` (ERR-018). | e2e test |
 | CR-025 | Headers | The web app sends `Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-<per-request>'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`, plus `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. The API uses `helmet()` defaults. | Deploy smoke test checks headers |
 | CR-026 | Data at rest | RDS and ElastiCache use AWS KMS encryption at rest. In addition, resume text is encrypted in the application with AES-256-GCM before it is written to PostgreSQL (§5.2, TBL-004). | Schema + code review |
@@ -304,7 +304,7 @@ Package manager: **pnpm 9**; Node.js **22 LTS** pinned in `.nvmrc` and `package.
 |---|---|---|---|---|
 | FR-001 | Authenticated access | Every RO screen and API (except health checks) requires a valid platform token. | Must | 1. A request without the `sb_access` cookie, or with a token failing any CR-003 rule, returns `401 UNAUTHENTICATED` (ERR-001). 2. The web app on any 401 redirects to `PLATFORM_LOGIN_URL?returnTo=<current URL>` (CR-005). 3. `GET /api/v1/me` (API-001) with a valid token returns `userId` equal to the token `sub`. 4. A token with `plan` missing is treated as `free` (CR-004). |
 | FR-002 | Privacy notice and consent | Before the first upload, the user reads the privacy notice (§3.5.7) and gives explicit consent. Consent is recorded with the notice version. | Must | 1. `POST /resumes` (API-004) without a consent row for the current notice version `CFG-30` returns `403 CONSENT_REQUIRED` (ERR-005). 2. The consent screen (SCR-02) shows the notice text and an unticked checkbox "I agree…"; the "Continue" button is disabled until it is ticked. 3. `POST /consents` (API-003) stores one TBL-003 row with `notice_version`, `accepted_at`; repeating it for the same version returns 200 with the existing row, not a duplicate. 4. When `CFG-30` changes, every user must consent again before the next upload (criterion 1 applies). Existing resumes and analyses stay readable. 5. API-001 returns `consent.required = true` while there is no consent for the current version. |
-| FR-003 | Upload resume | The user uploads one PDF or DOCX file. | Must | 1. Accepted types are decided by content (CR-023): PDF or DOCX. Anything else → `415 UNSUPPORTED_FILE_TYPE` (ERR-008). 2. Max size `CFG-01` (5 MiB = 5,242,880 bytes); larger → `413 FILE_TOO_LARGE` (ERR-007); the web app checks size before upload and shows the same message without calling the API. 3. A PDF with more than `CFG-02` (5) pages → `422 TOO_MANY_PAGES` (ERR-010). 4. Password-protected PDF or encrypted DOCX → `422 FILE_ENCRYPTED` (ERR-009). 5. Request without a `file` part → `400 FILE_REQUIRED` (ERR-006). 6. A user with `CFG-18` (10) stored resumes gets `409 RESUME_LIMIT_REACHED` (ERR-013). 7. On success the API returns `201` with the resume summary (API-004), within `NFR-002`. 8. Uploading a file whose normalised text has the same SHA-256 as one of the user's existing resumes returns `200` with that existing resume and `duplicate: true`; no new row is created. 9. The checks run in this order and the first failure is returned: consent (FR-002) → file present → size → type → resume limit → encryption → page count → extraction (FR-004). |
+| FR-003 | Upload resume | The user uploads one PDF or DOCX file. | Must | 1. Accepted types are decided by content (CR-023): PDF or DOCX. Anything else → `415 UNSUPPORTED_FILE_TYPE` (ERR-008). 2. Max size `CFG-01` (5 MiB = 5,242,880 bytes); larger → `413 FILE_TOO_LARGE` (ERR-007); the web app checks size before upload and shows the same message without calling the API. 3. A PDF with more than `CFG-02` (5) pages → `422 TOO_MANY_PAGES` (ERR-010). 4. Password-protected PDF or encrypted DOCX → `422 FILE_ENCRYPTED` (ERR-009). 5. Request without a `file` part → `400 FILE_REQUIRED` (ERR-006). 6. A user with `CFG-18` (10) stored resumes gets `409 RESUME_LIMIT_REACHED` (ERR-013). 7. On success the API returns `201` with the resume summary (API-004), within `NFR-002`. 8. Uploading a file whose normalised text has the same SHA-256 as one of the user's existing resumes returns `200` with that existing resume and `duplicate: true`; no new row is created. 9. The checks run in this order and the first failure is returned: consent (FR-002) → file present → size → type → encryption → page count → extraction and text length (FR-004) → duplicate (returns 200, AC 8) → resume limit (AC 6). The limit is checked last so that re-uploading an existing resume still works at the limit. |
 | FR-004 | Extract and store text | The API extracts plain text from the file in memory, normalises it, collects layout signals, redacts it (FR-005), encrypts it and stores it. The file itself is discarded. | Must | 1. PDF text is extracted with `pdfjs-dist`; DOCX with `mammoth` (`extractRawText`) plus a scan of `word/document.xml` for signals (§3.5.1). 2. Extraction is aborted after `CFG-19` (10 s) → `422 TEXT_NOT_EXTRACTABLE` (ERR-011). 3. Normalised text shorter than `CFG-03` (400) characters (e.g. a scanned PDF with no text layer) → `422 TEXT_NOT_EXTRACTABLE` (ERR-011) with message suggesting a text-based file. 4. Normalised text longer than `CFG-04` (30,000) characters → `422 TEXT_TOO_LONG` (ERR-012). 5. The original bytes are never written to disk, object storage, logs or the database; after the request the buffer is released. 6. TBL-004 stores: redacted text encrypted (AES-256-GCM, §5.2), `text_sha256` of the **normalised un-redacted** text, signals JSON, page count, file type, size, display name, `expires_at = created_at + CFG-09 (30 days)`. |
 | FR-005 | Redact personal data | Contact details and identity numbers are removed from the text before it is stored or sent to the AI. | Must | 1. The redaction rules of §3.5.2 are applied in the listed order. 2. Before redaction, the presence of an email or phone is saved as signal `hasContact` (used by §3.5.3 D2). 3. The fixture `resume-contact.pdf` (§3.7) after redaction contains none of its email, phone, LinkedIn URL, PAN or Aadhaar strings and contains `[EMAIL]`, `[PHONE]`, `[URL]`, `[ID]` once each. 4. Text sent to the AI is always the stored redacted text; there is no code path that sends un-redacted text (checked by unit test that spies on the AI client). |
 | FR-006 | Manage resumes | The user lists, views and deletes their stored resumes. | Must | 1. `GET /resumes` (API-005) returns the user's resumes, newest first, without the text. 2. `GET /resumes/{id}` (API-006) returns metadata and `expiresAt`; RO does not return the text to the client in v1. 3. `DELETE /resumes/{id}` (API-007) hard-deletes the row and returns 204; analyses made from it stay, with `resumeId = null` and `resumeDisplayName` kept. 4. Deleting a resume that has an in-flight analysis returns `409 ANALYSIS_IN_PROGRESS` (ERR-015). 5. Another user's resume ID → 404 (CR-008). |
@@ -648,7 +648,7 @@ sequenceDiagram
   alt no consent
     A-->>B: 403 CONSENT_REQUIRED
   end
-  A->>A: size, magic bytes, resume count < CFG-18
+  A->>A: size ≤ CFG-01, magic bytes PDF/DOCX
   A->>X: extract(buffer, type) with 10 s timeout
   alt encrypted / too many pages / no text / too long / timeout
     X-->>A: ExtractError(code)
@@ -658,6 +658,9 @@ sequenceDiagram
   A->>A: sha256(text); look up (user_id, text_sha256)
   alt duplicate
     A-->>B: 200 { resume, duplicate: true }
+  end
+  alt stored resumes = CFG-18
+    A-->>B: 409 RESUME_LIMIT_REACHED
   end
   A->>R: redact(text) → { redacted, hasContact }
   A->>A: AES-256-GCM encrypt(redacted); drop buffer + raw text
@@ -1456,7 +1459,627 @@ Note: the term `java` matches only the whole word, so `JavaScript` does not coun
 
 ## 6. API design
 
-_Written in a later revision._
+### 6.1 Common rules
+
+- **Base path:** `/api/v1` for all business endpoints; health at `/api/health/*` (unversioned). Host: same as the web (`https://resume.surfingbear.com`).
+- **Auth:** cookie `sb_access` (CR-001 – CR-004). Every endpoint except API-020/API-021 requires it; the global `AuthGuard` applies unless a route has `@Public()`. Admin endpoints (`/api/v1/admin/*`) additionally require `ro_admin` (`RolesGuard`, 403 `FORBIDDEN` otherwise).
+- **CSRF:** `Origin` check on `POST`/`PUT`/`PATCH`/`DELETE` (CR-021).
+- **Content type:** request and response bodies are `application/json; charset=utf-8`, except API-004 (request `multipart/form-data`) and API-013 (response `application/pdf`). Max JSON body `CFG-24` (100 KB).
+- **IDs:** UUID strings. A path ID that is not a UUID → `404 NOT_FOUND`.
+- **Field names:** `camelCase`. Absent optional values are returned as `null`, never omitted.
+- **Date/time:** ISO-8601 UTC strings with milliseconds and `Z`, e.g. `"2026-10-20T09:15:00.000Z"` (CR-030).
+- **Caching:** every `/api/v1` response has `Cache-Control: no-store` (personal data).
+- **Request ID:** `X-Request-Id` in and out (CR-012).
+- **Pagination (API-010 only — other lists are small and bounded):** keyset pagination. Query `pageSize` (integer 1–50, default 20, `CFG-32`) and `cursor` (opaque string from the previous response). Response `{ "items": [...], "nextCursor": "…" | null }`. The cursor is base64url of `{"c":"<createdAt ISO>","i":"<id>"}`; the next page is `WHERE (created_at, id) < (c, i) ORDER BY created_at DESC, id DESC`. A cursor that does not decode → `400 VALIDATION_FAILED` with `details: [{ "field": "cursor", "issue": "pattern" }]`.
+- **Errors:** the format in §1.4, codes in §6.3. `details[].issue` values: `required`, `type`, `min`, `max`, `min_length`, `max_length`, `pattern`, `enum`, `max_size`, `unknown_field`, `body_too_large`, `duplicate`.
+- **Rate limits:** CR-024; 429 with `Retry-After`.
+- **Common errors not repeated per endpoint:** every authenticated endpoint can return `401 UNAUTHENTICATED`, `429 RATE_LIMITED`, `500 INTERNAL_ERROR`, `503 SERVICE_UNAVAILABLE`; every mutating endpoint can return `403 FORBIDDEN` (Origin check); every endpoint with a body can return `400 VALIDATION_FAILED`.
+
+**Shared response objects** (types in `@ro/shared/src/api.ts`):
+
+`ResumeSummary`
+
+| Field | Type | Note |
+|---|---|---|
+| `id` | string (uuid) | |
+| `displayName` | string | |
+| `fileType` | `"pdf"` \| `"docx"` | |
+| `fileSizeBytes` | integer | |
+| `pageCount` | integer | |
+| `charCount` | integer | |
+| `createdAt` | string (date-time) | |
+| `expiresAt` | string (date-time) | `createdAt + 30 days` |
+
+`AnalysisSummary`
+
+| Field | Type | Note |
+|---|---|---|
+| `id` | string (uuid) | |
+| `status` | `"queued"` \| `"processing"` \| `"completed"` \| `"failed"` | |
+| `jobRole` | `{ id: string, slug: string, name: string }` | From the snapshot columns (`job_role_name`, `job_role_slug`) |
+| `experienceLevel` | `"entry"` \| `"mid"` \| `"senior"` \| `"lead"` | |
+| `resumeId` | string (uuid) \| null | `null` after the resume was deleted |
+| `resumeDisplayName` | string | Snapshot |
+| `overallScore` | integer 0–100 \| null | non-null only when `completed` |
+| `band` | `"needs_work"` \| `"fair"` \| `"good"` \| `"excellent"` \| null | |
+| `failureCode` | `"AI_UNAVAILABLE"` \| `"AI_INVALID_OUTPUT"` \| `"PROCESSING_TIMEOUT"` \| null | |
+| `createdAt` | string (date-time) | |
+| `completedAt` | string (date-time) \| null | Time it became `completed` or `failed` |
+
+`SkillInput` (admin)
+
+| Field | Type | Required | Validation |
+|---|---|---|---|
+| `name` | string | yes | trimmed, 1–60 chars |
+| `aliases` | string[] | no (default `[]`) | max 10 items; each trimmed, lowercased by the server, 1–60 chars; duplicates removed |
+| `importance` | `"must_have"` \| `"nice_to_have"` | yes | enum |
+| `minLevel` | `"entry"` \| `"mid"` \| `"senior"` \| `"lead"` | no (default `"entry"`) | enum |
+| `sortOrder` | integer | no (default = (array index + 1) × 10) | 0–10000 |
+
+Two skills in one request with the same `name` (case-insensitive) → `400 VALIDATION_FAILED`, `details: [{ "field": "skills[3].name", "issue": "duplicate" }]`.
+
+### 6.2 Endpoints
+
+#### API-001 `GET /api/v1/me`
+- **Purpose:** current user context for the layout and dashboard.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-001, FR-002 AC 5, FR-009 AC 4, FR-024
+
+**Request:** no parameters.
+
+**Response 200**
+
+```json
+{
+  "userId": "11111111-1111-4111-8111-111111111111",
+  "plan": "free",
+  "isAdmin": false,
+  "consent": {
+    "required": true,
+    "currentVersion": "2026-10-v1",
+    "acceptedVersion": null,
+    "acceptedAt": null
+  },
+  "quota": {
+    "period": "2026-10",
+    "limit": 3,
+    "used": 1,
+    "remaining": 2,
+    "resetsAt": "2026-10-31T18:30:00.000Z"
+  },
+  "limits": {
+    "maxFileBytes": 5242880,
+    "maxPdfPages": 5,
+    "maxStoredResumes": 10,
+    "storedResumes": 2
+  }
+}
+```
+
+`consent.acceptedVersion` is the latest version the user accepted (may be older than `currentVersion`); `required = acceptedVersion !== currentVersion`. `remaining = max(limit − used, 0)`. If there is no TBL-008 row for the period, `used = 0`.
+
+**Errors:** only the common ones.
+
+#### API-002 `GET /api/v1/consents/notice`
+- **Purpose:** the current privacy notice.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-002
+
+**Response 200**
+
+```json
+{ "version": "2026-10-v1", "noticeMarkdown": "**How Resume Optimizer uses your resume**\n\n- **What we collect:** …" }
+```
+
+`noticeMarkdown` is the exact text of §3.5.7 without the checkbox line (the checkbox is rendered by SCR-02). The web renders it with `react-markdown` (no raw HTML).
+
+**Errors:** only the common ones.
+
+#### API-003 `POST /api/v1/consents`
+- **Purpose:** record consent to the current notice.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-002
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `noticeVersion` | body | string | yes | must equal `CFG-30` (`"2026-10-v1"`), else `400 VALIDATION_FAILED` `issue: "enum"` |
+
+**Response 201** (new) / **200** (already accepted this version — nothing written)
+
+```json
+{ "id": "6a1d0f6e-4c8a-4f1e-9f43-0c7f1d2e9b11", "noticeVersion": "2026-10-v1", "acceptedAt": "2026-10-20T09:15:00.000Z" }
+```
+
+On 201 an audit row `consent_given` is written in the same transaction.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_FAILED | `noticeVersion` missing or not the current version |
+
+#### API-004 `POST /api/v1/resumes`
+- **Purpose:** upload a resume.
+- **Auth / role:** any authenticated user **with current consent** (`ConsentGuard`).
+- **Implements:** FR-003, FR-004, FR-005
+
+**Request:** `multipart/form-data` with exactly one part:
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `file` | body (multipart) | file | yes | ≤ `CFG-01` (5,242,880 bytes); PDF or DOCX by content (CR-023); exactly one file; no other parts |
+
+Multer config: `memoryStorage()`, `limits: { fileSize: 5242880, files: 1, fields: 0, parts: 1 }`. A second file or any other field → `400 VALIDATION_FAILED` (`field: "file"`, `issue: "max"` or `issue: "unknown_field"`). A non-multipart request → `400 FILE_REQUIRED`.
+
+Checks run in the FR-003 AC 9 order: `ConsentGuard` → Multer (presence, size) → magic bytes → encryption → pages → extraction → duplicate → resume count.
+
+**Response 201** (new) / **200** (duplicate, FR-003 AC 8)
+
+```json
+{
+  "resume": {
+    "id": "0b9f7a52-2f4c-4c7e-8d0e-3a4b5c6d7e8f",
+    "displayName": "Asha_Verma_Resume.pdf",
+    "fileType": "pdf",
+    "fileSizeBytes": 184320,
+    "pageCount": 2,
+    "charCount": 5210,
+    "createdAt": "2026-10-20T09:16:02.120Z",
+    "expiresAt": "2026-11-19T09:16:02.120Z"
+  },
+  "duplicate": false
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 403 | CONSENT_REQUIRED | No consent for `CFG-30` |
+| 400 | FILE_REQUIRED | No `file` part / not multipart |
+| 413 | FILE_TOO_LARGE | File > `CFG-01`; `details: [{ "field": "file", "issue": "max_size", "limit": 5242880 }]` |
+| 415 | UNSUPPORTED_FILE_TYPE | Not PDF/DOCX by content, or DOCX zip limits exceeded (CR-023) |
+| 409 | RESUME_LIMIT_REACHED | User already has `CFG-18` (10) resumes and the upload is not a duplicate |
+| 422 | FILE_ENCRYPTED | Password-protected PDF / encrypted DOCX |
+| 422 | TOO_MANY_PAGES | PDF pages > `CFG-02` (5); `details: [{ "field": "file", "issue": "max", "limit": 5 }]` |
+| 422 | TEXT_NOT_EXTRACTABLE | Text < `CFG-03` (400) chars, or extraction error, or timeout `CFG-19` |
+| 422 | TEXT_TOO_LONG | Text > `CFG-04` (30,000) chars |
+
+#### API-005 `GET /api/v1/resumes`
+- **Purpose:** list own resumes (max `CFG-18` = 10, so not paginated).
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-006
+
+**Response 200**
+
+```json
+{ "items": [ { "id": "0b9f7a52-2f4c-4c7e-8d0e-3a4b5c6d7e8f", "displayName": "Asha_Verma_Resume.pdf", "fileType": "pdf", "fileSizeBytes": 184320, "pageCount": 2, "charCount": 5210, "createdAt": "2026-10-20T09:16:02.120Z", "expiresAt": "2026-11-19T09:16:02.120Z" } ] }
+```
+
+Order: `created_at DESC, id DESC`. Expired-but-not-purged rows are excluded (FR-021 AC 4).
+
+**Errors:** only the common ones.
+
+#### API-006 `GET /api/v1/resumes/{resumeId}`
+- **Purpose:** one resume's metadata.
+- **Auth / role:** owner only (CR-008).
+- **Implements:** FR-006
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `resumeId` | path | uuid | yes | UUID |
+
+**Response 200:** `ResumeSummary` plus `"analysesCount": 3` (number of the user's analyses with this `resume_id`).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | Unknown, expired, or another user's resume |
+
+#### API-007 `DELETE /api/v1/resumes/{resumeId}`
+- **Purpose:** delete one resume.
+- **Auth / role:** owner only.
+- **Implements:** FR-006
+
+**Request:** path `resumeId` (uuid).
+
+**Response 204:** no body.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | Unknown, expired, or another user's resume |
+| 409 | ANALYSIS_IN_PROGRESS | An in-flight analysis uses this resume |
+
+#### API-008 `GET /api/v1/job-roles`
+- **Purpose:** active job roles for SCR-03.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-007
+
+**Response 200**
+
+```json
+{ "items": [ { "id": "3c6e0b8a-1d2f-4a5b-9c8d-7e6f5a4b3c2d", "slug": "frontend-developer", "name": "Frontend Developer", "description": "Builds user interfaces for web applications." } ] }
+```
+
+Order: `sort_order ASC, name ASC`. Skills are not returned (users don't need the list, and it keeps the response small).
+
+**Errors:** only the common ones.
+
+#### API-009 `POST /api/v1/analyses`
+- **Purpose:** start an analysis.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-008, FR-009
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `resumeId` | body | string (uuid) | yes | UUID; own, not expired |
+| `jobRoleId` | body | string (uuid) | yes | UUID; active role |
+| `experienceLevel` | body | string | yes | enum `entry`, `mid`, `senior`, `lead` |
+
+```json
+{ "resumeId": "0b9f7a52-2f4c-4c7e-8d0e-3a4b5c6d7e8f", "jobRoleId": "3c6e0b8a-1d2f-4a5b-9c8d-7e6f5a4b3c2d", "experienceLevel": "mid" }
+```
+
+Check order: body validation → resume (404) → role (422) → in-flight (409, pre-check with a `SELECT`, then enforced by the unique index on insert) → quota (403). Processing per §3.5.6 and §4.3.2.
+
+**Response 202** with header `Location: /api/v1/analyses/{id}`
+
+```json
+{
+  "id": "9d3a1c2b-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "status": "queued",
+  "jobRole": { "id": "3c6e0b8a-1d2f-4a5b-9c8d-7e6f5a4b3c2d", "slug": "frontend-developer", "name": "Frontend Developer" },
+  "experienceLevel": "mid",
+  "resumeId": "0b9f7a52-2f4c-4c7e-8d0e-3a4b5c6d7e8f",
+  "resumeDisplayName": "Asha_Verma_Resume.pdf",
+  "overallScore": null,
+  "band": null,
+  "failureCode": null,
+  "createdAt": "2026-10-20T09:17:00.000Z",
+  "completedAt": null
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | Resume unknown, expired or not owned |
+| 422 | INVALID_JOB_ROLE | Role unknown or inactive |
+| 409 | ANALYSIS_IN_PROGRESS | User already has an in-flight analysis |
+| 403 | QUOTA_EXCEEDED | `used >= limit` for current plan; `details: [{ "field": "quota", "issue": "max", "limit": 3 }]` |
+| 503 | SERVICE_UNAVAILABLE | Job could not be queued (FR-008 AC 6) |
+
+#### API-010 `GET /api/v1/analyses`
+- **Purpose:** history, newest first.
+- **Auth / role:** any authenticated user (own analyses only).
+- **Implements:** FR-015, FR-024
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `pageSize` | query | integer | no | 1–50, default 20 |
+| `cursor` | query | string | no | from previous `nextCursor` |
+| `status` | query | string | no | enum `queued`, `processing`, `completed`, `failed` |
+
+**Response 200**
+
+```json
+{
+  "items": [
+    {
+      "id": "9d3a1c2b-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "status": "completed",
+      "jobRole": { "id": "3c6e0b8a-1d2f-4a5b-9c8d-7e6f5a4b3c2d", "slug": "frontend-developer", "name": "Frontend Developer" },
+      "experienceLevel": "mid",
+      "resumeId": "0b9f7a52-2f4c-4c7e-8d0e-3a4b5c6d7e8f",
+      "resumeDisplayName": "Asha_Verma_Resume.pdf",
+      "overallScore": 72,
+      "band": "good",
+      "failureCode": null,
+      "createdAt": "2026-10-20T09:17:00.000Z",
+      "completedAt": "2026-10-20T09:17:19.400Z"
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_FAILED | Bad `pageSize`, `status` or `cursor` |
+
+#### API-011 `GET /api/v1/analyses/{analysisId}`
+- **Purpose:** status and full result (polled by SCR-04).
+- **Auth / role:** owner only. Gating by current plan (FR-013).
+- **Implements:** FR-010, FR-011, FR-012, FR-013, FR-014, FR-018
+
+**Request:** path `analysisId` (uuid).
+
+**Response 200** — `AnalysisSummary` fields plus `failureMessage` and `result`:
+
+```json
+{
+  "id": "9d3a1c2b-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "status": "completed",
+  "jobRole": { "id": "3c6e0b8a-1d2f-4a5b-9c8d-7e6f5a4b3c2d", "slug": "frontend-developer", "name": "Frontend Developer" },
+  "experienceLevel": "mid",
+  "resumeId": "0b9f7a52-2f4c-4c7e-8d0e-3a4b5c6d7e8f",
+  "resumeDisplayName": "Asha_Verma_Resume.pdf",
+  "overallScore": 72,
+  "band": "good",
+  "failureCode": null,
+  "failureMessage": null,
+  "createdAt": "2026-10-20T09:17:00.000Z",
+  "completedAt": "2026-10-20T09:17:19.400Z",
+  "result": {
+    "dimensions": [
+      { "key": "keyword_match", "label": "Keyword match", "weight": 30, "score": 75, "explanation": "Found 9 of 12 skills expected for a mid Frontend Developer." },
+      { "key": "section_structure", "label": "Section structure", "weight": 15, "score": 80, "explanation": "Found: Experience, Education, Skills, Contact details. Missing: Summary." },
+      { "key": "parseability", "label": "ATS parseability", "weight": 15, "score": 100, "explanation": "No layout problems found." },
+      { "key": "experience_relevance", "label": "Experience relevance", "weight": 20, "score": 70, "explanation": "Most roles involve building React interfaces, matching the target role." },
+      { "key": "impact", "label": "Impact", "weight": 20, "score": 50, "explanation": "2 of 8 experience lines include a number or measurable result." }
+    ],
+    "missingSkills": [
+      { "name": "Testing", "importance": "must_have" },
+      { "name": "Accessibility", "importance": "nice_to_have" }
+    ],
+    "suggestions": [
+      { "rank": 1, "issue": "no_metric", "severity": 3, "locked": false, "lineIndex": 14, "originalText": "Worked on the dashboard using React.", "rewriteText": "Built the analytics dashboard in React, cutting page load time by [percent].", "rationale": "Starts with a strong verb and shows a measurable result." },
+      { "rank": 4, "issue": "passive", "severity": 2, "locked": true, "lineIndex": null, "originalText": null, "rewriteText": null, "rationale": null }
+    ],
+    "suggestionsTotal": 6,
+    "suggestionsLocked": 3
+  }
+}
+```
+
+Rules:
+- `result` is `null` unless `status = "completed"`.
+- `dimensions` are always in the order D1–D5 (§3.5.3); `label` values are fixed: `Keyword match`, `Section structure`, `ATS parseability`, `Experience relevance`, `Impact`.
+- `suggestions` contains all suggestions ordered by `rank`; for a Free user, items with `rank > 3` have `locked: true` and `severity`, `lineIndex`, `originalText`, `rewriteText`, `rationale` set to `null`. For Pro, `suggestionsLocked = 0`.
+- `failureMessage` is the §6.3 message for `failureCode` when `status = "failed"`, otherwise `null`.
+- Response header `Retry-After: 2` while `status` is `queued` or `processing` (hint for pollers, `CFG-20`).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | Unknown or another user's analysis |
+
+#### API-012 `DELETE /api/v1/analyses/{analysisId}`
+- **Purpose:** delete one analysis.
+- **Auth / role:** owner only.
+- **Implements:** FR-016
+
+**Request:** path `analysisId` (uuid).
+
+**Response 204:** no body.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | Unknown or another user's analysis |
+| 409 | ANALYSIS_IN_PROGRESS | Status is `queued` or `processing` |
+
+#### API-013 `GET /api/v1/analyses/{analysisId}/report.pdf`
+- **Purpose:** download the PDF report.
+- **Auth / role:** owner only; gating by current plan.
+- **Implements:** FR-017, FR-013 AC 4
+
+**Request:** path `analysisId` (uuid).
+
+**Response 200:** `Content-Type: application/pdf`, `Content-Disposition: attachment; filename="resume-analysis-2026-10-20-frontend-developer.pdf"`, `Cache-Control: no-store`; body = PDF per §4.9 (streamed; no `Content-Length`).
+
+SCR-04 calls it with `fetch` (`credentials: "same-origin"`). On 200 it turns the body into a blob URL, clicks a hidden `<a download="<filename from Content-Disposition>">`, then revokes the URL. On an error it parses the §1.4 body and shows the message inline next to the button.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | Unknown or another user's analysis |
+| 409 | ANALYSIS_NOT_READY | Status is not `completed` |
+
+#### API-014 `GET /api/v1/me/data-summary`
+- **Purpose:** what RO stores about the user.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-023
+
+**Response 200**
+
+```json
+{
+  "resumes": 2,
+  "analyses": 5,
+  "consent": { "version": "2026-10-v1", "acceptedAt": "2026-10-20T09:15:00.000Z" },
+  "retention": { "resumeDays": 30, "analysisDays": 180 },
+  "grievanceEmail": "grievance@surfingbear.com"
+}
+```
+
+`consent` is `null` if the user never consented (latest accepted version otherwise).
+
+**Errors:** only the common ones.
+
+#### API-015 `DELETE /api/v1/me/data`
+- **Purpose:** withdraw consent and erase all RO data of the user.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-020
+
+**Request:** no body. (Typed confirmation happens in SCR-06.)
+
+**Response 204:** no body. Idempotent: calling it with no data also returns 204 (and still writes the audit row with counts 0).
+
+**Errors:** only the common ones.
+
+#### API-016 `GET /api/v1/admin/job-roles`
+- **Purpose:** full catalogue for admins, including inactive roles and skills.
+- **Auth / role:** admin (`ro_admin`).
+- **Implements:** FR-022
+
+**Response 200**
+
+```json
+{
+  "items": [
+    {
+      "id": "3c6e0b8a-1d2f-4a5b-9c8d-7e6f5a4b3c2d",
+      "slug": "frontend-developer",
+      "name": "Frontend Developer",
+      "description": "Builds user interfaces for web applications.",
+      "sortOrder": 10,
+      "isActive": true,
+      "skills": [ { "id": "c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f", "name": "React", "aliases": ["react.js", "reactjs"], "importance": "must_have", "minLevel": "entry", "sortOrder": 30 } ],
+      "createdAt": "2026-10-20T00:00:00.000Z",
+      "updatedAt": "2026-10-20T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+Order: `sort_order, name`; skills by `sort_order, name`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 403 | FORBIDDEN | Not admin |
+
+#### API-017 `POST /api/v1/admin/job-roles`
+- **Purpose:** create a job role with its skills.
+- **Auth / role:** admin.
+- **Implements:** FR-022
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `slug` | body | string | yes | `^[a-z0-9]+(-[a-z0-9]+)*$`, 3–60 chars |
+| `name` | body | string | yes | trimmed, 2–80 chars |
+| `description` | body | string | no (default `""`) | ≤ 300 chars |
+| `sortOrder` | body | integer | no (default 100) | 0–10000 |
+| `isActive` | body | boolean | no (default `true`) | |
+| `skills` | body | `SkillInput[]` | yes | 1–40 items |
+
+**Response 201:** the created role in the API-016 item format.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 403 | FORBIDDEN | Not admin |
+| 409 | ROLE_SLUG_TAKEN | `slug` exists (unique violation on `ux_job_roles_slug`) |
+
+#### API-018 `PATCH /api/v1/admin/job-roles/{jobRoleId}`
+- **Purpose:** edit role fields (not slug, not skills).
+- **Auth / role:** admin.
+- **Implements:** FR-022
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `jobRoleId` | path | uuid | yes | |
+| `name` | body | string | no | 2–80 chars |
+| `description` | body | string | no | ≤ 300 chars |
+| `sortOrder` | body | integer | no | 0–10000 |
+| `isActive` | body | boolean | no | |
+
+At least one body field is required, else `400 VALIDATION_FAILED` (`field: "body"`, `issue: "required"`). `slug` in the body → `400` `unknown_field`.
+
+**Response 200:** the updated role in the API-016 item format.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 403 | FORBIDDEN | Not admin |
+| 404 | NOT_FOUND | Unknown role |
+
+#### API-019 `PUT /api/v1/admin/job-roles/{jobRoleId}/skills`
+- **Purpose:** replace a role's whole skill list.
+- **Auth / role:** admin.
+- **Implements:** FR-022
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `jobRoleId` | path | uuid | yes | |
+| `skills` | body | `SkillInput[]` | yes | 1–40 items, names unique case-insensitively |
+
+In one transaction: delete all TBL-002 rows of the role, insert the new ones, update `job_roles.updated_at`, write the audit row. Past analyses are unaffected (TBL-007 holds copies). In-flight analyses that already loaded skills use the old list.
+
+**Response 200:** the role in the API-016 item format.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 403 | FORBIDDEN | Not admin |
+| 404 | NOT_FOUND | Unknown role |
+
+#### API-020 `GET /api/health/live`
+- **Purpose:** liveness for ECS (process is up). No DB/Redis check.
+- **Auth / role:** public; not rate limited; logged at `debug`.
+- **Implements:** NFR-005
+
+**Response 200:** `{ "status": "ok" }`
+
+#### API-021 `GET /api/health/ready`
+- **Purpose:** readiness for the ALB target group and canaries.
+- **Auth / role:** public; not rate limited; logged at `debug`.
+- **Implements:** NFR-005, NFR-015
+
+Checks (each with a 1 s timeout): `db` = `SELECT 1`; `redis` = `PING`; `jwks` = at least one key cached.
+
+**Response 200:** `{ "status": "ok", "checks": { "db": "ok", "redis": "ok", "jwks": "ok" } }`
+
+**Response 503:** `{ "status": "error", "checks": { "db": "ok", "redis": "error", "jwks": "ok" } }` — this is the one response that does **not** use the §1.4 error format, because load balancers and canaries read `checks`.
+
+### 6.3 Error code list
+
+`message` is the exact English text returned in `error.message` (and the default for `errors.<CODE>` in `en.json`). "MB" in messages means MiB (`CFG-01`).
+
+| ID | Code | HTTP | Message | When it happens |
+|---|---|---|---|---|
+| ERR-001 | UNAUTHENTICATED | 401 | Please sign in to continue. | Missing/invalid/expired token (CR-003) |
+| ERR-002 | FORBIDDEN | 403 | You do not have permission to do this. | Non-admin on admin API; `Origin` check failed (CR-021) |
+| ERR-003 | VALIDATION_FAILED | 400 | Some fields are missing or invalid. | DTO validation, bad cursor, unknown field, body too large |
+| ERR-004 | NOT_FOUND | 404 | We could not find what you were looking for. | Unknown route or ID, other user's resource (CR-008), expired resume |
+| ERR-005 | CONSENT_REQUIRED | 403 | Please review and accept the privacy notice before uploading. | API-004 without current consent (FR-002) |
+| ERR-006 | FILE_REQUIRED | 400 | Please choose a file to upload. | API-004 without a file part |
+| ERR-007 | FILE_TOO_LARGE | 413 | The file is larger than 5 MB. | File > `CFG-01` |
+| ERR-008 | UNSUPPORTED_FILE_TYPE | 415 | Please upload a PDF or Word (.docx) file. | Not PDF/DOCX by content; zip limits exceeded |
+| ERR-009 | FILE_ENCRYPTED | 422 | This file is password-protected. Please remove the password and upload it again. | Encrypted PDF/DOCX |
+| ERR-010 | TOO_MANY_PAGES | 422 | The PDF has more than 5 pages. Please upload a shorter resume. | PDF pages > `CFG-02` |
+| ERR-011 | TEXT_NOT_EXTRACTABLE | 422 | We could not read text from this file. If it is a scanned image, please upload a text-based PDF or DOCX. | Text < `CFG-03`, parser error, timeout `CFG-19` |
+| ERR-012 | TEXT_TOO_LONG | 422 | The resume has too much text (over 30,000 characters). | Text > `CFG-04` |
+| ERR-013 | RESUME_LIMIT_REACHED | 409 | You can keep up to 10 resumes. Delete one to upload another. | Stored resumes = `CFG-18` |
+| ERR-014 | QUOTA_EXCEEDED | 403 | You have used all your analyses for this month. | FR-009 AC 2 |
+| ERR-015 | ANALYSIS_IN_PROGRESS | 409 | An analysis is already running. Please wait for it to finish. | FR-008 AC 2, FR-006 AC 4, FR-016 AC 2 |
+| ERR-016 | INVALID_JOB_ROLE | 422 | This job role is not available. Please choose another. | Unknown/inactive role in API-009 |
+| ERR-017 | ANALYSIS_NOT_READY | 409 | The report is available once the analysis has completed. | API-013 on non-completed analysis |
+| ERR-018 | RATE_LIMITED | 429 | Too many requests. Please try again in a moment. | CR-024 |
+| ERR-019 | SERVICE_UNAVAILABLE | 503 | The service is temporarily unavailable. Please try again shortly. | DB/Redis unreachable, job not queued, no JWKS keys |
+| ERR-020 | INTERNAL_ERROR | 500 | Something went wrong on our side. Please try again. | Unhandled exception |
+| ERR-021 | ROLE_SLUG_TAKEN | 409 | A job role with this slug already exists. | API-017 duplicate slug |
+| ERR-022 | AI_UNAVAILABLE | — (analysis `failureCode`) | Our analysis service is busy right now. Your monthly quota was not used — please try again. | AI timeout/error after 3 attempts, config error, daily cap, enqueue failure |
+| ERR-023 | AI_INVALID_OUTPUT | — (analysis `failureCode`) | We could not complete this analysis. Your monthly quota was not used — please try again. | Last AI attempt failed schema validation |
+| ERR-024 | PROCESSING_TIMEOUT | — (analysis `failureCode`) | This analysis took too long and was stopped. Your monthly quota was not used — please try again. | Not finished within `CFG-14` (FR-019) |
 
 ---
 
@@ -1474,3 +2097,4 @@ _Written in a later revision._
 | v0.2 | 2026-10-20 | Vaishali Naruka | Section 3: glossary, FR-001 – FR-024, NFR-001 – NFR-020, assumptions A-01 – A-11, constants CFG-01 – CFG-32, scoring and redaction rules, privacy notice, screens SCR-01 – SCR-07, test fixtures | First draft | FR-001 – FR-024, NFR-001 – NFR-020 |
 | v0.3 | 2026-10-20 | Vaishali Naruka | Section 4: components, flows, integrations, stack reasons, env config, AI contract, PDF layout, observability, local setup, queue and worker rules (§4.11). FR-018 AC 5, FR-021 AC 1 and NFR-006 made explicit about outages longer than `CFG-14` and resumes with in-flight analyses | First draft; gaps found while drawing the flows | CMP-001 – CMP-019, FR-018, FR-021, NFR-006 |
 | v0.4 | 2026-10-20 | Vaishali Naruka | Section 5: ERD, TBL-001 – TBL-010, indexes, delete rules, erase order, seed catalogue (6 roles) | First draft | TBL-001 – TBL-010 |
+| v0.5 | 2026-10-20 | Vaishali Naruka | Section 6: common API rules, shared objects, API-001 – API-021, error list ERR-001 – ERR-024. Upload check order changed so duplicate and resume-limit checks come after extraction (FR-003 AC 9, §4.3.1); `duplicate` added to `details[].issue` (§1.4); zip-limit error named in CR-023 | First draft; the duplicate check needs the extracted text, so the old order could not be implemented | API-001 – API-021, ERR-001 – ERR-024, FR-003, CR-023 |
