@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Author | Vaishali Naruka |
-| Version | v0.3 |
+| Version | v0.4 |
 | Last updated | 2026-10-20 |
 | Status | Draft |
 
@@ -1061,7 +1061,396 @@ Worker graceful shutdown: on `SIGTERM`, `worker.close()` waits up to 60 s for ac
 
 ## 5. ERD and database design
 
-_Written in a later revision._
+General rules:
+- PostgreSQL 16, one database `ro`, schema `public`. Extension `pgcrypto` (for `gen_random_uuid()`).
+- Enumerations are `text` columns with a `CHECK (... IN (...))` constraint, not PostgreSQL enum types (adding a value is a one-line migration, CR-039).
+- All timestamps are `timestamptz`, stored in UTC.
+- **No soft delete anywhere.** Every delete is a hard delete; retention and erasure must actually remove data (CR-027, FR-020).
+- There is **no users table**: `user_id` is the platform `sub` UUID (CR-006). It is not a foreign key.
+- `updated_at` is set by the application (Prisma `@updatedAt`), not by a trigger.
+- Prisma schema maps models to these exact table/column names with `@@map` / `@map`. CHECK constraints and partial indexes are added by hand in the migration SQL.
+
+### 5.1 ERD
+
+```mermaid
+erDiagram
+  job_roles ||--o{ job_role_skills : "has"
+  job_roles ||--o{ analyses : "target of"
+  resumes |o--o{ analyses : "analysed in (SET NULL on delete)"
+  analyses ||--|{ analysis_dimension_scores : "has 5 (when completed)"
+  analyses ||--o{ analysis_missing_skills : "has"
+  analyses ||--o{ analysis_suggestions : "has 0..10"
+  consents }o..|| PLATFORM_USER : "user_id"
+  resumes }o..|| PLATFORM_USER : "user_id"
+  analyses }o..|| PLATFORM_USER : "user_id"
+  usage_counters }o..|| PLATFORM_USER : "user_id"
+
+  job_roles {
+    uuid id PK
+    text slug UK
+    text name
+    boolean is_active
+  }
+  job_role_skills {
+    uuid id PK
+    uuid job_role_id FK
+    text name
+    text importance
+    text min_level
+  }
+  consents {
+    uuid id PK
+    uuid user_id
+    text notice_version
+  }
+  resumes {
+    uuid id PK
+    uuid user_id
+    bytea text_enc
+    char text_sha256
+    timestamptz expires_at
+  }
+  analyses {
+    uuid id PK
+    uuid user_id
+    uuid resume_id FK
+    uuid job_role_id FK
+    text status
+    smallint overall_score
+  }
+  analysis_dimension_scores {
+    uuid analysis_id PK
+    text dimension PK
+    smallint score
+  }
+  analysis_missing_skills {
+    uuid id PK
+    uuid analysis_id FK
+    text skill_name
+  }
+  analysis_suggestions {
+    uuid id PK
+    uuid analysis_id FK
+    smallint rank
+  }
+  usage_counters {
+    uuid user_id PK
+    char period PK
+    int used
+  }
+  audit_events {
+    bigint id PK
+    text event_type
+    char user_hash
+  }
+```
+
+`PLATFORM_USER` is not a table in RO; dotted lines show the logical owner.
+
+### 5.2 Tables
+
+#### TBL-001 `job_roles`
+Purpose: catalogue of target job roles (FR-007, FR-022).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| slug | text | NO | UK | — | `CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$' AND char_length(slug) BETWEEN 3 AND 60)`; immutable after insert (API-018 has no slug field) |
+| name | text | NO | | — | `CHECK (char_length(name) BETWEEN 2 AND 80)` |
+| description | text | NO | | `''` | `CHECK (char_length(description) <= 300)` |
+| sort_order | integer | NO | | `100` | `CHECK (sort_order BETWEEN 0 AND 10000)` |
+| is_active | boolean | NO | | `true` | Inactive roles are hidden from API-008 and rejected by API-009 |
+| created_at | timestamptz | NO | | `now()` | |
+| updated_at | timestamptz | NO | | `now()` | |
+
+#### TBL-002 `job_role_skills`
+Purpose: skills expected for a role, used by D1 and missing skills (§3.5.3, §3.5.4).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| job_role_id | uuid | NO | FK → `job_roles.id` | — | `ON DELETE CASCADE` |
+| name | text | NO | | — | Display name, `CHECK (char_length(name) BETWEEN 1 AND 60)`; unique per role case-insensitively (`ux_job_role_skills_role_name`) |
+| aliases | text[] | NO | | `'{}'` | Lowercase alternative spellings, each 1–60 chars, max 10 (checked in DTO; `CHECK (cardinality(aliases) <= 10)`) |
+| importance | text | NO | | — | `CHECK (importance IN ('must_have','nice_to_have'))` |
+| min_level | text | NO | | `'entry'` | `CHECK (min_level IN ('entry','mid','senior','lead'))`; skill applies to levels ≥ this |
+| sort_order | integer | NO | | `100` | `CHECK (sort_order BETWEEN 0 AND 10000)` |
+| created_at | timestamptz | NO | | `now()` | |
+
+#### TBL-003 `consents`
+Purpose: proof of consent per notice version (FR-002, DPDP).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| user_id | uuid | NO | | — | Platform `sub` |
+| notice_version | text | NO | | — | `CHECK (char_length(notice_version) BETWEEN 1 AND 20)`; equals `CFG-30` when written |
+| accepted_at | timestamptz | NO | | `now()` | |
+| — | | | UK | | `ux_consents_user_version (user_id, notice_version)` |
+
+No IP address or user agent is stored (data minimisation).
+
+#### TBL-004 `resumes`
+Purpose: one uploaded resume, as encrypted redacted text plus metadata (FR-003 – FR-006).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| user_id | uuid | NO | | — | |
+| display_name | text | NO | | — | Original file name with any path removed, control characters stripped, cut to `CFG-31` (120) chars; personal data (never logged). `CHECK (char_length(display_name) BETWEEN 1 AND 120)` |
+| file_type | text | NO | | — | `CHECK (file_type IN ('pdf','docx'))` — from magic bytes |
+| file_size_bytes | integer | NO | | — | `CHECK (file_size_bytes BETWEEN 1 AND 5242880)` (CFG-01) |
+| page_count | smallint | NO | | — | `CHECK (page_count >= 1)`; PDF ≤ 5 is enforced by the API (CFG-02), DOCX may be estimated (§3.5.1) |
+| char_count | integer | NO | | — | Normalised text length; `CHECK (char_count BETWEEN 400 AND 30000)` (CFG-03, CFG-04) |
+| text_enc | bytea | NO | | — | `iv (12 bytes) ‖ authTag (16 bytes) ‖ ciphertext` of the **redacted** UTF-8 text, AES-256-GCM with `RESUME_TEXT_KEY`; AAD = the row `id` as 16 bytes, so a ciphertext cannot be moved to another row |
+| enc_key_id | text | NO | | — | `RESUME_TEXT_KEY_ID` at write time, e.g. `k1` |
+| text_sha256 | char(64) | NO | | — | Lowercase hex SHA-256 of the normalised **un-redacted** text; used only for duplicate detection (FR-003 AC 8) |
+| signals | jsonb | NO | | — | §3.5.1 step 5; `CHECK (jsonb_typeof(signals) = 'object')` |
+| created_at | timestamptz | NO | | `now()` | |
+| expires_at | timestamptz | NO | | — | `created_at + interval '30 days'` (CFG-09), set by the app; `CHECK (expires_at > created_at)` |
+| — | | | UK | | `ux_resumes_user_sha (user_id, text_sha256)` |
+
+The application generates `id` (UUID v4) before encrypting, because it is the AAD.
+
+#### TBL-005 `analyses`
+Purpose: one analysis run and its overall result (FR-008 – FR-019).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | Also the BullMQ `jobId` |
+| user_id | uuid | NO | | — | |
+| resume_id | uuid | YES | FK → `resumes.id` | — | `ON DELETE SET NULL` (FR-006 AC 3) |
+| resume_display_name | text | NO | | — | Snapshot of `resumes.display_name` at creation, so history still shows it after the resume is deleted; `CHECK (char_length(resume_display_name) BETWEEN 1 AND 120)` |
+| job_role_id | uuid | NO | FK → `job_roles.id` | — | `ON DELETE RESTRICT` (roles are never deleted) |
+| job_role_name | text | NO | | — | Snapshot of the role name at creation (a later rename does not change history) |
+| job_role_slug | text | NO | | — | Snapshot, used in the PDF filename |
+| experience_level | text | NO | | — | `CHECK (experience_level IN ('entry','mid','senior','lead'))` |
+| status | text | NO | | `'queued'` | `CHECK (status IN ('queued','processing','completed','failed'))` |
+| failure_code | text | YES | | `NULL` | `CHECK (failure_code IN ('AI_UNAVAILABLE','AI_INVALID_OUTPUT','PROCESSING_TIMEOUT'))` |
+| overall_score | smallint | YES | | `NULL` | `CHECK (overall_score BETWEEN 0 AND 100)` |
+| band | text | YES | | `NULL` | `CHECK (band IN ('needs_work','fair','good','excellent'))` |
+| plan_at_creation | text | NO | | — | `CHECK (plan_at_creation IN ('free','pro'))`; for metrics only — gating uses the current plan (FR-013) |
+| quota_period | char(7) | NO | | — | `YYYY-MM` IST at creation; `CHECK (quota_period ~ '^[0-9]{4}-(0[1-9]|1[0-2])$')` |
+| quota_released | boolean | NO | | `false` | `true` after a failed analysis released its quota |
+| ai_model | text | YES | | `NULL` | `BEDROCK_MODEL_ID` or `mock` |
+| prompt_version | text | YES | | `NULL` | e.g. `p1` |
+| ai_input_tokens | integer | YES | | `NULL` | `CHECK (ai_input_tokens >= 0)` |
+| ai_output_tokens | integer | YES | | `NULL` | `CHECK (ai_output_tokens >= 0)` |
+| created_at | timestamptz | NO | | `now()` | |
+| started_at | timestamptz | YES | | `NULL` | First claim by the worker |
+| completed_at | timestamptz | YES | | `NULL` | Time the analysis reached `completed` **or** `failed` |
+
+Table-level checks:
+- `ck_analyses_completed`: `(status = 'completed') = (overall_score IS NOT NULL AND band IS NOT NULL)`
+- `ck_analyses_failed`: `(status = 'failed') = (failure_code IS NOT NULL)`
+- `ck_analyses_final_time`: `status NOT IN ('completed','failed') OR completed_at IS NOT NULL`
+- `ck_analyses_released`: `NOT quota_released OR status = 'failed'`
+
+#### TBL-006 `analysis_dimension_scores`
+Purpose: the 5 dimension scores of a completed analysis (FR-010).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| analysis_id | uuid | NO | PK, FK → `analyses.id` | — | `ON DELETE CASCADE` |
+| dimension | text | NO | PK | — | `CHECK (dimension IN ('keyword_match','section_structure','parseability','experience_relevance','impact'))` |
+| weight | smallint | NO | | — | 30 / 15 / 15 / 20 / 20 per §3.5.3; `CHECK (weight BETWEEN 0 AND 100)` |
+| score | smallint | NO | | — | `CHECK (score BETWEEN 0 AND 100)` |
+| explanation | text | NO | | — | `CHECK (char_length(explanation) BETWEEN 1 AND 300)` |
+
+#### TBL-007 `analysis_missing_skills`
+Purpose: missing skills of a completed analysis (FR-011). Skill name is copied (no FK to TBL-002), so later catalogue edits don't change past results.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| analysis_id | uuid | NO | FK → `analyses.id` | — | `ON DELETE CASCADE` |
+| skill_name | text | NO | | — | `CHECK (char_length(skill_name) BETWEEN 1 AND 60)` |
+| importance | text | NO | | — | `CHECK (importance IN ('must_have','nice_to_have'))` |
+| position | smallint | NO | | — | 1-based display order per FR-011 AC 3; `CHECK (position >= 1)` |
+| — | | | UK | | `ux_missing_skills_analysis_position (analysis_id, position)` |
+
+#### TBL-008 `usage_counters`
+Purpose: analyses used per user per quota period (FR-009).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| user_id | uuid | NO | PK | — | |
+| period | char(7) | NO | PK | — | `YYYY-MM` IST, same check as `analyses.quota_period` |
+| used | integer | NO | | `0` | `CHECK (used >= 0)` |
+| updated_at | timestamptz | NO | | `now()` | |
+
+#### TBL-009 `audit_events`
+Purpose: append-only record of privacy-relevant and admin actions, without personal data (FR-020, FR-022, DPDP accountability).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | bigint | NO | PK | `GENERATED ALWAYS AS IDENTITY` | |
+| event_type | text | NO | | — | `CHECK (event_type IN ('consent_given','data_erased','job_role_changed'))` |
+| user_hash | char(64) | NO | | — | Lowercase hex SHA-256 of the acting user's `userId` string. Not reversible without knowing the userId, but lets the platform confirm "user X's erasure happened on date Y" |
+| metadata | jsonb | NO | | `'{}'` | No personal data. `consent_given`: `{ "noticeVersion" }`; `data_erased`: `{ "resumes": n, "analyses": n }`; `job_role_changed`: `{ "jobRoleId", "action": "create"\|"update"\|"replace_skills", "fields": [..] }` |
+| created_at | timestamptz | NO | | `now()` | |
+
+The DB role used by the app has `INSERT, SELECT, DELETE` on this table but not `UPDATE` (DELETE is needed only by the purge).
+
+#### TBL-010 `analysis_suggestions`
+Purpose: rewrite suggestions of a completed analysis, all of them, regardless of plan (FR-012, FR-013).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| analysis_id | uuid | NO | FK → `analyses.id` | — | `ON DELETE CASCADE` |
+| rank | smallint | NO | | — | `CHECK (rank BETWEEN 1 AND 10)` (CFG-08) |
+| line_index | integer | NO | | — | `CHECK (line_index >= 0)` |
+| issue | text | NO | | — | `CHECK (issue IN ('weak_verb','no_metric','vague','too_long','passive','jargon'))` |
+| severity | smallint | NO | | — | `CHECK (severity BETWEEN 1 AND 3)` |
+| original_text | text | NO | | — | Line of the **redacted** text; `CHECK (char_length(original_text) BETWEEN 1 AND 1000)` |
+| rewrite_text | text | NO | | — | `CHECK (char_length(rewrite_text) BETWEEN 10 AND 300)` |
+| rationale | text | NO | | — | `CHECK (char_length(rationale) BETWEEN 1 AND 200)` |
+| — | | | UK | | `ux_suggestions_analysis_rank (analysis_id, rank)`, `ux_suggestions_analysis_line (analysis_id, line_index)` |
+
+`original_text` and `rewrite_text` are not app-encrypted: they hold only redacted text (no contact data), are protected by RDS encryption at rest, and must be read on every result view and PDF. Trade-off accepted.
+
+### 5.3 Indexes
+
+| Table | Index | Columns | Why (query it serves) |
+|---|---|---|---|
+| job_roles | `ux_job_roles_slug` (unique) | `slug` | Slug uniqueness (FR-022 AC 2) |
+| job_roles | `ix_job_roles_active_sort` | `(is_active, sort_order, name)` | API-008 `WHERE is_active ORDER BY sort_order, name` |
+| job_role_skills | `ux_job_role_skills_role_name` (unique) | `(job_role_id, lower(name))` | No duplicate skill per role |
+| job_role_skills | `ix_job_role_skills_role_sort` | `(job_role_id, sort_order)` | Worker loads a role's skills in order (§3.5.4) |
+| consents | `ux_consents_user_version` (unique) | `(user_id, notice_version)` | `hasCurrentConsent` lookup + idempotent insert (FR-002 AC 3) |
+| resumes | `ux_resumes_user_sha` (unique) | `(user_id, text_sha256)` | Duplicate detection (FR-003 AC 8) |
+| resumes | `ix_resumes_user_created` | `(user_id, created_at DESC, id DESC)` | API-005 list; count for `CFG-18` limit |
+| resumes | `ix_resumes_expires_at` | `(expires_at)` | Purge `WHERE expires_at <= now()` (FR-021) |
+| analyses | `ux_analyses_user_in_flight` (unique, partial) | `(user_id) WHERE status IN ('queued','processing')` | One in-flight analysis per user under concurrency (FR-008 AC 2) |
+| analyses | `ix_analyses_user_created` | `(user_id, created_at DESC, id DESC)` | API-010 keyset pagination (§6.1) |
+| analyses | `ix_analyses_in_flight_created` (partial) | `(created_at) WHERE status IN ('queued','processing')` | Stuck sweep every minute (FR-019) |
+| analyses | `ix_analyses_created_at` | `(created_at)` | Retention purge (FR-021) |
+| analyses | `ix_analyses_resume_id` | `(resume_id)` | `ON DELETE SET NULL` on resume delete; in-flight check in FR-006 AC 4 and FR-021 |
+| analyses | `ix_analyses_job_role_id` | `(job_role_id)` | FK `RESTRICT` check |
+| analysis_missing_skills | `ux_missing_skills_analysis_position` (unique) | `(analysis_id, position)` | Load in order; FK cascade lookup |
+| analysis_suggestions | `ux_suggestions_analysis_rank` (unique) | `(analysis_id, rank)` | Load in rank order; FK cascade lookup |
+| audit_events | `ix_audit_events_created_at` | `(created_at)` | Purge (FR-021) |
+
+### 5.4 Relationships and delete rules
+
+| From | To | Cardinality | On delete |
+|---|---|---|---|
+| `job_role_skills.job_role_id` | `job_roles.id` | many → 1 | `CASCADE` (in practice roles are never deleted) |
+| `analyses.job_role_id` | `job_roles.id` | many → 1 | `RESTRICT` — a role with analyses cannot be deleted; admins deactivate (FR-022 AC 5) |
+| `analyses.resume_id` | `resumes.id` | many → 0..1 | `SET NULL` — history survives deletion of the resume (FR-006 AC 3) |
+| `analysis_dimension_scores.analysis_id` | `analyses.id` | 5 → 1 (0 until completed) | `CASCADE` |
+| `analysis_missing_skills.analysis_id` | `analyses.id` | many → 1 | `CASCADE` |
+| `analysis_suggestions.analysis_id` | `analyses.id` | 0..10 → 1 | `CASCADE` |
+| `consents`, `resumes`, `analyses`, `usage_counters` `.user_id` | platform user (no table) | many → 1 | Deleted by the app in FR-020 (erase all) |
+
+**What "erase all my data" deletes** (FR-020, one transaction, in this order): `analyses WHERE user_id` (cascades to TBL-006, TBL-007, TBL-010) → `resumes WHERE user_id` → `consents WHERE user_id` → `usage_counters WHERE user_id`; then inserts one `audit_events` row. Nothing with the `user_id` remains afterwards. Remaining data: the `audit_events` rows with `user_hash`, deleted after `CFG-11` (365 days). RDS backups keep deleted rows until they expire (7 days, NFR-014); this is stated in the notice's retention rule set and accepted.
+
+### 5.5 Seed data (job-role catalogue)
+
+`prisma/seed.ts` upserts by `slug` (roles) and by `(job_role_id, lower(name))` (skills); running it twice changes nothing. Columns: skill name; aliases; importance (M = `must_have`, N = `nice_to_have`); min level (E = entry, M = mid, S = senior, L = lead). `sort_order` = row number × 10.
+
+**`frontend-developer`** — Frontend Developer — "Builds user interfaces for web applications." (role `sort_order` 10)
+
+| Skill | Aliases | Imp. | Min |
+|---|---|---|---|
+| JavaScript | js, es6, ecmascript | M | E |
+| TypeScript | ts | M | E |
+| React | react.js, reactjs | M | E |
+| HTML | html5 | M | E |
+| CSS | css3, scss, sass | M | E |
+| Next.js | nextjs | N | E |
+| Redux | redux toolkit, zustand | N | E |
+| Testing | jest, react testing library, vitest, cypress, playwright | M | M |
+| Accessibility | a11y, wcag, aria | N | M |
+| Web performance | core web vitals, lighthouse, lazy loading | N | M |
+| Git | github, gitlab | M | E |
+| REST APIs | restful, rest api, rest apis | M | E |
+| CI/CD | github actions, jenkins, continuous integration | N | M |
+| Frontend architecture | micro-frontends, design system, monorepo | M | S |
+| Mentoring | mentored, code reviews | N | S |
+
+**`backend-developer`** — Backend Developer — "Builds server-side services, APIs and data storage." (role `sort_order` 20)
+
+| Skill | Aliases | Imp. | Min |
+|---|---|---|---|
+| Node.js | nodejs, node | N | E |
+| Java | spring boot | N | E |
+| SQL | postgresql, postgres, mysql | M | E |
+| REST APIs | restful, rest api, rest apis | M | E |
+| Git | github, gitlab | M | E |
+| Unit testing | jest, junit, mocha, testing | M | E |
+| Docker | containers, dockerfile | M | M |
+| Redis | caching, cache | N | M |
+| Message queues | kafka, rabbitmq, sqs, bullmq | N | M |
+| AWS | amazon web services, ec2, ecs, lambda, s3 | N | M |
+| Microservices | microservice, service-oriented | N | M |
+| System design | distributed systems, scalability, high availability | M | S |
+| Security | owasp, oauth, jwt | N | M |
+| Mentoring | mentored, code reviews | N | S |
+
+**`data-analyst`** — Data Analyst — "Turns data into reports and business insights." (role `sort_order` 30)
+
+| Skill | Aliases | Imp. | Min |
+|---|---|---|---|
+| SQL | postgresql, mysql, bigquery | M | E |
+| Excel | spreadsheets, google sheets, pivot tables, vlookup | M | E |
+| Python | pandas, numpy | M | E |
+| Data visualisation | data visualization, tableau, power bi, looker | M | E |
+| Statistics | statistical analysis, hypothesis testing, regression | M | E |
+| Dashboards | dashboard, reporting | N | E |
+| A/B testing | ab testing, experimentation | N | M |
+| ETL | data pipelines, dbt, airflow | N | M |
+| Stakeholder management | stakeholders, business partners | N | M |
+| Data modelling | data modeling, star schema | N | S |
+
+**`product-manager`** — Product Manager — "Owns product direction, priorities and delivery." (role `sort_order` 40)
+
+| Skill | Aliases | Imp. | Min |
+|---|---|---|---|
+| Product roadmap | roadmap, roadmapping | M | E |
+| User research | customer interviews, user interviews, usability testing | M | E |
+| Agile | scrum, kanban, sprint | M | E |
+| Requirements | prd, user stories, product requirements | M | E |
+| Analytics | mixpanel, amplitude, google analytics, metrics | M | E |
+| Prioritisation | prioritization, rice, moscow | N | E |
+| Stakeholder management | stakeholders, cross-functional | M | M |
+| A/B testing | ab testing, experimentation | N | M |
+| Go-to-market | gtm, product launch, launches | N | M |
+| Product strategy | product vision, product strategy | M | S |
+| P&L ownership | p&l, revenue ownership, business case | N | L |
+
+**`ui-ux-designer`** — UI/UX Designer — "Designs usable, accessible digital products." (role `sort_order` 50)
+
+| Skill | Aliases | Imp. | Min |
+|---|---|---|---|
+| Figma | figjam | M | E |
+| Wireframing | wireframes, low-fidelity | M | E |
+| Prototyping | prototypes, high-fidelity | M | E |
+| User research | usability testing, user interviews | M | E |
+| Visual design | typography, colour theory, color theory | M | E |
+| Design systems | design system, component library | N | M |
+| Accessibility | a11y, wcag | N | M |
+| Interaction design | micro-interactions, motion design | N | M |
+| HTML/CSS | html, css | N | E |
+| Design leadership | design critiques, mentored designers | N | S |
+
+**`digital-marketing-specialist`** — Digital Marketing Specialist — "Plans and runs online marketing campaigns." (role `sort_order` 60)
+
+| Skill | Aliases | Imp. | Min |
+|---|---|---|---|
+| SEO | search engine optimization, search engine optimisation | M | E |
+| Google Ads | sem, ppc, adwords | M | E |
+| Social media marketing | instagram, linkedin ads, meta ads, facebook ads | M | E |
+| Content marketing | copywriting, blogging | M | E |
+| Google Analytics | ga4, universal analytics | M | E |
+| Email marketing | mailchimp, newsletters | N | E |
+| Marketing automation | hubspot, marketo | N | M |
+| Conversion rate optimisation | cro, conversion rate optimization, landing pages | N | M |
+| Budget management | marketing budget, roas | N | S |
+| Campaign strategy | campaign planning, brand strategy | M | S |
+
+Note: the term `java` matches only the whole word, so `JavaScript` does not count as Java (§3.5.4).
 
 ---
 
@@ -1083,4 +1472,5 @@ _Written in a later revision._
 |---|---|---|---|---|---|
 | v0.1 | 2026-10-20 | Vaishali Naruka | Sections 1–2: common requirements and coding conventions | First draft | CR-001 – CR-041 |
 | v0.2 | 2026-10-20 | Vaishali Naruka | Section 3: glossary, FR-001 – FR-024, NFR-001 – NFR-020, assumptions A-01 – A-11, constants CFG-01 – CFG-32, scoring and redaction rules, privacy notice, screens SCR-01 – SCR-07, test fixtures | First draft | FR-001 – FR-024, NFR-001 – NFR-020 |
-| v0.3 | 2026-10-20 | Vaishali Naruka | Section 4: components, flows, integrations, stack reasons, env config, AI contract, PDF layout, observability, local setup | First draft | CMP-001 – CMP-019 |
+| v0.3 | 2026-10-20 | Vaishali Naruka | Section 4: components, flows, integrations, stack reasons, env config, AI contract, PDF layout, observability, local setup, queue and worker rules (§4.11). FR-018 AC 5, FR-021 AC 1 and NFR-006 made explicit about outages longer than `CFG-14` and resumes with in-flight analyses | First draft; gaps found while drawing the flows | CMP-001 – CMP-019, FR-018, FR-021, NFR-006 |
+| v0.4 | 2026-10-20 | Vaishali Naruka | Section 5: ERD, TBL-001 – TBL-010, indexes, delete rules, erase order, seed catalogue (6 roles) | First draft | TBL-001 – TBL-010 |
