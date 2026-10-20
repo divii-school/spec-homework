@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Author | Kakali Dinda |
-| Version | v0.3 |
+| Version | v0.4 |
 | Last updated | 2026-10-20 |
 | Status | Draft |
 
@@ -27,10 +27,10 @@ The module does **not** sign users up or log them in. The SurfingBear platform d
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-001 | Authentication | Every request to `/api/resume-optimizer/v1/*` MUST carry the platform access token in the httpOnly cookie `sb_access` (set by the platform on domain `.surfingbear.com`, `Secure`, `SameSite=Lax`). The module never reads tokens from `localStorage`, query strings or request bodies. An `Authorization: Bearer <token>` header is accepted **only** when `NODE_ENV` is `local` or `test` (for curl and automated tests). | Unit test of `AuthGuard`; e2e test that a Bearer header is rejected with `401 UNAUTHENTICATED` in `staging` config |
+| CR-001 | Authentication | Every request to `/api/resume-optimizer/v1/*` MUST carry the platform access token in the httpOnly cookie `sb_access` (set by the platform on domain `.surfingbear.com`, `Secure`, `SameSite=Lax`). The module never reads tokens from `localStorage`, query strings or request bodies. An `Authorization: Bearer <token>` header is accepted **only** when `APP_ENV` is `local` or `test` (for curl and automated tests). | Unit test of `JwtAuthGuard`; e2e test that a Bearer header is rejected with `401 UNAUTHENTICATED` in `staging` config |
 | CR-002 | Authentication | The token is a JWT signed with RS256 by the platform. The module verifies: signature against the platform JWKS at `K-01 PLATFORM_JWKS_URL`; `iss` equals `K-02 PLATFORM_ISSUER`; `aud` contains `surfingbear-web`; `exp` is in the future with 30 s allowed clock skew; `nbf` (if present) is in the past with 30 s skew; `sub` is a UUID. Any failure → `401 UNAUTHENTICATED` (ERR-001). The module never issues, refreshes or revokes tokens. | Unit tests with a test key pair: bad signature, wrong `iss`, wrong `aud`, expired, `sub` not UUID — each returns ERR-001 |
 | CR-003 | Authentication | JWKS keys are cached in process memory for 10 minutes. When a token's `kid` is not in the cache, the module refetches JWKS immediately, but at most once per 60 seconds per process; if the `kid` is still unknown the request gets ERR-001. If the JWKS endpoint is unreachable and the cache is still valid, the cached keys are used; if the cache is empty or older than 24 hours, requests get `503 SERVICE_UNAVAILABLE` (ERR-024). | Unit test with a mocked JWKS server: rotation, outage with warm cache, outage with cold cache |
-| CR-004 | Authentication | Claims the module uses: `sub` (platform user ID, UUID) → `userId`; `plan` (`"free"` or `"premium"`; a missing or unknown value is treated as `"free"`); `roles` (string array; the module only looks for `"ro_admin"`). No other claim is trusted. The user's email, name and phone are **not** read from the token and are never stored. | Code review of `AuthGuard`; unit test that a token without `plan` is treated as free |
+| CR-004 | Authentication | Claims the module uses: `sub` (platform user ID, UUID) → `userId`; `plan` (`"free"` or `"premium"`; a missing or unknown value is treated as `"free"`); `roles` (string array; the module only looks for `"ro_admin"`). No other claim is trusted. The user's email, name and phone are **not** read from the token and are never stored. | Code review of `JwtAuthGuard`; unit test that a token without `plan` is treated as free |
 | CR-005 | Authentication | Plan changes take effect on the next request that carries a new token. The platform access-token lifetime is 15 minutes (platform setting, not controlled here), so an upgrade is visible to this module within 15 minutes at most. | Documented assumption A-03; no test in this module |
 | CR-006 | Authentication | State-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) MUST carry an `Origin` header equal to `K-03 WEB_ORIGIN`. Otherwise → `403 FORBIDDEN` (ERR-002). This is the CSRF defence (the cookie is `SameSite=Lax`, and the API is same-origin with the web app, see CR-022). | e2e test: `POST` with `Origin: https://evil.example` → 403 ERR-002 |
 
@@ -313,8 +313,8 @@ Priorities: **Must** = needed for launch; **Should** = launch unless it slips, t
 | FR-013 | AI failure handling | AI timeouts, errors and bad output must never leave an analysis stuck or charge the user. | Must | 1. Each attempt has a timeout of `K-40` (60 s). 2. Retry on: timeout, network error, HTTP 429, HTTP 5xx, HTTP 529, invalid JSON or schema mismatch. No retry on other 4xx (logged as `error`). 3. At most `K-41` (3) attempts with waits of 5 s then 15 s (`K-42`), honouring a `retry-after` header if it is longer, up to 30 s. 4. After the last failed attempt: status `failed`, `failure_code = AI_UNAVAILABLE` (timeouts, network, 429, 5xx) or `AI_BAD_RESPONSE` (invalid output, `stop_reason = "refusal"` or `"max_tokens"`); quota reservation released (FR-008 AC 5). 5. Circuit breaker shared across all worker tasks in Redis: when `K-43` (10) failed **attempts** happen within 120 s the breaker opens for 60 s. While open: API-005 returns `503 AI_UNAVAILABLE` before reading the file and without reserving quota; jobs that start while open fail at once with `AI_UNAVAILABLE`. After 60 s one job is let through (half-open); success closes the breaker, failure opens it for another 60 s. 6. W-02 shows, for `failed`: the localized message of `failure_code` and a "Try again" button that goes back to W-01 (the user must re-upload, since the file was not stored). |
 | FR-014 | Analysis history | The user can see their past analyses. | Must | 1. API-006 returns the caller's analyses newest first (`created_at DESC, id DESC`), paginated (6.1), each with `id`, `status`, `jobRole` (`id`, `name`), `experienceLevel`, `overallScore` (null unless completed), `band`, `fileName`, `createdAt`, `completedAt`. 2. Optional filter `status`. 3. Analyses deleted by the user or by retention do not appear. 4. W-01 shows the first page under the upload form with "Load more". |
 | FR-015 | Delete one analysis | The user can delete an analysis at any time. | Must | 1. API-009 hard-deletes the analysis and its child rows (cascade) and returns `204`. 2. Deleting an analysis in `queued`/`processing` → `409 ANALYSIS_IN_PROGRESS`. 3. Another user's or an unknown ID → `404 NOT_FOUND`. 4. An `audit_events` row `analysis_deleted` is written. 5. Quota is not returned (FR-008 AC 6). |
-| FR-016 | Erase all my data / withdraw consent | DPDP right to erasure and to withdraw consent. | Must | 1. API-010 in one transaction: deletes all the caller's analyses (any status, cascade), releases reservations of in-progress ones, sets `withdrawn_at = now()` on the active consent, writes `audit_events` row `data_erased` with the number of analyses deleted; returns `200` with `{ deletedAnalyses: n }`. 2. Afterwards API-006 returns an empty list and API-003 returns `hasValidConsent: false`. 3. Usage counters are kept (they hold no resume content) so erasing does not reset the monthly quota. 4. In-flight worker jobs for deleted analyses finish without writing (FR-005 AC 7). 5. The web client (W-01 "Delete all my data") asks for confirmation by typing `DELETE` before calling the API. |
-| FR-017 | Automatic data retention | Personal data is removed automatically when no longer needed. | Must | 1. A scheduled job runs daily at 02:00 IST (20:30 UTC) in the worker (BullMQ repeatable job `retention`, one run at a time). 2. Sets `resume_text_enc = NULL`, `text_purged_at = now()` for analyses with `created_at < now() - K-31` (30 days) and `resume_text_enc IS NOT NULL`. 3. Hard-deletes analyses with `created_at < now() - K-32` (180 days). 4. Deletes `usage_counters` older than `K-35` (13 months), consents withdrawn more than `K-33` (3 years) ago, audit events older than `K-36` (3 years). 5. Works in batches of 1,000 rows, each in its own transaction. 6. Logs one `info` line with counts per category. 7. After text purge the analysis remains fully viewable (scores, missing skills, rewrites), since none of these need the full text. |
+| FR-016 | Erase all my data / withdraw consent | DPDP right to erasure and to withdraw consent. | Must | 1. API-010 in one transaction: deletes all the caller's analyses (any status, cascade), releases reservations of in-progress ones, sets `ended_at = now()`, `end_reason = 'withdrawn'` on the open consent, writes `audit_events` row `data_erased` with the number of analyses deleted; returns `200` with `{ deletedAnalyses: n }`. 2. Afterwards API-006 returns an empty list and API-003 returns `hasValidConsent: false`. 3. Usage counters are kept (they hold no resume content) so erasing does not reset the monthly quota. 4. In-flight worker jobs for deleted analyses finish without writing (FR-005 AC 7). 5. The web client (W-01 "Delete all my data") asks for confirmation by typing `DELETE` before calling the API. |
+| FR-017 | Automatic data retention | Personal data is removed automatically when no longer needed. | Must | 1. A scheduled job runs daily at 02:00 IST (20:30 UTC) in the worker (BullMQ repeatable job `retention`, one run at a time). 2. Sets `resume_text_enc = NULL`, `text_purged_at = now()` for analyses with `created_at < now() - K-31` (30 days) and `resume_text_enc IS NOT NULL`. 3. Hard-deletes analyses with `created_at < now() - K-32` (180 days). 4. Deletes `usage_counters` older than `K-35` (13 months), consents whose `ended_at` is more than `K-33` (3 years) ago, audit events older than `K-36` (3 years). 5. Works in batches of 1,000 rows, each in its own transaction. 6. Logs one `info` line with counts per category. 7. After text purge the analysis remains fully viewable (scores, missing skills, rewrites), since none of these need the full text. |
 | FR-018 | Download PDF report | The user can download a completed analysis as a PDF. | Must | 1. API-008 returns `application/pdf` with `Content-Disposition: attachment; filename="resume-analysis-<YYYY-MM-DD>.pdf"` (date of `created_at` in IST). The user's name and the original file name are **not** in the file name. 2. Not `completed` → `409 ANALYSIS_NOT_READY`. 3. Content, in order: title "Resume Analysis Report"; analysis date (IST), target role (English name), experience level; overall score and band; six dimensions each with score, a horizontal bar, and explanation; missing skills grouped core / preferred; rewrite suggestions visible to the caller (FR-012) as "Before / After / Why"; for free users, one line "N more suggestions are available with SurfingBear Premium." when N > 0; footer on each page "Generated by SurfingBear Resume Optimizer · Page x of y". 4. The PDF is generated on request and never stored. 5. Font: Noto Sans (bundled in the image) so all Latin characters render. |
 | FR-019 | Manage job-role catalog | Admins maintain the list of roles and the terms used for matching. | Must | 1. API-011 lists all roles (active and inactive) with term counts. 2. API-012 creates a role: `slug` matches `^[a-z0-9]+(-[a-z0-9]+)*$`, 3–60 chars, unique (`409 JOB_ROLE_SLUG_TAKEN`); `nameEn` 2–80 chars required; `nameHi` 2–80 chars required; new roles start **inactive**. 3. API-013 updates `nameEn`, `nameHi`, `isActive`; `slug` cannot change. 4. API-014 replaces the full term list of a role in one transaction. Rules: 1–60 chars per term; up to 10 aliases each, 1–60 chars; at most 80 terms; no two terms or aliases of the same role normalize (3.5.1) to the same string. 5. A role can be activated only if it has ≥ 5 `core`, ≥ 3 `keyword` terms; otherwise API-013 with `isActive: true` → `422 VALIDATION_FAILED` (`field: "isActive"`, `issue: "insufficient_terms"`). Replacing terms of an active role with a list that breaks this rule → the same error (`field: "terms"`). 6. Roles are never deleted (analyses reference them); they are deactivated. 7. Every admin change writes an `audit_events` row (`job_role_created`, `job_role_updated`, `job_role_terms_replaced`) with the admin's `userId`. 8. Changes affect only analyses created afterwards. |
 | FR-020 | Show remaining quota | The user sees how many analyses are left this month. | Should | 1. API-002 returns `{ plan, period, limit, used, reserved, remaining, resetsAt }` with `remaining = max(0, limit − used − reserved)`. 2. W-01 shows "X of Y analyses left this month" and, for free users with `remaining = 0`, disables the submit button and shows the upgrade link (`K-09`). |
@@ -403,7 +403,7 @@ Single source for every number used in more than one place. Values marked *env* 
 | K-30 | `ORIGINAL_FILE_RETENTION` | 0 — never stored | CR-020, NFR-008 |
 | K-31 | `TEXT_RETENTION_DAYS` | 30 days after `created_at` | FR-017 |
 | K-32 | `ANALYSIS_RETENTION_DAYS` | 180 days after `created_at` | FR-017 |
-| K-33 | `CONSENT_RECORD_RETENTION` | 3 years after `withdrawn_at` | FR-017 |
+| K-33 | `CONSENT_RECORD_RETENTION` | 3 years after `ended_at` | FR-017 |
 | K-34 | `DB_BACKUP_RETENTION_DAYS` | 7 days | NFR-010 |
 | K-35 | `USAGE_COUNTER_RETENTION_MONTHS` | 13 months after the period | FR-017 |
 | K-36 | `AUDIT_RETENTION` | 3 years after `created_at` | FR-017 |
@@ -760,7 +760,7 @@ sequenceDiagram
   A->>DB: BEGIN
   A->>DB: SELECT in-progress analyses FOR UPDATE → release each reservation
   A->>DB: DELETE FROM analyses WHERE user_id=$1 (cascades children)
-  A->>DB: UPDATE consents SET withdrawn_at=now() WHERE user_id=$1 AND withdrawn_at IS NULL
+  A->>DB: UPDATE consents SET ended_at=now(), end_reason='withdrawn' WHERE user_id=$1 AND ended_at IS NULL
   A->>DB: INSERT audit_events(data_erased, metadata={deletedAnalyses:n})
   A->>DB: COMMIT
   A-->>U: 200 { deletedAnalyses: n }
@@ -955,7 +955,302 @@ A response with more than 10 rewrites fails validation (counts as a failed attem
 
 ## 5. ERD and database design
 
-_To be written._
+PostgreSQL 16, schema `resume_optimizer`, extension `pgcrypto` (for `gen_random_uuid()`). All timestamps are `timestamptz` stored in UTC. Enumerations are `varchar` + `CHECK` (not PostgreSQL `ENUM` types) so adding a value is a non-locking migration. There is **no users table**: `user_id` is the platform `sub` (A-02) and has no FK.
+
+### 5.1 ERD
+
+```mermaid
+erDiagram
+  job_roles ||--o{ job_role_terms : "has terms"
+  job_roles ||--o{ analyses : "is target of"
+  analyses ||--|{ analysis_dimension_scores : "has 6 (when completed)"
+  analyses ||--o{ analysis_missing_skills : "lists"
+  analyses ||--o{ rewrite_suggestions : "has 0..10"
+  usage_counters }o..o{ analyses : "user_id + quota_period (logical, no FK)"
+  consents }o..o{ analyses : "user_id (logical, no FK)"
+  audit_events }o..o{ analyses : "target_id (logical, no FK)"
+
+  job_roles {
+    uuid id PK
+    varchar slug UK
+    varchar name_en
+    varchar name_hi
+    boolean is_active
+  }
+  job_role_terms {
+    uuid id PK
+    uuid job_role_id FK
+    varchar term
+    varchar term_normalized
+    varchar term_type
+    text_array aliases
+    smallint position
+  }
+  consents {
+    uuid id PK
+    uuid user_id
+    varchar notice_version
+    timestamptz accepted_at
+    timestamptz ended_at
+    varchar end_reason
+  }
+  analyses {
+    uuid id PK
+    uuid user_id
+    uuid job_role_id FK
+    varchar experience_level
+    varchar status
+    varchar failure_code
+    char quota_period
+    text resume_text_enc
+    smallint overall_score
+  }
+  analysis_dimension_scores {
+    uuid analysis_id PK,FK
+    varchar dimension PK
+    smallint score
+    smallint weight
+  }
+  analysis_missing_skills {
+    uuid id PK
+    uuid analysis_id FK
+    varchar term
+    varchar importance
+  }
+  rewrite_suggestions {
+    uuid id PK
+    uuid analysis_id FK
+    smallint rank
+    varchar original_text
+    varchar suggested_text
+  }
+  usage_counters {
+    uuid user_id PK
+    char period PK
+    int used
+    int reserved
+  }
+  audit_events {
+    bigint id PK
+    uuid actor_user_id
+    varchar action
+    uuid target_id
+  }
+```
+
+### 5.2 Tables
+
+#### TBL-001 `job_roles`
+Purpose: catalog of target job roles users can choose (FR-001, FR-019).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| slug | varchar(60) | NO | UK | — | `CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$' AND length(slug) BETWEEN 3 AND 60)`; immutable after insert (enforced in service; API-013 has no `slug` field) |
+| name_en | varchar(80) | NO | | — | `CHECK (length(name_en) BETWEEN 2 AND 80)` |
+| name_hi | varchar(80) | NO | | — | `CHECK (length(name_hi) BETWEEN 2 AND 80)` |
+| is_active | boolean | NO | | `false` | Only active roles are listed (API-001) and selectable (API-005) |
+| created_at | timestamptz | NO | | `now()` | |
+| updated_at | timestamptz | NO | | `now()` | Set by Prisma `@updatedAt` on every update |
+
+#### TBL-002 `job_role_terms`
+Purpose: terms (skills and keywords) of a role used for matching and missing skills (3.5.1, FR-010).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| job_role_id | uuid | NO | FK → `job_roles.id` | — | `ON DELETE CASCADE` |
+| term | varchar(60) | NO | | — | Display form, e.g. `Node.js`; `CHECK (length(term) BETWEEN 1 AND 60)` |
+| term_normalized | varchar(60) | NO | | — | `normalize(term)` (3.5.1), computed by the service on write; used for uniqueness |
+| term_type | varchar(10) | NO | | — | `CHECK (term_type IN ('core','preferred','keyword'))` |
+| aliases | text[] | NO | | `'{}'` | Display forms; `CHECK (cardinality(aliases) <= 10)`; each 1–60 chars (service check) |
+| position | smallint | NO | | — | 0-based order in the admin list; `CHECK (position BETWEEN 0 AND 79)` |
+| created_at | timestamptz | NO | | `now()` | |
+
+Unique: `(job_role_id, term_normalized)`, `(job_role_id, position)`. Alias-vs-term clashes within a role (FR-019 AC 4) are checked in the service because they span array elements.
+
+#### TBL-003 `consents`
+Purpose: proof that the user accepted the privacy notice, and when it ended (FR-004, FR-016). Holds no personal data besides `user_id`.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| user_id | uuid | NO | | — | Platform user ID |
+| notice_version | varchar(20) | NO | | — | e.g. `2026-10-01` (`K-08`) |
+| accepted_at | timestamptz | NO | | `now()` | |
+| ended_at | timestamptz | YES | | `NULL` | Set when withdrawn or superseded |
+| end_reason | varchar(12) | YES | | `NULL` | `CHECK (end_reason IN ('withdrawn','superseded'))`; `CHECK ((ended_at IS NULL) = (end_reason IS NULL))` |
+
+Rules: at most one row per user with `ended_at IS NULL` (partial unique index, 5.3). Accepting `K-08` when the user's open consent has an older version: in one transaction set the old row `ended_at = now(), end_reason = 'superseded'` and insert the new one. A consent is **valid** when `ended_at IS NULL AND notice_version = K-08`.
+
+#### TBL-004 `analyses`
+Purpose: one row per analysis request: inputs, status, extracted (redacted, encrypted) text, overall result and AI usage (FR-005 – FR-009, FR-013).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | Also BullMQ `jobId` |
+| user_id | uuid | NO | | — | Owner (platform `sub`) |
+| job_role_id | uuid | NO | FK → `job_roles.id` | — | `ON DELETE RESTRICT` (roles are never deleted) |
+| experience_level | varchar(10) | NO | | — | `CHECK (experience_level IN ('fresher','junior','mid','senior','lead'))` |
+| status | varchar(12) | NO | | `'queued'` | `CHECK (status IN ('queued','processing','completed','failed'))` |
+| failure_code | varchar(32) | YES | | `NULL` | `CHECK (failure_code IN ('AI_UNAVAILABLE','AI_BAD_RESPONSE','PROCESSING_TIMEOUT','INTERNAL_ERROR'))`; `CHECK ((status = 'failed') = (failure_code IS NOT NULL))` |
+| plan_at_creation | varchar(10) | NO | | — | `CHECK (plan_at_creation IN ('free','premium'))`; for reporting only, visibility uses the current plan (FR-012) |
+| quota_period | char(7) | NO | | — | `YYYY-MM` IST month counted (FR-008); `CHECK (quota_period ~ '^[0-9]{4}-(0[1-9]|1[0-2])$')` |
+| file_name | varchar(255) | NO | | — | Original file name for the history list: base name only, control characters removed, truncated to 255. Personal data — never logged (CR-010) |
+| file_kind | varchar(4) | NO | | — | `CHECK (file_kind IN ('pdf','docx'))` |
+| file_size_bytes | integer | NO | | — | `CHECK (file_size_bytes BETWEEN 1 AND 5242880)` (`K-04`) |
+| page_count | smallint | YES | | — | PDF page count; `NULL` for DOCX; `CHECK (page_count BETWEEN 1 AND 10)` (`K-05`) |
+| word_count | integer | NO | | — | `CHECK (word_count >= 0)` |
+| has_email | boolean | NO | | — | FR-003 AC 6 |
+| has_phone | boolean | NO | | — | FR-003 AC 6 |
+| resume_text_enc | text | YES | | — | Redacted text encrypted with AES-256-GCM: `base64( iv[12] ‖ ciphertext ‖ authTag[16] )`, AAD = UTF-8 bytes of `id`. `NULL` after purge (FR-017) |
+| text_key_id | varchar(4) | YES | | — | `RESUME_TEXT_KEY_ID` used; `CHECK ((resume_text_enc IS NULL) = (text_key_id IS NULL))` |
+| text_purged_at | timestamptz | YES | | — | Set by retention job |
+| overall_score | smallint | YES | | — | `CHECK (overall_score BETWEEN 0 AND 100)`; `CHECK ((status = 'completed') = (overall_score IS NOT NULL))` |
+| ai_model | varchar(64) | YES | | — | `response.model` of the successful call |
+| prompt_version | varchar(8) | NO | | `'rv1'` | `K-49` at creation |
+| ai_attempts | smallint | NO | | `0` | `CHECK (ai_attempts BETWEEN 0 AND 3)` |
+| ai_input_tokens | integer | YES | | — | Sum over attempts |
+| ai_output_tokens | integer | YES | | — | Sum over attempts |
+| rewrites_dropped_count | smallint | NO | | `0` | FR-011 |
+| request_id | varchar(64) | NO | | — | `requestId` of the creating request (CR-009) |
+| created_at | timestamptz | NO | | `now()` | |
+| started_at | timestamptz | YES | | — | Set when status → `processing` |
+| completed_at | timestamptz | YES | | — | Set when status → `completed` or `failed`; `CHECK ((status IN ('completed','failed')) = (completed_at IS NOT NULL))` |
+| updated_at | timestamptz | NO | | `now()` | `@updatedAt` |
+
+The band (FR-009) is derived from `overall_score` at read time and not stored.
+
+#### TBL-005 `analysis_dimension_scores`
+Purpose: the six dimension scores of a completed analysis (FR-006, FR-007, FR-009).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| analysis_id | uuid | NO | PK, FK → `analyses.id` | — | `ON DELETE CASCADE` |
+| dimension | varchar(32) | NO | PK | — | `CHECK (dimension IN ('keyword_match','skills_coverage','experience_relevance','impact_quantification','structure_completeness','formatting_parseability'))` |
+| score | smallint | NO | | — | `CHECK (score BETWEEN 0 AND 100)` |
+| weight | smallint | NO | | — | Weight used (3.5); `CHECK (weight BETWEEN 1 AND 100)`; stored so old results stay explainable if weights change |
+| source | varchar(4) | NO | | — | `CHECK (source IN ('code','ai'))` |
+| explanation | varchar(300) | NO | | — | English |
+
+Exactly 6 rows per completed analysis, inserted in the completion transaction (checked by integration test; not a DB constraint).
+
+#### TBL-006 `analysis_missing_skills`
+Purpose: snapshot of missing catalog skills at analysis time (FR-010).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| analysis_id | uuid | NO | FK → `analyses.id` | — | `ON DELETE CASCADE` |
+| term | varchar(60) | NO | | — | Copy of `job_role_terms.term` (no FK: snapshot) |
+| importance | varchar(10) | NO | | — | `CHECK (importance IN ('core','preferred'))` |
+| position | smallint | NO | | — | 0-based display order (FR-010 AC 2) |
+
+Unique: `(analysis_id, position)`.
+
+#### TBL-007 `rewrite_suggestions`
+Purpose: validated rewrite suggestions (FR-011, FR-012).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| analysis_id | uuid | NO | FK → `analyses.id` | — | `ON DELETE CASCADE` |
+| rank | smallint | NO | | — | `CHECK (rank BETWEEN 1 AND 10)` (`K-13`) |
+| original_text | varchar(500) | NO | | — | `CHECK (length(original_text) >= 20)`; personal data |
+| suggested_text | varchar(600) | NO | | — | `CHECK (length(suggested_text) >= 20)` |
+| reason | varchar(20) | NO | | — | `CHECK (reason IN ('missing_metric','weak_verb','vague','too_long','passive_voice','missing_keyword'))` |
+
+Unique: `(analysis_id, rank)`.
+
+#### TBL-008 `usage_counters`
+Purpose: per-user per-month quota counts (FR-008, FR-020).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| user_id | uuid | NO | PK | — | |
+| period | char(7) | NO | PK | — | `YYYY-MM` IST; same CHECK as `analyses.quota_period` |
+| used | integer | NO | | `0` | `CHECK (used >= 0)` |
+| reserved | integer | NO | | `0` | `CHECK (reserved >= 0)`; a negative result means a bug and makes the transaction fail loudly |
+| created_at | timestamptz | NO | | `now()` | |
+| updated_at | timestamptz | NO | | `now()` | |
+
+Upsert used by `reserve`: `INSERT INTO usage_counters (user_id, period) VALUES ($1, $2) ON CONFLICT DO NOTHING;` then `SELECT used, reserved FROM usage_counters WHERE user_id = $1 AND period = $2 FOR UPDATE;`.
+
+#### TBL-009 `audit_events`
+Purpose: record of data-subject and admin actions for DPDP accountability (FR-015, FR-016, FR-019). No resume content.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | bigint | NO | PK | `GENERATED ALWAYS AS IDENTITY` | |
+| actor_user_id | uuid | NO | | — | Who did it |
+| action | varchar(40) | NO | | — | `CHECK (action IN ('consent_given','analysis_deleted','data_erased','job_role_created','job_role_updated','job_role_terms_replaced'))` |
+| target_type | varchar(12) | YES | | — | `CHECK (target_type IN ('analysis','job_role','consent','user'))` |
+| target_id | uuid | YES | | — | No FK: the target may be deleted |
+| metadata | jsonb | NO | | `'{}'` | Allowed keys only: `deletedAnalyses` (int), `noticeVersion`, `slug`, `changedFields` (string array), `termCount` (int). Validated by zod before insert |
+| request_id | varchar(64) | NO | | — | |
+| created_at | timestamptz | NO | | `now()` | |
+
+### 5.3 Indexes
+
+| Table | Index | Columns | Why (query it serves) |
+|---|---|---|---|
+| job_roles | `job_roles_slug_uniq` (unique) | `slug` | Uniqueness (FR-019 AC 2); seed upsert by slug |
+| job_role_terms | `job_role_terms_job_role_id_term_normalized_uniq` (unique) | `job_role_id, term_normalized` | Duplicate-term rule (FR-019 AC 4) |
+| job_role_terms | `job_role_terms_job_role_id_position_uniq` (unique) | `job_role_id, position` | `SELECT … WHERE job_role_id = $1 ORDER BY position` (worker loads terms; API-011 term counts) |
+| consents | `consents_user_id_open_uniq` (unique, partial `WHERE ended_at IS NULL`) | `user_id` | One open consent per user; API-003/API-005 lookup `WHERE user_id = $1 AND ended_at IS NULL` |
+| consents | `consents_ended_at_idx` (partial `WHERE ended_at IS NOT NULL`) | `ended_at` | Retention delete after `K-33` |
+| analyses | `analyses_user_id_created_at_idx` | `user_id, created_at DESC, id DESC` | API-006 list newest first with keyset tie-break; also used by erase `WHERE user_id = $1` |
+| analyses | `analyses_user_id_in_progress_idx` (partial `WHERE status IN ('queued','processing')`) | `user_id` | In-progress check on every API-005 (FR-005 AC 3) |
+| analyses | `analyses_created_at_in_progress_idx` (partial `WHERE status IN ('queued','processing')`) | `created_at` | Sweeper every 60 s (FR-022) — stays tiny because few rows are in progress |
+| analyses | `analyses_created_at_text_idx` (partial `WHERE resume_text_enc IS NOT NULL`) | `created_at` | Daily text purge (FR-017 AC 2) |
+| analyses | `analyses_created_at_idx` | `created_at` | Daily hard delete after `K-32` (FR-017 AC 3) |
+| analysis_dimension_scores | PK | `analysis_id, dimension` | Load children for API-007/API-008; cascade delete lookup |
+| analysis_missing_skills | `analysis_missing_skills_analysis_id_position_uniq` (unique) | `analysis_id, position` | Load ordered list; cascade delete lookup |
+| rewrite_suggestions | `rewrite_suggestions_analysis_id_rank_uniq` (unique) | `analysis_id, rank` | Load ordered list; cascade delete lookup |
+| usage_counters | PK | `user_id, period` | Reserve/commit/release and API-002 |
+| usage_counters | `usage_counters_period_idx` | `period` | Retention delete after `K-35` |
+| audit_events | `audit_events_actor_user_id_created_at_idx` | `actor_user_id, created_at` | Grievance investigation by user (manual SQL by the Data Protection team) |
+| audit_events | `audit_events_created_at_idx` | `created_at` | Retention delete after `K-36` |
+
+No index on `analyses.job_role_id`: no query filters by it, and the `RESTRICT` check only runs on role delete, which never happens.
+
+### 5.4 Relationships and delete rules
+
+| From | To | Cardinality | On delete |
+|---|---|---|---|
+| `job_role_terms.job_role_id` | `job_roles.id` | many terms → 1 role | `CASCADE` (roles are never deleted in practice; cascade keeps a test reset simple) |
+| `analyses.job_role_id` | `job_roles.id` | many analyses → 1 role | `RESTRICT` — a role used by any analysis cannot be deleted; roles are deactivated instead (FR-019 AC 6) |
+| `analysis_dimension_scores.analysis_id` | `analyses.id` | 0 or 6 → 1 | `CASCADE` |
+| `analysis_missing_skills.analysis_id` | `analyses.id` | 0..n → 1 | `CASCADE` |
+| `rewrite_suggestions.analysis_id` | `analyses.id` | 0..10 → 1 | `CASCADE` |
+| `analyses.user_id`, `consents.user_id`, `usage_counters.user_id`, `audit_events.actor_user_id` | platform user (external) | many → 1 user | No FK. On user erasure (FR-016): `analyses` rows deleted (children cascade); open consent ended (`withdrawn`); `usage_counters` kept until `K-35`; `audit_events` kept until `K-36` |
+| `audit_events.target_id` | any | — | No FK; keeps the ID of a deleted row on purpose |
+
+**What a user's data deletion removes** (FR-015 / FR-016): file name, redacted text, scores, missing skills, rewrites — everything in TBL-004…TBL-007 for that user — in one transaction. What stays: TBL-003 consent rows (prove what was agreed and when it ended), TBL-008 counts, TBL-009 events; none contain resume content.
+
+### 5.5 Seed data (job-role catalog)
+
+`prisma/seed.ts` upserts by `slug` (idempotent) and replaces terms. All six roles are seeded **active**. Aliases are in parentheses; `position` follows the order written.
+
+| slug | name_en | name_hi |
+|---|---|---|
+| `backend-developer` | Backend Developer | बैकएंड डेवलपर |
+| `frontend-developer` | Frontend Developer | फ्रंटएंड डेवलपर |
+| `full-stack-developer` | Full Stack Developer | फुल स्टैक डेवलपर |
+| `data-analyst` | Data Analyst | डेटा एनालिस्ट |
+| `devops-engineer` | DevOps Engineer | डेवऑप्स इंजीनियर |
+| `qa-automation-engineer` | QA Automation Engineer | क्यूए ऑटोमेशन इंजीनियर |
+
+| slug | core | preferred | keyword |
+|---|---|---|---|
+| `backend-developer` | SQL; REST API (REST APIs, RESTful, REST services); Git (GitHub, GitLab); Database design (schema design, data modeling); Unit testing (unit tests, JUnit, Jest, pytest) | Java; Python; Node.js (NodeJS); Spring Boot; NestJS; Golang (Go lang); PostgreSQL (Postgres); MySQL; Redis; Kafka; Docker; Kubernetes (K8s); AWS (Amazon Web Services); Microservices (micro services) | API; scalable (scalability); performance; deployment (deployed); CI/CD (CICD, continuous integration); latency |
+| `frontend-developer` | JavaScript (JS); HTML (HTML5); CSS (CSS3); React (React.js, ReactJS); Git (GitHub, GitLab) | TypeScript (TS); Next.js (NextJS); Redux; Tailwind (Tailwind CSS); Jest; Cypress; Playwright; Webpack; Vite; Figma | responsive; accessibility (a11y, WCAG); performance; UI; cross-browser (cross browser); component |
+| `full-stack-developer` | JavaScript (JS); SQL; REST API (REST APIs, RESTful); Git (GitHub, GitLab); React (React.js, ReactJS) | TypeScript; Node.js (NodeJS); Next.js (NextJS); Express (Express.js); NestJS; PostgreSQL (Postgres); MongoDB (Mongo); Docker; AWS (Amazon Web Services); HTML (HTML5); CSS (CSS3) | end-to-end (end to end); deployment (deployed); API; scalable; responsive; CI/CD (CICD) |
+| `data-analyst` | SQL; Excel (MS Excel, Microsoft Excel); Python; Data visualization (data visualisation, dashboards); Statistics (statistical analysis) | Power BI (PowerBI); Tableau; Pandas; NumPy; Looker; Google Analytics; A/B testing (AB testing, experimentation); R | insights; KPI (KPIs); reporting; stakeholders; trends; data cleaning (data cleansing) |
+| `devops-engineer` | Linux; Docker; CI/CD (CICD, continuous integration, continuous delivery); AWS (Amazon Web Services); Git (GitHub, GitLab) | Kubernetes (K8s); Terraform; Ansible; Jenkins; GitHub Actions; Prometheus; Grafana; Bash (shell scripting); Python; Helm; Azure; GCP (Google Cloud) | automation (automated); monitoring; infrastructure as code (IaC); uptime; deployment (deployments); incident |
+| `qa-automation-engineer` | Selenium; Test automation (automation testing, automated testing); Test cases (test case); Bug tracking (defect tracking, JIRA); API testing (Postman) | Java; Python; Cypress; Playwright; TestNG; JUnit; Cucumber (BDD); Appium; JMeter; REST Assured (RestAssured); CI/CD (CICD) | regression; test plan (test plans); quality; framework; defects; coverage |
+
+All six satisfy FR-019 AC 5 (≥ 5 core, ≥ 3 keyword).
 
 ---
 
@@ -978,3 +1273,4 @@ _To be written._
 | v0.1 | 2026-10-20 | Kakali Dinda | Sections 1 (common requirements) and 2 (coding conventions) written | First draft | CR-001 … CR-036 |
 | v0.2 | 2026-10-20 | Kakali Dinda | Section 3 written: FRs, NFRs, assumptions, configuration constants, scoring rules, web screens, test fixtures | First draft | FR-001 … FR-022, NFR-001 … NFR-020, A-01 … A-12, K-01 … K-61 |
 | v0.3 | 2026-10-20 | Kakali Dinda | Section 4 written: components, sequence diagrams incl. failure paths, integrations, stack reasons, capacity, env config, AI call contract, observability | First draft | CMP-001 … CMP-017 |
+| v0.4 | 2026-10-20 | Kakali Dinda | Section 5 written: ERD, 9 tables with all columns and constraints, indexes with reasons, delete rules, seed catalog. Fixed CR-001 to use `APP_ENV`; consent end is now `ended_at` + `end_reason` (FR-016, FR-017 wording aligned) | First draft; consistency fix | TBL-001 … TBL-009, CR-001, FR-016, FR-017, K-33 |
