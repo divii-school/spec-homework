@@ -3,9 +3,9 @@
 | Field | Value |
 |---|---|
 | Author | Kakali Dinda |
-| Version | v0.5 |
+| Version | v1.0 |
 | Last updated | 2026-10-20 |
-| Status | Draft |
+| Status | Review |
 
 **What this document is.** The single source for building the SurfingBear Resume Optimizer module: a NestJS backend (API + worker) and a Next.js web client, on PostgreSQL and Redis. A developer must be able to build, test and deploy the module from this file alone. Where this file and any other source disagree, this file wins; where this file is silent, that is a defect in this file and must be raised, not guessed.
 
@@ -103,7 +103,7 @@ Admins deliberately cannot read users' resumes or analyses. There is no support 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
 | CR-013 | Errors | All errors are thrown as `AppException(code, details?)` and turned into the format above by one global `AppExceptionFilter`. The filter maps `code` → HTTP status and message key using the table in section 6.3; a code not in that table is a build failure (the code list is a TypeScript `enum ErrorCode` and the map is `Record<ErrorCode, …>`, so a missing entry does not compile). | Unit test per error code; TypeScript compile |
-| CR-014 | Errors | Unknown exceptions are logged at `error` with the stack trace and returned as `500 INTERNAL_ERROR` (ERR-019) with the generic message. NestJS `HttpException`s thrown by the framework (e.g. body parser) are mapped: 400 → `VALIDATION_FAILED`, 404 → `NOT_FOUND`, 413 → `FILE_TOO_LARGE`, 415 → `UNSUPPORTED_FILE_TYPE`. | e2e test: unknown route → 404 in standard format |
+| CR-014 | Errors | Unknown exceptions are logged at `error` with the stack trace and returned as `500 INTERNAL_ERROR` (ERR-019) with the generic message. NestJS `HttpException`s thrown by the framework are mapped: 400 → `400 VALIDATION_FAILED`; 404 → `404 NOT_FOUND`; 413 from Multer (file part over `K-04`) → `413 FILE_TOO_LARGE`; 413 from the JSON body parser (body over 100 KB) → `400 VALIDATION_FAILED` with `issue: "body_too_large"` (6.1); 415 for a wrong request `Content-Type` → `400 VALIDATION_FAILED` with `field: "Content-Type"` (file type errors come only from FR-002 magic-byte checks). | e2e test: unknown route → 404 in standard format |
 | CR-015 | Errors | Failures that happen after the HTTP request has returned (inside the analysis job) are not HTTP errors. They are stored on the analysis as `status = "failed"` plus `failure_code` (one of the codes marked "job" in section 6.3) and shown by the web client from API-007. | e2e test with a mocked AI outage |
 
 ### 1.5 Security
@@ -1260,7 +1260,7 @@ All six satisfy FR-019 AC 5 (≥ 5 core, ≥ 3 keyword).
 
 - **Base path:** `https://<WEB_ORIGIN host>/api/resume-optimizer/v1` (same origin as the web app, CR-022). Health endpoints are outside the version: `/api/resume-optimizer/health/*`. Paths below are relative to the base path unless they start with `/api/`.
 - **Auth:** platform JWT in cookie `sb_access` (CR-001 … CR-004). Every `/v1` endpoint requires it. Admin endpoints (`/admin/*`) also require role `ro_admin` (CR-007). `POST`/`PUT`/`PATCH`/`DELETE` also require `Origin = K-03` (CR-006).
-- **Content type:** request and response bodies are `application/json; charset=utf-8`, except API-005 request (`multipart/form-data`) and API-008 response (`application/pdf`). Request JSON bodies are limited to 100 KB (`413 VALIDATION_FAILED` is **not** used; oversized JSON → `400 VALIDATION_FAILED` with `issue: "body_too_large"`).
+- **Content type:** request and response bodies are `application/json; charset=utf-8`, except API-005 request (`multipart/form-data`) and API-008 response (`application/pdf`). Request JSON bodies are limited to 100 KB; a larger JSON body → `400 VALIDATION_FAILED` with `details: [{ "field": "body", "issue": "body_too_large", "limit": 102400 }]`.
 - **Locale:** `Accept-Language` (CR-025) decides `error.message`, `jobRole.name` and `failureMessage`.
 - **Request ID:** optional `X-Request-Id` in, always `X-Request-Id` out (CR-009).
 - **Pagination** (list endpoints that say "paginated"): query `page` (integer ≥ 1, default 1) and `pageSize` (integer 1–`K-61` max 50, default 20). Out of range → `400 VALIDATION_FAILED`. Response envelope:
@@ -1519,7 +1519,7 @@ Check order: FR-005 AC 2.
       "jobRole": { "id": "6f1c2a8e-3b7d-4f0e-9a51-2c4d8e7b1a90", "slug": "backend-developer", "name": "Backend Developer" },
       "experienceLevel": "mid",
       "fileName": "my-resume.pdf",
-      "overallScore": 72,
+      "overallScore": 71,
       "band": "fair",
       "createdAt": "2026-10-20T09:16:02.481Z",
       "completedAt": "2026-10-20T09:16:31.902Z"
@@ -1558,7 +1558,7 @@ Check order: FR-005 AC 2.
     "experienceLevel": "mid",
     "fileName": "my-resume.pdf",
     "fileKind": "pdf",
-    "overallScore": 72,
+    "overallScore": 71,
     "band": "fair",
     "createdAt": "2026-10-20T09:16:02.481Z",
     "startedAt": "2026-10-20T09:16:03.010Z",
@@ -1566,7 +1566,7 @@ Check order: FR-005 AC 2.
     "result": {
       "dimensions": [
         { "dimension": "keyword_match", "score": 67, "weight": 20, "source": "code", "explanation": "Found 4 of 6 common keywords for Backend Developer." },
-        { "dimension": "skills_coverage", "score": 73, "weight": 25, "source": "code", "explanation": "Found 4 of 5 core and 7 of 14 preferred skills for Backend Developer." },
+        { "dimension": "skills_coverage", "score": 63, "weight": 25, "source": "code", "explanation": "Found 4 of 5 core and 7 of 14 preferred skills for Backend Developer." },
         { "dimension": "experience_relevance", "score": 80, "weight": 20, "source": "ai", "explanation": "Your three years building Node.js services match a mid-level backend role well; there is little on system design ownership." },
         { "dimension": "impact_quantification", "score": 45, "weight": 15, "source": "ai", "explanation": "Only a few of your bullets show results such as latency or user numbers." },
         { "dimension": "structure_completeness", "score": 100, "weight": 10, "source": "code", "explanation": "All 5 standard sections found." },
@@ -1590,7 +1590,7 @@ Check order: FR-005 AC 2.
 }
 ```
 
-(Check: 67×20 + 73×25 + 80×20 + 45×15 + 100×10 + 90×10 = 1340 + 1825 + 1600 + 675 + 1000 + 900 = 7340 → 73.40 → `overallScore` would be **73**; the example value `72` is illustrative only — implementations must compute FR-009 AC 1.)
+Worked check of FR-009 AC 1 and 3.5.1 for this example: `keyword_match` = round(100 × 4/6) = 67; `skills_coverage` = round(100 × (2×4 + 7) / (2×5 + 14)) = round(62.5) = 63; overall = (67×20 + 63×25 + 80×20 + 45×15 + 100×10 + 90×10) / 100 = (1340 + 1575 + 1600 + 675 + 1000 + 900) / 100 = 70.90 → **71**, band `fair`.
 
 **Errors**
 
@@ -1841,7 +1841,84 @@ When `failure_code` is `AI_UNAVAILABLE` or `INTERNAL_ERROR` on a failed job, `fa
 
 ## 7. Traceability matrix
 
-_To be written._
+Every FR and NFR appears once. `—` is used only where nothing of that kind is involved, with the reason in brackets. "Verified by" names the test file (under `apps/api/test/` unless it starts with `web/` or `load/`) and the acceptance criteria it covers.
+
+### 7.1 Functional requirements
+
+| Requirement | Component(s) | Table(s) | API(s) | Error code(s) | Verified by |
+|---|---|---|---|---|---|
+| FR-001 Choose role and level | CMP-001, CMP-003, CMP-004 | TBL-001 | API-001, API-005 | ERR-003, ERR-004, ERR-017 | `e2e/job-roles.e2e-spec.ts` (AC 1); `e2e/analyses-create.e2e-spec.ts` (AC 2–3); `web/test/upload-form.test.tsx` (AC 4) |
+| FR-002 Validate file | CMP-003, CMP-007 | TBL-004 (`file_kind`, `file_size_bytes`, `page_count`) | API-005 | ERR-003, ERR-006, ERR-007, ERR-008, ERR-009, ERR-010 | `e2e/analyses-upload-validation.e2e-spec.ts` with fixtures 3.7 (AC 1–7) |
+| FR-003 Extract and prepare text | CMP-007, CMP-003 | TBL-004 (`resume_text_enc`, `text_key_id`, `has_email`, `has_phone`, `word_count`) | API-005 | ERR-010, ERR-011, ERR-020, ERR-025 | `unit/parsing/*.spec.ts` (AC 1–7, 9); `integration/no-file-persisted.spec.ts` (AC 8) |
+| FR-004 Consent | CMP-005, CMP-003, CMP-001 | TBL-003, TBL-009 | API-003, API-004, API-005 | ERR-005, ERR-021 | `e2e/consent.e2e-spec.ts` (AC 1–4); `web/test/consent-dialog.test.tsx` (AC 5) |
+| FR-005 Start analysis | CMP-003, CMP-006, CMP-012, CMP-014 | TBL-004, TBL-008 | API-005 | ERR-013, ERR-024 | `e2e/analyses-create.e2e-spec.ts` (AC 1–6); `integration/processor-race.spec.ts` (AC 7) |
+| FR-006 Deterministic scoring | CMP-008, CMP-012 | TBL-002, TBL-005 | API-007 | — (pure computation, no error path) | `unit/scoring/deterministic.spec.ts` (AC 1–4) |
+| FR-007 AI scoring | CMP-009, CMP-012, CMP-016 | TBL-004 (`ai_model`, `prompt_version`, tokens), TBL-005 | API-007 | ERR-015, ERR-023 | `unit/scoring/ai-client.spec.ts` with fixtures `ai/*.json` (AC 1–5) |
+| FR-008 Monthly quota | CMP-006, CMP-003, CMP-012, CMP-011 | TBL-008, TBL-004 (`quota_period`, `plan_at_creation`) | API-005, API-002 | ERR-012 | `unit/quota/period.spec.ts` (AC 1); `integration/quota.spec.ts` (AC 2–7); `integration/quota-concurrency.spec.ts` (AC 8) |
+| FR-009 Overall score | CMP-012, CMP-003, CMP-001 | TBL-004 (`overall_score`), TBL-005 | API-007, API-006 | — (computed from stored scores) | `unit/scoring/overall.spec.ts` (AC 1–2, incl. the 6.2 worked example = 71); `e2e/analyses-read.e2e-spec.ts` (AC 3–4) |
+| FR-010 Missing skills | CMP-008, CMP-012 | TBL-002, TBL-006 | API-007 | — (empty list is valid) | `unit/scoring/missing-skills.spec.ts` (AC 1–4); `web/test/missing-skills.test.tsx` (AC 6) |
+| FR-011 Rewrite suggestions | CMP-009, CMP-012 | TBL-007, TBL-004 (`rewrites_dropped_count`) | API-007 | — (invalid items are dropped, not errors) | `unit/scoring/rewrite-filter.spec.ts` (checks 1–6, fixture `invented-number.json`) |
+| FR-012 Free vs premium | CMP-003, CMP-010, CMP-001 | TBL-007 | API-007, API-008 | — (visibility filter only) | `e2e/analyses-visibility.e2e-spec.ts` raw-JSON check (AC 1–4); `web/test/rewrite-list.test.tsx` (AC 5); `unit/report/report.spec.ts` (AC 6) |
+| FR-013 AI failure handling | CMP-009, CMP-012, CMP-014, CMP-016 | TBL-004 (`status`, `failure_code`, `ai_attempts`), TBL-008 | API-005, API-007 | ERR-015, ERR-023 | `unit/scoring/ai-retry.spec.ts` (AC 1–4); `integration/ai-breaker.spec.ts` (AC 5); `web/test/analysis-failed.test.tsx` (AC 6) |
+| FR-014 History | CMP-003, CMP-001 | TBL-004, TBL-001 | API-006 | ERR-003 | `e2e/analyses-list.e2e-spec.ts` (AC 1–3) |
+| FR-015 Delete analysis | CMP-003 | TBL-004 – TBL-007 (cascade), TBL-009 | API-009 | ERR-004, ERR-013 | `e2e/analyses-delete.e2e-spec.ts` (AC 1–5) |
+| FR-016 Erase all / withdraw | CMP-003, CMP-005, CMP-006 | TBL-003, TBL-004 – TBL-008, TBL-009 | API-010 | — (always succeeds for an authenticated user) | `e2e/erase.e2e-spec.ts` (AC 1–3); `integration/processor-race.spec.ts` (AC 4); `web/test/erase-dialog.test.tsx` (AC 5) |
+| FR-017 Retention | CMP-011, CMP-014 | TBL-003, TBL-004, TBL-008, TBL-009 | — (scheduled job, no endpoint) | — | `integration/retention.spec.ts` with a fake clock (AC 1–7) |
+| FR-018 PDF report | CMP-010, CMP-003 | TBL-004 – TBL-007 | API-008 | ERR-004, ERR-016 | `e2e/report.e2e-spec.ts` (AC 1–2, 4); `unit/report/report.spec.ts` text extraction of the generated PDF (AC 3, 5) |
+| FR-019 Catalog admin | CMP-004, CMP-001 | TBL-001, TBL-002, TBL-009 | API-011, API-012, API-013, API-014, API-017 | ERR-002, ERR-003, ERR-004, ERR-018 | `e2e/admin-job-roles.e2e-spec.ts` (AC 1–8) |
+| FR-020 Remaining quota | CMP-006, CMP-001 | TBL-008 | API-002 | — (read-only, no specific errors) | `e2e/quota.e2e-spec.ts` (AC 1); `web/test/quota-badge.test.tsx` (AC 2) |
+| FR-021 Progress | CMP-001 | TBL-004 (`status`) | API-007 | — (client behaviour) | `web/test/analysis-polling.test.tsx` with fake timers (AC 1–3) |
+| FR-022 No stuck analyses | CMP-011, CMP-006 | TBL-004, TBL-008 | — (scheduled job) | ERR-022 | `integration/sweeper.spec.ts` (AC 1–2) |
+
+### 7.2 Non-functional requirements
+
+| Requirement | Component(s) | Table(s) | API(s) | Verified by |
+|---|---|---|---|---|
+| NFR-001 Upload latency | CMP-003, CMP-007, CMP-002 | TBL-004 | API-005 | `load/upload.js` (k6); metric `ro_http_request_duration_seconds{route="/analyses",method="POST"}` |
+| NFR-002 End-to-end analysis time | CMP-012, CMP-009, CMP-016 | TBL-004 (`created_at`, `completed_at`) | API-007 | `ro_analysis_duration_seconds`; `load/analysis.js` |
+| NFR-003 Read latency | CMP-003, CMP-004, CMP-005, CMP-006, CMP-013 | TBL-001 – TBL-008 (indexes 5.3) | API-001, API-002, API-003, API-006, API-007, API-011 | `load/read.js`; dashboard |
+| NFR-004 Report latency | CMP-010 | TBL-004 – TBL-007 | API-008 | `load/report.js` |
+| NFR-005 Availability | CMP-002, CMP-003, CMP-013, CMP-014, CMP-017 | — (infrastructure) | API-015, API-016, API-001 | CloudWatch Synthetics canary; monthly SLO report |
+| NFR-006 Scalability | CMP-003, CMP-012, CMP-014 (autoscaling 4.5) | TBL-004 | API-005 | `load/mixed.js` at 300/h and 30/min bursts |
+| NFR-007 Security scan | CMP-001, CMP-002, CMP-003 | — (scan targets HTTP surface) | All (via OpenAPI) | ZAP job in release pipeline |
+| NFR-008 No file persistence | CMP-003, CMP-007, CMP-014 | TBL-004 (stores text only) | API-005 | `integration/no-file-persisted.spec.ts`; ECS `readonlyRootFilesystem` |
+| NFR-009 Retention deadlines | CMP-011 | TBL-004 | — (scheduled job) | `integration/retention.spec.ts`; alarm `RetentionJobMissed` |
+| NFR-010 Erasure speed and backups | CMP-003, CMP-013 | TBL-004 – TBL-007 | API-009, API-010 | `e2e/erase.e2e-spec.ts` timing; Terraform `backup_retention_period = 7` |
+| NFR-011 Data residency | CMP-013, CMP-014, CMP-017, CMP-009 | All | — (infrastructure) | Terraform review (region `ap-south-1`); FR-003 tests for redaction |
+| NFR-012 Observability | CMP-017, CMP-003, CMP-012 | — (telemetry, not DB) | All | Metrics/alerts list 4.8 checked in staging release checklist |
+| NFR-013 Final state guaranteed | CMP-011, CMP-012 | TBL-004 | — | Daily query + alarm `StuckAnalyses`; `integration/sweeper.spec.ts` |
+| NFR-014 Success rate | CMP-009, CMP-012 | TBL-004 | API-007 | `ro_analysis_finished_total{status}`; alarm `AiFailureRateHigh` |
+| NFR-015 AI cost | CMP-009 | TBL-004 (`ai_input_tokens`, `ai_output_tokens`, `ai_model`) | — (internal) | Weekly cost query; alarm `AiCostHigh` |
+| NFR-016 Accessibility | CMP-001 | — (frontend only) | — | `web/test/e2e/a11y.spec.ts` (Playwright + axe) |
+| NFR-017 Deterministic repeatability | CMP-008 | TBL-002 | — | `unit/scoring/deterministic.spec.ts` (100 runs) |
+| NFR-018 Coverage | CMP-003 – CMP-012 | — | — | Jest coverage gate in CI (CR-031) |
+| NFR-019 Browser support | CMP-001 | — (frontend only) | — | Playwright projects Chromium/Firefox/WebKit; manual device check |
+| NFR-020 Data growth | CMP-013 | TBL-004 – TBL-007 | API-006, API-007 | `EXPLAIN ANALYZE` with 2 M synthetic rows, attached to migration PRs |
+
+### 7.3 Reverse check (every component, table and endpoint is used)
+
+| Item | Used by requirements |
+|---|---|
+| CMP-001 | FR-001, FR-004, FR-009, FR-010, FR-012 – FR-014, FR-016, FR-019 – FR-021, NFR-007, NFR-016, NFR-019 |
+| CMP-002 | NFR-001, NFR-005, NFR-007 |
+| CMP-003 | FR-001 – FR-005, FR-008, FR-009, FR-012, FR-014 – FR-016, FR-018, NFR-001, NFR-003, NFR-008, NFR-010 |
+| CMP-004 | FR-001, FR-019, NFR-003 |
+| CMP-005 | FR-004, FR-016 |
+| CMP-006 | FR-005, FR-008, FR-016, FR-020, FR-022 |
+| CMP-007 | FR-002, FR-003, NFR-001, NFR-008 |
+| CMP-008 | FR-006, FR-010, NFR-017 |
+| CMP-009 | FR-007, FR-011, FR-013, NFR-002, NFR-014, NFR-015 |
+| CMP-010 | FR-012, FR-018, NFR-004 |
+| CMP-011 | FR-008, FR-017, FR-022, NFR-009, NFR-013 |
+| CMP-012 | FR-005 – FR-011, FR-013, NFR-002, NFR-006, NFR-013, NFR-014 |
+| CMP-013 | NFR-003, NFR-005, NFR-010, NFR-011, NFR-020 |
+| CMP-014 | FR-005, FR-013, FR-017, NFR-005, NFR-006, NFR-008 |
+| CMP-015 | CR-001 – CR-005 (authentication) |
+| CMP-016 | FR-007, FR-013, NFR-002 |
+| CMP-017 | NFR-005, NFR-011, NFR-012 |
+| TBL-001 … TBL-009 | See 7.1 (each appears at least once: TBL-001 FR-001; TBL-002 FR-006; TBL-003 FR-004; TBL-004 FR-005; TBL-005 FR-006; TBL-006 FR-010; TBL-007 FR-011; TBL-008 FR-008; TBL-009 FR-015) |
+| API-001 … API-017 | See 7.1 (API-015, API-016 via NFR-005; every other API via at least one FR) |
+| ERR-001 … ERR-025 | Each code's "When it happens" column in 6.3 names its requirement |
 
 ---
 
@@ -1854,3 +1931,4 @@ _To be written._
 | v0.3 | 2026-10-20 | Kakali Dinda | Section 4 written: components, sequence diagrams incl. failure paths, integrations, stack reasons, capacity, env config, AI call contract, observability | First draft | CMP-001 … CMP-017 |
 | v0.4 | 2026-10-20 | Kakali Dinda | Section 5 written: ERD, 9 tables with all columns and constraints, indexes with reasons, delete rules, seed catalog. Fixed CR-001 to use `APP_ENV`; consent end is now `ended_at` + `end_reason` (FR-016, FR-017 wording aligned) | First draft; consistency fix | TBL-001 … TBL-009, CR-001, FR-016, FR-017, K-33 |
 | v0.5 | 2026-10-20 | Kakali Dinda | Section 6 written: common rules, shared schemas, 17 endpoints with request/response/errors, full error list (25 codes). Added API-017 (read terms) for the admin editor and to the permission table | First draft; W-03 needed a read endpoint | API-001 … API-017, ERR-001 … ERR-025, CR-007 table |
+| v1.0 | 2026-10-20 | Kakali Dinda | Section 7 written (FR, NFR and reverse traceability). Self-review fixes: API-007 example numbers recomputed (`skills_coverage` 63, `overallScore` 71) to match FR-009 and 3.5.1; CR-014 framework 413/415 mapping made consistent with 6.1 (JSON body too large → `VALIDATION_FAILED`). Round 1 submission | Complete round 1; consistency between sections 1, 3 and 6 | FR-001 … FR-022, NFR-001 … NFR-020, CR-014, API-007 |
