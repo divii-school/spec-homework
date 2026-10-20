@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Author | Vaishali Naruka |
-| Version | v0.1 |
+| Version | v0.3 |
 | Last updated | 2026-10-20 |
 | Status | Draft |
 
@@ -319,10 +319,10 @@ Package manager: **pnpm 9**; Node.js **22 LTS** pinned in `.nvmrc` and `package.
 | FR-015 | Analysis history | The user sees past analyses. | Must | 1. `GET /analyses` (API-010) returns the user's analyses newest first, cursor-paginated (§6.1), default page size 20, max 50. 2. Each item shows role name, level, status, overall score (null unless completed), resume display name, created date. 3. Optional filter `status`. |
 | FR-016 | Delete analysis | The user deletes one analysis. | Must | 1. `DELETE /analyses/{id}` (API-012) hard-deletes the analysis and its scores, missing skills and suggestions; returns 204. 2. An in-flight analysis cannot be deleted → `409 ANALYSIS_IN_PROGRESS` (ERR-015). 3. Deleting does **not** give quota back (quota counts analyses run, FR-009). |
 | FR-017 | Download PDF report | The user downloads a completed analysis as a PDF. | Must | 1. `GET /analyses/{id}/report.pdf` (API-013) returns `200`, `Content-Type: application/pdf`, `Content-Disposition: attachment; filename="resume-analysis-<YYYY-MM-DD>-<roleSlug>.pdf"` (date = analysis `completedAt` in IST). 2. Layout and content per §4.9. 3. Analysis not `completed` → `409 ANALYSIS_NOT_READY` (ERR-017). 4. The PDF is generated on request and never stored. 5. Generated within `NFR-003`. 6. Free user's PDF shows only the first `CFG-07` (3) suggestions and the line "N more suggestions are available with SurfingBear Pro." |
-| FR-018 | AI failure handling | AI timeouts, errors and invalid output do not leave analyses stuck and do not cost quota. | Must | 1. Each AI call has a timeout `CFG-12` (45 s). 2. A call that times out, returns HTTP 429/5xx, or returns output failing the §4.7 schema is retried up to `CFG-13` (3 attempts total) with delays 2 s and 8 s. 3. After the last failed attempt the analysis becomes `failed` with `AI_UNAVAILABLE` (ERR-022) for timeouts/429/5xx or `AI_INVALID_OUTPUT` (ERR-023) for schema failures. 4. On `failed`, the quota reservation is released in the same transaction (`quota_released = true`). 5. While the AI circuit breaker is open (§4.7.4), new analyses are still accepted and queued; the worker delays jobs until it closes. 6. SCR-04 for a failed analysis shows the failure message and a "Try again" button that starts a new analysis with the same inputs. |
+| FR-018 | AI failure handling | AI timeouts, errors and invalid output do not leave analyses stuck and do not cost quota. | Must | 1. Each AI call has a timeout `CFG-12` (45 s). 2. A call that times out, returns HTTP 429/5xx, or returns output failing the §4.7 schema is retried up to `CFG-13` (3 attempts total) with delays 2 s and 8 s. 3. After the last failed attempt the analysis becomes `failed` with `AI_UNAVAILABLE` (ERR-022) for timeouts/429/5xx or `AI_INVALID_OUTPUT` (ERR-023) for schema failures. 4. On `failed`, the quota reservation is released in the same transaction (`quota_released = true`). 5. While the AI circuit breaker is open (§4.7.4), new analyses are still accepted and queued; the worker delays jobs until it closes. An analysis that is still not finished `CFG-14` (10 min) after creation is failed by the sweep (FR-019) with `PROCESSING_TIMEOUT` and its quota is released. 6. SCR-04 for a failed analysis shows the failure message and a "Try again" button that starts a new analysis with the same inputs. |
 | FR-019 | Stuck analysis recovery | Analyses that never finish are failed automatically. | Must | 1. Every 1 minute the scheduler (CMP-014) sets every analysis in `queued` or `processing` for longer than `CFG-14` (10 min) since `created_at` to `failed` with `PROCESSING_TIMEOUT` (ERR-024) and releases quota. 2. A worker that later finishes such an analysis does not overwrite it: the final update has `WHERE status = 'processing'` and its result is discarded if 0 rows change. |
 | FR-020 | Erase all my data | The user withdraws consent and erases all their RO data. | Must | 1. SCR-06 "Delete all my data" asks the user to type `DELETE` to confirm. 2. `DELETE /me/data` (API-015) deletes, in one transaction, all the user's TBL-003, TBL-004, TBL-005 (with children) and TBL-008 rows, and returns `204`. 3. In-flight analyses are deleted too; the worker treats a missing analysis as "drop the job" without error. 4. The user's Redis keys (`rl:*:<userId>`) are deleted. 5. One TBL-009 audit row `data_erased` is written with `user_hash` only (§5.2). 6. After erasure, API-001 shows `consent.required = true` and `quota.used = 0` — note: quota resets because the counter row is erased (accepted, see A-09). |
-| FR-021 | Automatic retention purge | Data is deleted when its retention ends. | Must | 1. Daily at 02:00 Asia/Kolkata the purge job hard-deletes: resumes with `expires_at <= now()`; analyses with `created_at <= now() - CFG-10 (180 days)` (children cascade); audit rows older than `CFG-11` (365 days); usage counters for periods older than 13 months. 2. Deletes run in batches of 1,000 rows. 3. The job logs counts only (no IDs of personal data rows other than UUIDs). 4. A resume past `expires_at` but not yet purged is treated as deleted by every API (404). |
+| FR-021 | Automatic retention purge | Data is deleted when its retention ends. | Must | 1. Daily at 02:00 Asia/Kolkata the purge job hard-deletes: resumes with `expires_at <= now()` that have no in-flight analysis (those are picked up the next day); analyses with `created_at <= now() - CFG-10 (180 days)` (children cascade); audit rows older than `CFG-11` (365 days); usage counters for periods older than 13 months. 2. Deletes run in batches of 1,000 rows. 3. The job logs counts only (no IDs of personal data rows other than UUIDs). 4. A resume past `expires_at` but not yet purged is treated as deleted by every API (404). |
 | FR-022 | Admin: manage job-role catalogue | An admin adds and edits job roles and their skills. | Should | 1. API-016 lists all roles including inactive. 2. API-017 creates a role; `slug` must match `^[a-z0-9]+(-[a-z0-9]+)*$`, 3–60 chars, unique → else `409 ROLE_SLUG_TAKEN` (ERR-021). 3. API-018 edits name, description, sort order, active flag; slug cannot change. 4. API-019 replaces a role's skill list (1–40 skills). 5. Roles are never deleted (analyses reference them); deactivate instead. 6. Every change writes a TBL-009 audit row `job_role_changed` with the admin's `user_hash`. 7. Non-admin → `403 FORBIDDEN` (ERR-002). |
 | FR-023 | My data summary | The user sees what RO stores about them (DPDP right to information). | Should | 1. `GET /me/data-summary` (API-014) returns counts of resumes and analyses, the consent version and date, the retention rules (`CFG-09`, `CFG-10`), and the Grievance Officer email. 2. SCR-06 shows it. |
 | FR-024 | Dashboard | A landing screen shows the user's quota and recent activity. | Should | 1. SCR-01 shows remaining analyses for this month, plan badge, the 5 latest analyses (API-010 `pageSize=5`) and the "New analysis" button. 2. When `remaining = 0`, the button is disabled and the text "You have used all N analyses for this month. Resets on <date>." is shown; Free users also see "Upgrade to Pro" linking to `PLATFORM_UPGRADE_URL`. |
@@ -336,7 +336,7 @@ Package manager: **pnpm 9**; Node.js **22 LTS** pinned in `.nvmrc` and `package.
 | NFR-003 | Performance | PDF report generation (API-013) | p95 < 3 s | k6 |
 | NFR-004 | Performance | End-to-end analysis time (`completed_at - created_at`) | p95 < 45 s, p50 < 20 s, measured over 7 days in `prod` | Prometheus histogram `ro_analysis_duration_seconds` |
 | NFR-005 | Availability | Monthly availability of API (`/api/health/ready` + API-001 synthetic check every 60 s) | ≥ 99.5 % per calendar month (≤ 3 h 39 m downtime) | CloudWatch Synthetics canary |
-| NFR-006 | Availability | Degraded mode when the AI provider is down | Upload, history, view and PDF of past analyses keep working; new analyses queue and complete after recovery (FR-018 AC 5) | Outage test: block Bedrock egress on `staging` for 10 min |
+| NFR-006 | Availability | Degraded mode when the AI provider is down | Upload, history, view and PDF of past analyses keep working (0 errors on those endpoints); analyses created during the outage complete after recovery if the outage ends within `CFG-14` (10 min) of their creation, otherwise they end `failed` / `PROCESSING_TIMEOUT` with quota released (FR-018 AC 5) | Outage test: block Bedrock egress on `staging` for 5 min, then for 15 min |
 | NFR-007 | Scalability | Load the design must carry without code change | 2,000 analyses/day, 100 concurrent in-flight analyses, 500 concurrent web users; worker scales horizontally (ECS auto-scaling on queue depth > 20 waiting jobs for 2 min → +1 task, max 6) | k6 soak test 1 h on `staging` |
 | NFR-008 | Security | OWASP ASVS L2 controls for auth, session, input, files | 0 high/critical findings in OWASP ZAP baseline scan and `pnpm audit --prod` | CI weekly job + pre-release |
 | NFR-009 | Security | Dependencies | No dependency with a known critical CVE in prod images | Trivy scan in CI fails on CRITICAL |
@@ -563,7 +563,499 @@ Stored in `apps/api/test/fixtures/` and generated by `pnpm fixtures` (`scripts/m
 
 ## 4. Architecture
 
-_Written in a later revision._
+### 4.1 Component diagram
+
+```mermaid
+flowchart LR
+  subgraph Browser
+    U[User] --> WEB_UI[Next.js pages<br/>CMP-001]
+  end
+  subgraph AWS ap-south-1
+    ALB[ALB<br/>resume.surfingbear.com]
+    WEB[ro-web<br/>Next.js server<br/>CMP-001]
+    API[ro-api<br/>NestJS HTTP<br/>CMP-002 .. CMP-009, CMP-013, CMP-015]
+    WK[ro-worker<br/>NestJS BullMQ<br/>CMP-010 .. CMP-012, CMP-014]
+    PG[(PostgreSQL 16<br/>RDS<br/>CMP-016)]
+    RD[(Redis 7<br/>ElastiCache<br/>CMP-017)]
+    BR[AWS Bedrock<br/>Claude]
+    OBS[CloudWatch + AMP<br/>CMP-018]
+  end
+  PLAT[SurfingBear platform<br/>login + JWKS]
+
+  WEB_UI -->|HTTPS, cookie sb_access| ALB
+  ALB -->|/api/*| API
+  ALB -->|everything else| WEB
+  API -->|verify JWT, JWKS cached| PLAT
+  API --> PG
+  API -->|enqueue, rate limit| RD
+  WK -->|consume jobs, breaker| RD
+  WK --> PG
+  WK -->|Converse API, IAM| BR
+  API -.logs/metrics.-> OBS
+  WK -.logs/metrics.-> OBS
+  WEB -.logs.-> OBS
+  WEB_UI -->|401 → redirect| PLAT
+```
+
+The browser only talks to `resume.surfingbear.com`. The ALB routes by path, so web and API share one origin (no CORS, CR-020). The Next.js server renders pages only; it never calls the API on behalf of the user and never sees resume data (all data calls are made from the browser to `/api/v1`).
+
+### 4.2 Components
+
+| ID | Component | Responsibility | Technology |
+|---|---|---|---|
+| CMP-001 | Web app (`ro-web`) | Screens SCR-01 – SCR-07, client-side file checks, polling, error display, CSP nonce | Next.js 15 App Router, React 19, TanStack Query 5, Tailwind CSS 4, next-intl |
+| CMP-002 | API app (`ro-api`) | HTTP entrypoint: global prefix `/api`, versioned routes `/api/v1`, validation pipe, exception filter, request-id, logging, rate limiting, health | NestJS 11, Express adapter, `@nestjs/throttler` with Redis storage |
+| CMP-003 | Auth | Read `sb_access`, verify JWT (CR-001 – CR-004), build `RequestUser { userId, plan, roles, isAdmin }`; `AuthGuard` (global), `RolesGuard` (`@Roles('ro_admin')`), `OriginGuard` (CR-021) | `jose` (JWKS + verify) |
+| CMP-004 | Consents | Serve notice, record consent, `ConsentService.hasCurrentConsent(userId)` | NestJS module, TBL-003 |
+| CMP-005 | Resumes | Upload pipeline (FR-003 order), dedupe, encrypt, list/get/delete | NestJS module, Multer memory storage, Node `crypto` (AES-256-GCM), TBL-004 |
+| CMP-006 | Text extractor | PDF/DOCX → normalised text + signals (§3.5.1), with timeout `CFG-19` | `pdfjs-dist` 4 (legacy build), `mammoth`, `yauzl` (zip limits) |
+| CMP-007 | Redactor | Apply §3.5.2 rules, compute `hasContact` | Pure TS functions |
+| CMP-008 | Analyses (API side) | Create (quota + insert + enqueue), list, get with gating (FR-013), delete | NestJS module, BullMQ `Queue`, TBL-005 – TBL-007, TBL-010 |
+| CMP-009 | Quota | Period function, reserve/release (§3.5.6), `getQuota(userId, plan)` | NestJS service, TBL-008 |
+| CMP-010 | Analysis processor | Consume `run-analysis` jobs, run the pipeline (§4.3.2), write results, fail + release on error | NestJS standalone app (`worker.ts`), BullMQ `Worker`, concurrency 5 per task |
+| CMP-011 | Scoring engine | Section detection, D1/D2/D3/D5, missing skills (§3.5.3, §3.5.4), candidate lines | Pure TS, no I/O |
+| CMP-012 | AI client | Build prompt, call Bedrock, retries, circuit breaker, validate output (§4.7) | `@aws-sdk/client-bedrock-runtime` (`ConverseCommand`), `zod` |
+| CMP-013 | Report generator | Render the PDF (§4.9) as a stream | `pdfkit` |
+| CMP-014 | Privacy & maintenance | Erase all data (FR-020), data summary (FR-023), stuck sweeper (FR-019), retention purge (FR-021) | API module (erase, summary) + worker repeatable jobs on queue `maintenance` |
+| CMP-015 | Job roles | Public list, admin CRUD, skill replace, seed | NestJS module, TBL-001, TBL-002 |
+| CMP-016 | PostgreSQL | System of record for all data | Amazon RDS PostgreSQL 16, Multi-AZ, `db.t4g.medium` in prod |
+| CMP-017 | Redis | BullMQ queues, rate-limit counters, AI breaker state, JWKS is **not** stored here (in-memory) | Amazon ElastiCache Redis 7, 1 primary + 1 replica, `noeviction` policy |
+| CMP-018 | Observability | Logs (CloudWatch Logs), metrics (Prometheus format at `/api/metrics` on an internal port, scraped by Amazon Managed Prometheus), traces (OpenTelemetry → AWS X-Ray), alerts | `nestjs-pino`, `prom-client`, `@opentelemetry/sdk-node` |
+| CMP-019 | Mock platform | Local/test only: issues JWTs and serves a JWKS (§4.8) | Small Node 22 HTTP server in `tools/mock-platform`, `jose` |
+
+### 4.3 Main flows
+
+#### 4.3.1 Consent and upload (FR-002, FR-003, FR-004, FR-005)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser (CMP-001)
+  participant A as ro-api
+  participant X as Extractor (CMP-006)
+  participant R as Redactor (CMP-007)
+  participant DB as PostgreSQL
+  B->>A: GET /api/v1/me
+  A-->>B: 200 { consent.required: true, quota, plan }
+  B->>A: GET /api/v1/consents/notice
+  A-->>B: 200 { version, noticeMarkdown }
+  B->>A: POST /api/v1/consents { noticeVersion }
+  A->>DB: INSERT consents ON CONFLICT DO NOTHING
+  A-->>B: 201 consent
+  B->>B: check size ≤ CFG-01 and extension .pdf/.docx
+  B->>A: POST /api/v1/resumes (multipart, file)
+  A->>DB: has consent for CFG-30?
+  alt no consent
+    A-->>B: 403 CONSENT_REQUIRED
+  end
+  A->>A: size, magic bytes, resume count < CFG-18
+  A->>X: extract(buffer, type) with 10 s timeout
+  alt encrypted / too many pages / no text / too long / timeout
+    X-->>A: ExtractError(code)
+    A-->>B: 422 FILE_ENCRYPTED | TOO_MANY_PAGES | TEXT_NOT_EXTRACTABLE | TEXT_TOO_LONG
+  end
+  X-->>A: { text, signals, pageCount }
+  A->>A: sha256(text); look up (user_id, text_sha256)
+  alt duplicate
+    A-->>B: 200 { resume, duplicate: true }
+  end
+  A->>R: redact(text) → { redacted, hasContact }
+  A->>A: AES-256-GCM encrypt(redacted); drop buffer + raw text
+  A->>DB: INSERT resumes
+  A-->>B: 201 { resume, duplicate: false }
+```
+
+#### 4.3.2 Start and process an analysis — success (FR-008 – FR-013)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser
+  participant A as ro-api
+  participant DB as PostgreSQL
+  participant Q as Redis / BullMQ
+  participant W as ro-worker
+  participant AI as Bedrock
+  B->>A: POST /api/v1/analyses { resumeId, jobRoleId, experienceLevel }
+  A->>DB: BEGIN; check resume owner + not expired; role active
+  A->>DB: reserve quota (§3.5.6); INSERT analyses status=queued
+  A->>DB: COMMIT
+  A->>Q: add job run-analysis { analysisId, requestId }, jobId = analysisId
+  A-->>B: 202 { id, status: queued }
+  loop every 2 s (CFG-20)
+    B->>A: GET /api/v1/analyses/{id}
+    A-->>B: 200 { status }
+  end
+  Q->>W: run-analysis
+  W->>DB: UPDATE status=processing WHERE status=queued
+  W->>DB: load resume (decrypt), role skills for level
+  W->>W: sections, D1, D2, D3, D5, missing skills, candidate lines
+  W->>Q: breaker closed?
+  W->>AI: Converse(prompt with redacted lines), timeout 45 s
+  AI-->>W: toolUse submit_analysis { experienceRelevance, suggestions }
+  W->>W: zod validate; §3.5.5 validation; rank
+  W->>DB: BEGIN; INSERT scores, missing skills, suggestions; UPDATE analyses status=completed WHERE status=processing; COMMIT
+  B->>A: GET /api/v1/analyses/{id}
+  A->>A: apply gating for current plan (FR-013)
+  A-->>B: 200 { status: completed, result }
+```
+
+#### 4.3.3 AI timeout, error or invalid output (FR-018)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant W as ro-worker
+  participant RB as Redis breaker
+  participant AI as Bedrock
+  participant DB as PostgreSQL
+  W->>RB: GET ai:breaker
+  alt breaker open (openUntil > now)
+    W->>W: job.moveToDelayed(openUntil + jitter 0–5 s); stop (no attempt used)
+  end
+  loop attempt 1..3 (CFG-13)
+    W->>AI: Converse (timeout 45 s)
+    alt success + valid schema
+      AI-->>W: result
+      W->>RB: reset failures
+    else timeout / 429 / 5xx / invalid schema
+      W->>RB: INCR failures (open for 60 s at 5, CFG-28)
+      W->>W: wait 2 s, then 8 s
+    end
+  end
+  Note over W: all 3 attempts failed
+  W->>DB: BEGIN; UPDATE analyses SET status=failed, failure_code=AI_UNAVAILABLE|AI_INVALID_OUTPUT WHERE status=processing; release quota; COMMIT
+```
+
+#### 4.3.4 Stuck analysis sweep (FR-019) and retention purge (FR-021)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant S as ro-worker scheduler (queue maintenance)
+  participant DB as PostgreSQL
+  Note over S: every 1 min: sweep-stuck
+  S->>DB: SELECT id FROM analyses WHERE status IN (queued, processing) AND created_at < now() - 10 min FOR UPDATE SKIP LOCKED
+  loop each analysis
+    S->>DB: UPDATE status=failed, failure_code=PROCESSING_TIMEOUT; release quota (same tx)
+  end
+  Note over S: daily 02:00 Asia/Kolkata: purge-retention
+  S->>DB: DELETE resumes WHERE expires_at <= now() AND no in-flight analysis (batches of 1,000)
+  S->>DB: DELETE analyses WHERE created_at <= now() - 180 days (children cascade)
+  S->>DB: DELETE audit_events older than 365 days; usage_counters older than 13 months
+  S->>S: log counts
+```
+
+#### 4.3.5 Download PDF report (FR-017)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser
+  participant A as ro-api
+  participant DB as PostgreSQL
+  participant P as Report generator (CMP-013)
+  B->>A: GET /api/v1/analyses/{id}/report.pdf
+  A->>DB: load analysis + children (owner check)
+  alt not completed
+    A-->>B: 409 ANALYSIS_NOT_READY
+  end
+  A->>A: apply gating for current plan
+  A->>P: render(viewModel)
+  P-->>B: 200 application/pdf (streamed)
+```
+
+#### 4.3.6 Erase all my data (FR-020)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser
+  participant A as ro-api
+  participant DB as PostgreSQL
+  participant RD as Redis
+  B->>A: DELETE /api/v1/me/data (Origin checked)
+  A->>DB: BEGIN
+  A->>DB: DELETE analyses WHERE user_id (children cascade)
+  A->>DB: DELETE resumes, consents, usage_counters WHERE user_id
+  A->>DB: INSERT audit_events (data_erased, user_hash)
+  A->>DB: COMMIT
+  A->>RD: DEL rl:*:<userId> (SCAN + DEL)
+  A-->>B: 204
+  Note over A: a queued job for a deleted analysis finds no row and ends without error
+```
+
+#### 4.3.7 Analysis state machine
+
+```mermaid
+stateDiagram-v2
+  [*] --> queued: API-009 (quota reserved)
+  queued --> processing: worker picks job
+  processing --> completed: results saved
+  processing --> failed: AI_UNAVAILABLE / AI_INVALID_OUTPUT
+  queued --> failed: PROCESSING_TIMEOUT (sweep) / AI_UNAVAILABLE (enqueue failed)
+  processing --> failed: PROCESSING_TIMEOUT (sweep)
+  completed --> [*]
+  failed --> [*]: quota released
+```
+
+Only these transitions are allowed. Every update uses `WHERE status = <expected from-state>`; 0 updated rows means another actor won and the current actor stops.
+
+### 4.4 External integrations
+
+| System | Purpose | Protocol / auth | Failure handling |
+|---|---|---|---|
+| SurfingBear platform — JWKS | Public keys to verify `sb_access` | HTTPS `GET AUTH_JWKS_URL`, no auth, timeout 3 s | Keys cached in memory `CFG-21`. If a refresh fails, the cached keys are used (no TTL expiry while the platform is unreachable). If there are no cached keys at all (fresh task start) → requests get `503 SERVICE_UNAVAILABLE` (ERR-019) and `/health/ready` reports not ready. |
+| SurfingBear platform — login / upgrade pages | Redirect targets | Browser navigation to `PLATFORM_LOGIN_URL`, `PLATFORM_UPGRADE_URL` | None needed (outside RO). |
+| AWS Bedrock (Claude) | D4 score + rewrite suggestions | `ConverseCommand` over HTTPS, SigV4 with the ECS task IAM role (`bedrock:InvokeModel` on the one model ARN only), region `ap-south-1` | Timeout `CFG-12`, 3 attempts (FR-018), circuit breaker (§4.7.4), daily cap `CFG-27`. Analyses fail cleanly with quota released. Rest of RO keeps working (NFR-006). |
+| PostgreSQL (RDS) | All data | TLS, password auth (Secrets Manager), Prisma pool `connection_limit=10` per task | API: Prisma errors of connection type → `503 SERVICE_UNAVAILABLE`; `/health/ready` fails → ALB stops routing. Worker: job throws, BullMQ retries the job up to 3 times with exponential backoff 5 s (job-level), then the sweep fails it. |
+| Redis (ElastiCache) | Queues, rate limits, breaker | TLS, AUTH token | API: if Redis is down, rate limiting **fails open** (requests are allowed, a `warn` log is written); `POST /analyses` returns `503` because the job cannot be queued (FR-008 AC 6). Worker: BullMQ reconnects automatically. |
+
+### 4.5 Tech stack and reasons
+
+| Layer | Choice | Why this choice (for this system) | Alternatives considered |
+|---|---|---|---|
+| Backend | NestJS 11 on Node.js 22 LTS, TypeScript 5 | My team's main stack. One language end to end means DTO types and constants are shared with the web (`@ro/shared`), so a limit like `CFG-01` can't drift between client and server. Nest modules map 1:1 to the components above. | Spring Boot (stronger PDF tooling but a second language for the frontend team), Go (fast, but no shared types with Next.js). |
+| API + worker split | One codebase, two entrypoints (`main.ts`, `worker.ts`), same image | AI calls take up to 45 s; keeping them off the HTTP tasks keeps API p95 < 300 ms (NFR-001) and lets the worker scale on queue depth (NFR-007) separately. One codebase avoids duplicating the Prisma schema. | Separate worker repo (duplicate models); doing AI calls in the request (blocks connections, no retry). |
+| Queue | BullMQ 5 on Redis | Redis is already required; BullMQ gives delayed jobs (breaker), repeatable jobs with timezone (purge at 02:00 IST), stalled-job recovery, and `jobId` dedupe (one job per analysis). | SQS (another service, no repeatable cron), pg-boss (fine, but Redis already present). |
+| Frontend | Next.js 15 App Router, React 19 | Required by the brief. Server components render the shell fast (NFR-018); data screens are client components because they poll. `output: "standalone"` gives a small Docker image. | — |
+| Client data | TanStack Query 5 | Built-in `refetchInterval` with a function (stop on final status) and `refetchIntervalInBackground: false` gives exactly FR-014's polling rules. | SWR (similar, less control of mutations); WebSockets/SSE (needs sticky connections through ALB for a < 1 min wait — not worth it). |
+| Styling | Tailwind CSS 4 + Radix UI primitives | Radix gives accessible dialogs, radio groups, select (NFR-016) without a heavy design system. | MUI (large bundle), PrimeReact (theme overrides needed). |
+| ORM | Prisma 6 with hand-edited SQL migrations | Typed client shared by API and worker; migrations are plain SQL so CHECK constraints and partial unique indexes (needed by FR-008) are written directly. | TypeORM (weaker typing), raw `pg` (more boilerplate). |
+| Database | PostgreSQL 16 | Given. Row locks (`FOR UPDATE`) make quota exact under concurrency (FR-009 AC 6); partial unique index enforces one in-flight analysis; `jsonb` for signals. | — |
+| Cache | Redis 7 | Given. Rate-limit counters with TTL, BullMQ, breaker state shared by all workers. | — |
+| AI | Claude via AWS Bedrock, `ap-south-1`, model from `BEDROCK_MODEL_ID` | Data stays in India in our AWS account (DPDP, NFR-011); no prompt retention for training; IAM role auth (no API key to leak); tool-use forces structured JSON output (§4.7). | Direct provider API (data leaves India; key management); self-hosted open model (GPU cost, quality). |
+| File storage | **None** | The file is parsed in memory and discarded (A-04): nothing to secure, expire or erase. | S3 with 30-day lifecycle (adds breach surface and an erase path). |
+| PDF extraction | `pdfjs-dist` | Maintained by Mozilla, gives text positions (`hasEOL`) and operator lists for image counts (D3). | `pdf-parse` (unmaintained wrapper over old pdf.js). |
+| DOCX extraction | `mammoth` + `yauzl` | `mammoth` gives clean raw text; `yauzl` lets us enforce zip-bomb limits before parsing. | `docx4js` (less used). |
+| PDF output | `pdfkit` | Streams a PDF directly with no browser; small image; fast (NFR-003). Report layout is simple text + bars. | Headless Chromium (large image, slow cold start), `@react-pdf/renderer` (heavier for this layout). |
+| Hosting | AWS ECS Fargate, ALB, RDS, ElastiCache, `ap-south-1` | Mumbai region for residency; Fargate needs no server patching; ALB path routing gives the single origin. | EKS (too much ops for 3 services). |
+| IaC / CI | Terraform 1.9, GitHub Actions | Same infra in 3 accounts (CR-035); repo is on GitHub. | CDK. |
+
+### 4.6 Configuration (environment variables)
+
+Validated at start-up with a `zod` schema in `apps/api/src/config/env.schema.ts`; an invalid or missing required variable stops the process with exit code 1 and a log line naming the variable (never its value).
+
+| Variable | Used by | Required | Example / default | Notes |
+|---|---|---|---|---|
+| `NODE_ENV` | all | yes | `production` | |
+| `APP_ENV` | all | yes | `local` \| `test` \| `dev` \| `staging` \| `prod` | Drives CR-001 header rule, CR-013 log level |
+| `PORT` | api | no | `4000` | web uses `3000` |
+| `METRICS_PORT` | api, worker | no | `9464` | Not exposed through the ALB |
+| `DATABASE_URL` | api, worker | yes | `postgresql://ro:***@host:5432/ro?sslmode=require&connection_limit=10` | |
+| `REDIS_URL` | api, worker | yes | `rediss://:***@host:6379` | |
+| `AUTH_JWKS_URL` | api | yes | `https://auth.surfingbear.com/.well-known/jwks.json` | |
+| `AUTH_ISSUER` | api | yes | `https://auth.surfingbear.com` | |
+| `AUTH_AUDIENCE` | api | yes | `resume-optimizer` | |
+| `WEB_ORIGIN` | api | yes | `https://resume.surfingbear.com` | CR-021 |
+| `PLATFORM_LOGIN_URL` | web | yes | `https://surfingbear.com/login` | exposed as `NEXT_PUBLIC_PLATFORM_LOGIN_URL` |
+| `PLATFORM_UPGRADE_URL` | web | yes | `https://surfingbear.com/pricing` | exposed as `NEXT_PUBLIC_PLATFORM_UPGRADE_URL` |
+| `RESUME_TEXT_KEY` | api, worker | yes | 32 random bytes, base64 | AES-256-GCM key (TBL-004) |
+| `RESUME_TEXT_KEY_ID` | api, worker | yes | `k1` | Stored with each row; a rotation adds `RESUME_TEXT_KEY_PREVIOUS` + `_ID` for reading old rows |
+| `AI_MODE` | worker | yes | `bedrock` \| `mock` | `mock` only allowed when `APP_ENV` is `local` or `test` (start-up check) |
+| `AI_MOCK_FAILURE` | worker | no | `none` \| `timeout` \| `error` \| `invalid` | Only in `mock` mode (§4.7.5) |
+| `AWS_REGION` | worker | yes | `ap-south-1` | Start-up check: must be `ap-south-1` when `APP_ENV=prod` |
+| `BEDROCK_MODEL_ID` | worker | yes in `bedrock` mode | the Claude Sonnet model ID / inference profile ID enabled in the account | Recorded per analysis (`ai_model`) |
+| `AI_TIMEOUT_MS` | worker | no | `45000` | CFG-12 |
+| `AI_DAILY_CALL_CAP` | worker | no | `0` (unlimited) | CFG-27; `200` in `dev` |
+| `FREE_MONTHLY_ANALYSES` | api | no | `3` | CFG-05 |
+| `PRO_MONTHLY_ANALYSES` | api | no | `50` | CFG-06 |
+| `WORKER_CONCURRENCY` | worker | no | `5` | |
+| `LOG_LEVEL` | all | no | per CR-013 | |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | api, worker | no | `http://localhost:4318` | ADOT sidecar |
+
+`.env.example` in each app lists every variable with the `local` value.
+
+### 4.7 AI call contract (CMP-012)
+
+#### 4.7.1 Request
+
+`ConverseCommand` with:
+
+- `modelId`: `BEDROCK_MODEL_ID`
+- `inferenceConfig`: `{ maxTokens: 4000, temperature: 0 }`
+- `system`: the system prompt below (`PROMPT_VERSION = "p1"`, stored in `apps/api/src/worker/ai/prompts/p1.ts`)
+- `messages`: one user message whose text is the JSON input below
+- `toolConfig`: one tool `submit_analysis` with the input schema in §4.7.2, and `toolChoice: { tool: { name: "submit_analysis" } }` so the model must answer through the tool
+
+System prompt (`p1`):
+
+```text
+You are an expert technical recruiter reviewing a resume for an Applicant Tracking System (ATS) report.
+Personal details in the resume have been replaced with tokens such as [NAME], [EMAIL], [PHONE], [URL], [ID]. Never try to guess them and never output them.
+
+You will receive JSON with: targetRole (name and description), experienceLevel (entry = 0-2 years, mid = 3-5, senior = 6-9, lead = 10+), resumeText, and candidateLines (each {i, t}).
+
+Do two things and answer only by calling the tool submit_analysis:
+
+1. experienceRelevance: score 0-100 for how well the work experience in resumeText matches the targetRole at the experienceLevel. 90-100 = directly relevant roles and responsibilities at the right seniority; 60-89 = mostly relevant or seniority slightly off; 30-59 = partly relevant or clearly different seniority; 0-29 = unrelated. Give a one-sentence explanation (max 300 characters) that does not quote personal details.
+
+2. suggestions: pick up to 10 of the weakest candidateLines and rewrite each one. For each give: lineIndex (the i value), issue (one of weak_verb, no_metric, vague, too_long, passive, jargon), severity (3 = hurts the resume most, 1 = minor), rewrite (10-300 characters, starts with a strong past-tense action verb, keeps every fact of the original), rationale (max 200 characters).
+Rules for rewrite: do not invent facts, employers, tools or numbers. If a number would make the line stronger but the original has none, write a placeholder exactly as [number], [percent], [amount] or [count] for the candidate to fill in. Only use digits that already appear in the original line.
+```
+
+User message JSON:
+
+```json
+{
+  "targetRole": { "name": "Frontend Developer", "description": "Builds user interfaces for web applications." },
+  "experienceLevel": "mid",
+  "resumeText": "<redacted resume text, full>",
+  "candidateLines": [ { "i": 12, "t": "Worked on the dashboard using React." } ]
+}
+```
+
+#### 4.7.2 Output schema (tool input), validated with `zod`
+
+```json
+{
+  "type": "object",
+  "required": ["experienceRelevance", "suggestions"],
+  "additionalProperties": false,
+  "properties": {
+    "experienceRelevance": {
+      "type": "object",
+      "required": ["score", "explanation"],
+      "additionalProperties": false,
+      "properties": {
+        "score": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "explanation": { "type": "string", "minLength": 1, "maxLength": 300 }
+      }
+    },
+    "suggestions": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "required": ["lineIndex", "issue", "severity", "rewrite", "rationale"],
+        "additionalProperties": false,
+        "properties": {
+          "lineIndex": { "type": "integer", "minimum": 0 },
+          "issue": { "enum": ["weak_verb", "no_metric", "vague", "too_long", "passive", "jargon"] },
+          "severity": { "type": "integer", "minimum": 1, "maximum": 3 },
+          "rewrite": { "type": "string", "maxLength": 400 },
+          "rationale": { "type": "string", "maxLength": 300 }
+        }
+      }
+    }
+  }
+}
+```
+
+Validation is two-level:
+1. **Schema level** (zod, the schema above): the response has no `toolUse` block, or the tool input fails the schema, or `experienceRelevance` fails → the **attempt** failed with reason `invalid` (counts toward `CFG-13`).
+2. **Item level** (§3.5.5 rules 1–6, which are stricter than the schema, e.g. rewrite 10–300 chars, rationale truncated to 200 chars): failing items are dropped silently; the attempt still succeeds. Metric `ro_ai_suggestions_dropped_total{reason}` counts drops.
+
+The worker stores `ai_model` (= `BEDROCK_MODEL_ID`), `prompt_version` (= `p1`) and the token counts from `usage` on the analysis. The prompt and the response body are **not** stored or logged (CR-011).
+
+#### 4.7.3 Error classification
+
+| Outcome | Classified as | Retry? |
+|---|---|---|
+| No response within `CFG-12` (SDK `abortSignal` via `AbortSignal.timeout`) | `timeout` | yes |
+| `ThrottlingException`, `ServiceUnavailableException`, `InternalServerException`, `ModelNotReadyException`, network error | `error` | yes |
+| `ValidationException`, `AccessDeniedException`, `ResourceNotFoundException` | `config` | no — fail immediately with `AI_UNAVAILABLE`, log at `error`, alert |
+| Schema failure (§4.7.2 level 1) | `invalid` | yes |
+
+Final failure code: if the last attempt was `invalid` → `AI_INVALID_OUTPUT` (ERR-023); otherwise → `AI_UNAVAILABLE` (ERR-022).
+
+#### 4.7.4 Circuit breaker and daily cap
+
+- Redis hash `ai:breaker` with fields `failures` (int) and `openUntil` (epoch ms).
+- After a call classified `timeout`/`error`: `HINCRBY failures 1`; if the result ≥ 5 → `HSET openUntil now+60000`. After a successful call: `HSET failures 0 openUntil 0`. `invalid` does not count (the provider is up).
+- Before each attempt: if `openUntil > now`, the job is moved to delayed until `openUntil` + random 0–5 s (`job.moveToDelayed`, then throw BullMQ `DelayedError`); no attempt is used. When `openUntil` has passed, the first worker to do `SET ai:breaker:trial 1 NX PX 60000` makes one trial call; other workers wait as if the breaker were open.
+- Daily cap (`CFG-27`, non-zero only in `dev`): Redis key `ai:calls:<YYYY-MM-DD IST>` `INCR` with 48 h TTL; when over the cap, the analysis fails with `AI_UNAVAILABLE` without calling Bedrock.
+
+#### 4.7.5 Mock AI (`AI_MODE=mock`)
+
+Deterministic, no network:
+- `experienceRelevance = { score: 70, explanation: "Mock: experience is mostly relevant to the target role." }`.
+- `suggestions`: for the first 3 candidate lines (in order) that contain no digit: `{ lineIndex, issue: "no_metric", severity: 2, rewrite: "<line without trailing period>, improving results by [percent].", rationale: "Mock: adding a measurable result makes the impact clear." }`.
+- `AI_MOCK_FAILURE=timeout` → every call waits `AI_TIMEOUT_MS` then is classified `timeout`; `error` → throws `ServiceUnavailableException`; `invalid` → returns `{ "foo": 1 }`.
+
+### 4.8 Local setup and mock platform
+
+```bash
+corepack enable && pnpm install
+docker compose up -d                 # postgres:16 on 5432, redis:7 on 6379, mock-platform on 4010
+pnpm --filter @ro/api prisma migrate deploy && pnpm --filter @ro/api prisma db seed
+pnpm dev                             # web :3000, api :4000, worker (AI_MODE=mock)
+open http://localhost:4010/login?userId=11111111-1111-4111-8111-111111111111&plan=free
+```
+
+Mock platform (CMP-019, `tools/mock-platform/server.ts`):
+- On start, generates an RS256 key pair (`kid` = `mock-1`) unless `MOCK_KEY_PATH` points to a saved JWK.
+- `GET /.well-known/jwks.json` → public JWKS.
+- `GET /login?userId=<uuid>&plan=free|pro&admin=0|1&returnTo=<url>` → signs a JWT (`iss=http://localhost:4010`, `aud=resume-optimizer`, `exp` = now + 15 min, `roles` = `["ro_admin"]` if `admin=1`), sets cookie `sb_access` (`HttpOnly; SameSite=Lax; Path=/`, domain `localhost`), and redirects to `returnTo` (default `http://localhost:3000/`).
+- `POST /token` with JSON `{ userId, plan, admin, expiresInSec }` → `{ token }` for e2e tests (sent as `Authorization: Bearer`, allowed in `local`/`test` per CR-001).
+- Local `.env`: `AUTH_JWKS_URL=http://localhost:4010/.well-known/jwks.json`, `AUTH_ISSUER=http://localhost:4010`, `WEB_ORIGIN=http://localhost:3000`, `PLATFORM_LOGIN_URL=http://localhost:4010/login`.
+- Next.js `next.config.ts` (local only, `APP_ENV=local`): `rewrites: [{ source: '/api/:path*', destination: 'http://localhost:4000/api/:path*' }]` so the browser sees one origin, as in production.
+
+### 4.9 PDF report layout (CMP-013, FR-017)
+
+A4 portrait, margins 48 pt, font Helvetica (built into pdfkit; no font files), black text on white, accent colour `#1E5EFF` for bars.
+
+1. **Header:** "SurfingBear Resume Optimizer — ATS Report" (18 pt bold); line below: "{roleName} · {level label} · {completedAt as `20 Oct 2026, 2:45 pm IST`}" (10 pt); resume display name (10 pt, grey `#555555`).
+2. **Overall score:** large number "{overallScore}/100" (36 pt bold) and band label.
+3. **Dimensions table:** one row per D1–D5 in that order: label (`Keyword match`, `Section structure`, `ATS parseability`, `Experience relevance`, `Impact`), weight "30 %", score, a horizontal bar 200 pt wide filled proportionally, and the explanation below in 9 pt.
+4. **Missing skills:** two lists "Must-have" and "Nice-to-have"; "None — great coverage!" when empty.
+5. **Suggestions:** numbered by `rank`; each shows "Original:" line, "Suggested:" line (placeholders in bold), issue label, rationale. Free users: first 3 only, then the sentence from FR-017 AC 6. "No weak lines found." when empty.
+6. **Footer on every page:** "Generated {now IST} · Page {n} of {N} · Scores are guidance, not a hiring decision."
+7. The PDF metadata `Title` = "ATS Report — {roleName}"; `Author` = "SurfingBear"; no personal data in metadata.
+
+### 4.10 Observability (CMP-018)
+
+**Metrics** (Prometheus, prefix `ro_`):
+
+| Metric | Type | Labels |
+|---|---|---|
+| `ro_http_request_duration_seconds` | histogram | `route`, `method`, `status` |
+| `ro_upload_rejected_total` | counter | `code` |
+| `ro_analysis_created_total` | counter | `plan` |
+| `ro_analysis_finished_total` | counter | `status`, `failure_code` |
+| `ro_analysis_duration_seconds` | histogram (buckets 5, 10, 20, 30, 45, 60, 120, 300) | — |
+| `ro_ai_call_duration_seconds` | histogram | `outcome` (`ok`, `timeout`, `error`, `invalid`, `config`) |
+| `ro_ai_tokens_total` | counter | `direction` (`input`, `output`) |
+| `ro_ai_suggestions_dropped_total` | counter | `reason` (rule number 1–6) |
+| `ro_ai_breaker_open` | gauge (0/1) | — |
+| `ro_queue_waiting_jobs` | gauge | `queue` |
+| `ro_purge_deleted_rows_total` | counter | `table` |
+
+**Alerts** (to Slack `#ro-alerts`, prod and staging):
+
+| Alert | Condition |
+|---|---|
+| API error rate | 5xx > 2 % of requests over 5 min |
+| API latency | p95 of `ro_http_request_duration_seconds` (excluding API-004, API-013) > 300 ms for 10 min |
+| Analyses failing | `failed` > 10 % of finished analyses over 15 min |
+| Breaker open | `ro_ai_breaker_open = 1` for > 5 min |
+| Stuck analyses | any in-flight analysis older than 10 min (NFR-013) |
+| Queue backlog | `ro_queue_waiting_jobs{queue="analysis"} > 100` for 5 min |
+| Purge did not run | no `purge-retention` success log in the last 26 h |
+| AI config error | any AI call with outcome `config` |
+
+**Traces:** OpenTelemetry auto-instrumentation for HTTP, Prisma and ioredis; the API injects the trace context into the BullMQ job data so the worker span links to the request span. Span attributes MUST NOT contain resume text (CR-011).
+
+### 4.11 Queue and worker rules (CMP-010, CMP-014)
+
+| Queue | Job name | Added by | Job options | Payload |
+|---|---|---|---|---|
+| `analysis` | `run-analysis` | API-009 | `jobId = analysisId` (dedupe), `attempts: 3`, `backoff: { type: "exponential", delay: 5000 }`, `removeOnComplete: { age: 86400 }`, `removeOnFail: { age: 604800 }` | `{ analysisId: string, requestId: string, traceContext: object }` — no personal data |
+| `maintenance` | `sweep-stuck` | worker start-up (`upsertJobScheduler`) | every 60,000 ms | `{}` |
+| `maintenance` | `purge-retention` | worker start-up | cron `0 2 * * *`, `tz: "Asia/Kolkata"` | `{}` |
+
+`run-analysis` processor steps (each step's failure behaviour in brackets):
+
+1. Load the analysis by ID. Not found → return (erased, FR-020 AC 3). Status `completed`/`failed` → return.
+2. Claim: `UPDATE analyses SET status='processing', started_at=COALESCE(started_at, now()) WHERE id=$1 AND status IN ('queued','processing')`. 0 rows → return. (`processing` is allowed so a BullMQ retry or stalled-job recovery of the **same** job can continue; BullMQ's job lock guarantees one active run per `jobId`.)
+3. Load the resume. Not found (deleted by erasure) → return.
+4. Decrypt the text, split lines (§3.5.1 step 4), run CMP-011 (D1, D2, D3, D5, missing skills, candidate lines).
+5. Call CMP-012 (§4.7) with its own 3 attempts. AI failure → step 7.
+6. Save in one transaction: delete any existing child rows for this analysis (idempotent retry), insert TBL-006/TBL-007/TBL-010 rows, `UPDATE analyses SET status='completed', overall_score, band, completed_at=now(), ai_model, prompt_version, ai_input_tokens, ai_output_tokens WHERE id=$1 AND status='processing'`. 0 rows → rollback, return (the sweep already failed it, FR-019 AC 2).
+7. Fail: in one transaction `UPDATE analyses SET status='failed', failure_code=$2, completed_at=now() WHERE id=$1 AND status='processing'` and, if 1 row changed, release quota (§3.5.6).
+8. Any other exception (DB, Redis, decrypt) is thrown, so BullMQ retries the job (max 3 job attempts). After the last job attempt, the processor's `failed` event handler runs step 7 with `AI_UNAVAILABLE`; if that also fails, the stuck sweep (FR-019) fails it within 10 min.
+
+Worker graceful shutdown: on `SIGTERM`, `worker.close()` waits up to 60 s for active jobs (ECS `stopTimeout: 90`).
 
 ---
 
@@ -590,3 +1082,5 @@ _Written in a later revision._
 | Version | Date | Author | What changed | Why | Affected IDs |
 |---|---|---|---|---|---|
 | v0.1 | 2026-10-20 | Vaishali Naruka | Sections 1–2: common requirements and coding conventions | First draft | CR-001 – CR-041 |
+| v0.2 | 2026-10-20 | Vaishali Naruka | Section 3: glossary, FR-001 – FR-024, NFR-001 – NFR-020, assumptions A-01 – A-11, constants CFG-01 – CFG-32, scoring and redaction rules, privacy notice, screens SCR-01 – SCR-07, test fixtures | First draft | FR-001 – FR-024, NFR-001 – NFR-020 |
+| v0.3 | 2026-10-20 | Vaishali Naruka | Section 4: components, flows, integrations, stack reasons, env config, AI contract, PDF layout, observability, local setup | First draft | CMP-001 – CMP-019 |
