@@ -6,6 +6,7 @@ List every AI conversation you used, with a link and one line on what it was for
 | Date | Tool | Link | What I used it for |
 |---|---|---|---|
 | 2026-10-20 | Claude Code (CLI on Windows, Claude Opus 5.5) | Claude Code CLI sessions have no shareable link. Session ID: `dfc099ad-cf47-4fa2-b1b2-279e9db4f7ea` (transcript can be exported on request) | Read `#ai-spec-homework` on Slack, the Notion homework page and its comments, and `BRIEF.md` / `RUBRIC.md` / `TEMPLATE.md`. Wrote down the open design decisions first, then drafted `spec.md` one section at a time with a commit after each (v0.1–v0.6), ran an ID cross-check script, and ran a simulated build test with a separate review agent that saw only `spec.md`; fixed what it found (v1.0). |
+| 2026-10-22 | Claude Code (same session as above) | same session ID | Round 2: read Saswat's requirement change (Resume Pro, ₹299/month via Razorpay), listed every section it touches, applied it section by section with a commit after each (requirements → architecture → DB → API → traceability + change log, v1.1), re-ran the ID cross-check, and had a separate review agent check only the round 2 changes for gaps and contradictions; fixed what it found. |
 
 ## Notes
 
@@ -34,6 +35,13 @@ List every AI conversation you used, with a link and one line on what it was for
 - AI outages longer than 10 minutes conflicted with "queued analyses complete after recovery"; I made the rule explicit (FR-018 AC 5, NFR-006).
 - Some seed skill aliases (`rest`, `spring`, `ci`, `vision`) would have matched ordinary words; I replaced them with specific phrases.
 - The ERD first used a Mermaid attribute syntax that does not render; I rewrote it.
+
+### Round 2 (Resume Pro) — how I handled the change
+- **Who decides "Pro"?** In v1.0 the plan came from the platform's JWT. Since Razorpay billing now lives in this module, I moved the source of truth into RO: a user is Pro while one of their subscriptions has `paid_until > now()` (FR-027). This one rule covers "cancel any time, Pro until the end of the paid month" and failed renewals, without extra flags. The JWT `plan` claim is now ignored (CR-004 changed, not deleted).
+- **Nothing renumbered.** The 50/month Pro cap (`CFG-06`) and the `PLATFORM_UPGRADE_URL` variable are marked **Deprecated**; new items got the next free IDs (FR-025 – FR-030, TBL-011 – TBL-013, API-022 – API-028, ERR-025 – ERR-030, CFG-47 – CFG-52).
+- **"Free users stay exactly as they are"** decided an ambiguity: Free users already had a history list in v1.0, so I kept it and made only the new score comparison Pro-only (A-14). I also kept the analysis consent notice unchanged (a new version would have forced every Free user to re-consent) and put the payment wording in a separate notice on the subscription page.
+- **Trade-off with erasure:** payment records must be kept for 8 years by law, so "erase all my data" now deletes all resume/analysis data but keeps billing rows, pseudonymised once Pro ends (A-16, FR-020 AC 7).
+- **Webhooks can be lost or arrive out of order**, so there is idempotency by event ID, a "never move `paid_until` backwards" rule, and a daily reconciliation job.
 
 ### Checks done
 - ID cross-check (shell script): every `FR/NFR/CR/CFG/CMP/TBL/API/ERR/SCR` ID referenced anywhere is defined exactly once.
