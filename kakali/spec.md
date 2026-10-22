@@ -1616,6 +1616,8 @@ All six satisfy FR-019 AC 5 (≥ 5 core, ≥ 3 keyword).
 - **Standard error format:** exactly the format of section 1.4. HTTP status ↔ code mapping is the table in 6.3.
 - **Errors common to all `/v1` endpoints** (not repeated per endpoint): `401 UNAUTHENTICATED`, `429 RATE_LIMITED`, `500 INTERNAL_ERROR`, `503 SERVICE_UNAVAILABLE`; and for `POST`/`PUT`/`PATCH`/`DELETE`: `403 FORBIDDEN` (bad `Origin`), `400 VALIDATION_FAILED` (unknown fields / bad JSON).
 - **Caching:** `Cache-Control: no-store` on all responses except API-001 (`private, max-age=300`).
+- **Webhook exception (v2.0):** API-023 `POST /api/resume-optimizer/webhooks/razorpay` is outside `/v1` and outside the rules above: no cookie auth, no `Origin` check, no per-user rate limit, no `Accept-Language`. It is authenticated only by `X-Razorpay-Signature` over the raw body (FR-025 AC 1). It still answers errors in the standard format.
+- **Money (v2.0):** amounts are integers in paise (`amountPaise`) with `currency: "INR"`, never floating-point rupees.
 - **OpenAPI:** generated with `@nestjs/swagger` from the DTOs and served at `/api/resume-optimizer/v1/openapi.json` in `local`, `dev` and `staging` only (used by NFR-007 and by `packages/contracts` type checks).
 
 **Shared schemas** (used by several endpoints):
@@ -1661,12 +1663,13 @@ All six satisfy FR-019 AC 5 (≥ 5 core, ≥ 3 keyword).
 
 | Field | Type | Notes |
 |---|---|---|
-| `plan` | `free` \| `premium` | From the current token |
+| `plan` | `free` \| `pro` | Current tier from FR-027 *(changed in v2.0: was `free` \| `premium` from the token)* |
 | `period` | string `YYYY-MM` | Current IST month |
-| `limit` | integer | `K-10` or `K-11` |
-| `used` | integer | |
-| `reserved` | integer | In-progress analyses |
-| `remaining` | integer | `max(0, limit − used − reserved)` |
+| `limit` | integer \| null | `K-10` for free; `null` for pro (unlimited, FR-028) |
+| `used` | integer | Completed free-tier analyses this month |
+| `proUsed` | integer | Completed Pro analyses this month (v2.0) |
+| `reserved` | integer | In-progress free-tier analyses |
+| `remaining` | integer \| null | Free: `max(0, limit − used − reserved)`; pro: `null` |
 | `resetsAt` | string (date-time) | Start of next IST month in UTC |
 
 ### 6.2 Endpoints
@@ -1690,6 +1693,13 @@ All six satisfy FR-019 AC 5 (≥ 5 core, ≥ 3 keyword).
 | API-015 | GET | `/api/resume-optimizer/health/live` | none | NFR-005 |
 | API-016 | GET | `/api/resume-optimizer/health/ready` | none | NFR-005, CR-035 |
 | API-017 | GET | `/admin/job-roles/{jobRoleId}/terms` | ro_admin | FR-019 |
+| API-018 | GET | `/me/subscription` | user | FR-030, FR-027 (v2.0) |
+| API-019 | POST | `/me/subscription/checkout` | user | FR-023 (v2.0) |
+| API-020 | POST | `/me/subscription/verify` | user | FR-024 (v2.0) |
+| API-021 | POST | `/me/subscription/cancel` | user | FR-026 (v2.0) |
+| API-022 | GET | `/me/payments` | user | FR-030 (v2.0) |
+| API-023 | POST | `/api/resume-optimizer/webhooks/razorpay` | Razorpay (signature) | FR-025 (v2.0) |
+| API-024 | GET | `/analysis-comparisons` | user, tier `pro` | FR-029 (v2.0) |
 
 #### API-001 `GET /job-roles`
 - **Purpose:** list active job roles for the upload form.
@@ -1723,7 +1733,13 @@ Sorted by `name` ascending in the request locale (`Intl.Collator(locale)`).
 **Response 200**
 
 ```json
-{ "plan": "free", "period": "2026-10", "limit": 3, "used": 1, "reserved": 0, "remaining": 2, "resetsAt": "2026-10-31T18:30:00.000Z" }
+{ "plan": "free", "period": "2026-10", "limit": 3, "used": 1, "proUsed": 0, "reserved": 0, "remaining": 2, "resetsAt": "2026-10-31T18:30:00.000Z" }
+```
+
+Pro user (v2.0):
+
+```json
+{ "plan": "pro", "period": "2026-10", "limit": null, "used": 2, "proUsed": 14, "reserved": 0, "remaining": null, "resetsAt": "2026-10-31T18:30:00.000Z" }
 ```
 
 **Errors:** common only.
@@ -1777,7 +1793,7 @@ Sorted by `name` ascending in the request locale (`Intl.Collator(locale)`).
 
 #### API-005 `POST /analyses`
 - **Purpose:** upload a resume and start an analysis.
-- **Auth / role:** user (any plan).
+- **Auth / role:** user (any tier; quota applies to free only, FR-008 / FR-028).
 - **Implements:** FR-001 – FR-005, FR-008, FR-013 (breaker).
 
 **Request** — `multipart/form-data`, exactly these parts (any other part → `400 VALIDATION_FAILED`, `issue: "unknown_field"`):
@@ -1830,7 +1846,7 @@ Check order: FR-005 AC 2.
 | 422 | NOT_ENOUGH_TEXT | < `K-06` non-whitespace chars |
 | 422 | RESUME_TOO_LONG | > `K-07` chars |
 | 422 | RESUME_LANGUAGE_UNSUPPORTED | < 80 % ASCII letters |
-| 429 | QUOTA_EXCEEDED | Monthly limit reached; `details: [{ "limit": 3, "used": 3, "resetsAt": "…" }]` |
+| 429 | QUOTA_EXCEEDED | Free tier only: monthly limit reached; `details: [{ "limit": 3, "used": 3, "resetsAt": "…" }]` |
 | 429 | RATE_LIMITED | `K-20` per minute or `K-21` per hour exceeded |
 | 503 | AI_UNAVAILABLE | Circuit breaker open (FR-013 AC 5); no quota used |
 | 503 | SERVICE_UNAVAILABLE | DB/Redis unavailable or enqueue failed (FR-005 AC 5) |
@@ -2124,6 +2140,232 @@ Writes `audit_events` `job_role_terms_replaced` with `metadata.termCount`.
 
 **Errors:** `400 VALIDATION_FAILED` (bad UUID), `403 FORBIDDEN`, `404 NOT_FOUND`; common.
 
+#### API-018 `GET /me/subscription` — *new in v2.0*
+- **Purpose:** the caller's tier and Resume Pro state for W-04 and the header badge.
+- **Auth / role:** user.
+- **Implements:** FR-030, FR-027.
+
+**Request:** none.
+
+**Response 200** (`SubscriptionState`, also returned by API-020 and API-021):
+
+| Field | Type | Notes |
+|---|---|---|
+| `tier` | `free` \| `pro` | FR-027 |
+| `proUntil` | string (date-time) \| null | Max `period_end` of paid periods; may be in the past |
+| `price.amountPaise` | integer | `K-70` |
+| `price.currency` | `INR` | |
+| `subscription` | object \| null | Newest TBL-010 row that is live or whose access is still running; `null` otherwise |
+| `subscription.id` | string (uuid) | TBL-010 `id` (not the Razorpay ID) |
+| `subscription.status` | `created` \| `authenticated` \| `active` \| `pending` \| `halted` \| `cancelled` \| `completed` \| `expired` | |
+| `subscription.cancelAtPeriodEnd` | boolean | |
+| `subscription.currentPeriodStart` / `currentPeriodEnd` | string (date-time) \| null | |
+| `subscription.nextChargeAt` | string (date-time) \| null | `null` when `cancelAtPeriodEnd` or not `active` |
+
+```json
+{
+  "tier": "pro",
+  "proUntil": "2026-11-22T06:30:00.000Z",
+  "price": { "amountPaise": 29900, "currency": "INR" },
+  "subscription": {
+    "id": "5b0f3c1e-8d7a-4e2b-9c64-1a2b3c4d5e6f",
+    "status": "active",
+    "cancelAtPeriodEnd": false,
+    "currentPeriodStart": "2026-10-22T06:30:00.000Z",
+    "currentPeriodEnd": "2026-11-22T06:30:00.000Z",
+    "nextChargeAt": "2026-11-22T06:30:00.000Z"
+  }
+}
+```
+
+A free user with no history gets `{ "tier": "free", "proUntil": null, "price": { "amountPaise": 29900, "currency": "INR" }, "subscription": null }`.
+
+**Errors:** common only.
+
+#### API-019 `POST /me/subscription/checkout` — *new in v2.0*
+- **Purpose:** create (or reuse) a Razorpay subscription and return what Checkout needs.
+- **Auth / role:** user.
+- **Implements:** FR-023.
+
+**Request:** no body (an empty JSON object `{}` is accepted).
+
+**Response 200**
+
+```json
+{
+  "razorpayKeyId": "rzp_live_AbCdEfGhIjKlMn",
+  "razorpaySubscriptionId": "sub_Pq3Rr8ExAmPlE1",
+  "amountPaise": 29900,
+  "currency": "INR",
+  "startsAt": null
+}
+```
+
+`startsAt` is the scheduled first charge (date-time) when re-subscribing during a paid month (FR-023 AC 4), else `null`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 409 | ALREADY_SUBSCRIBED | A live subscription without scheduled cancellation exists (FR-023 AC 2) |
+| 503 | PAYMENT_PROVIDER_UNAVAILABLE | Razorpay error or timeout `K-75` |
+
+#### API-020 `POST /me/subscription/verify` — *new in v2.0*
+- **Purpose:** verify the Checkout result and activate Pro immediately.
+- **Auth / role:** user (owner of the subscription).
+- **Implements:** FR-024.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `razorpayPaymentId` | body | string | yes | `^pay_[A-Za-z0-9]+$`, ≤ 32 chars |
+| `razorpaySubscriptionId` | body | string | yes | `^sub_[A-Za-z0-9]+$`, ≤ 32 chars; must be the caller's (TBL-010) |
+| `razorpaySignature` | body | string | yes | `^[a-f0-9]{64}$` |
+
+**Response 200** — `SubscriptionState` (API-018 shape), normally with `tier: "pro"`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_FAILED | Field missing or wrong format |
+| 400 | PAYMENT_SIGNATURE_INVALID | HMAC mismatch (FR-024 AC 2) |
+| 404 | NOT_FOUND | Subscription unknown or not the caller's |
+| 503 | PAYMENT_PROVIDER_UNAVAILABLE | Razorpay fetch failed (activation then comes from the webhook) |
+
+#### API-021 `POST /me/subscription/cancel` — *new in v2.0*
+- **Purpose:** cancel Resume Pro at the end of the paid month.
+- **Auth / role:** user.
+- **Implements:** FR-026.
+
+**Request:** no body.
+
+**Response 200** — `SubscriptionState` with `subscription.cancelAtPeriodEnd: true`, `subscription.nextChargeAt: null`; `tier` unchanged.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 409 | NO_ACTIVE_SUBSCRIPTION | No live subscription (FR-026 AC 4) |
+| 503 | PAYMENT_PROVIDER_UNAVAILABLE | Razorpay cancel call failed; nothing changed |
+
+#### API-022 `GET /me/payments` — *new in v2.0*
+- **Purpose:** payment history (paid months).
+- **Auth / role:** user; own rows only.
+- **Implements:** FR-030.
+
+**Request:** `page`, `pageSize` (6.1 pagination).
+
+**Response 200** — paginated, ordered `paidAt` desc:
+
+```json
+{
+  "items": [
+    {
+      "id": "e2c4a6b8-1d3f-4a5b-8c7d-9e0f1a2b3c4d",
+      "amountPaise": 29900,
+      "currency": "INR",
+      "periodStart": "2026-10-22T06:30:00.000Z",
+      "periodEnd": "2026-11-22T06:30:00.000Z",
+      "paidAt": "2026-10-22T06:30:12.000Z",
+      "razorpayPaymentId": "pay_Pq3Rr9ExAmPlE2"
+    }
+  ],
+  "page": 1, "pageSize": 20, "totalItems": 1, "totalPages": 1
+}
+```
+
+**Errors:** `400 VALIDATION_FAILED` (bad pagination); common.
+
+#### API-023 `POST /api/resume-optimizer/webhooks/razorpay` — *new in v2.0*
+- **Purpose:** receive Razorpay subscription webhooks.
+- **Auth / role:** none (no cookie); authenticated by `X-Razorpay-Signature` (6.1 webhook exception).
+- **Implements:** FR-025.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `X-Razorpay-Signature` | header | string | yes | HMAC-SHA256 hex of the raw body with `RAZORPAY_WEBHOOK_SECRET` |
+| `x-razorpay-event-id` | header | string | yes | 1–64 chars |
+| body | body | JSON (Razorpay webhook envelope) | yes | `event`, `created_at`, `payload.subscription.entity` (and `payload.payment.entity` for `subscription.charged`); max 1 MB |
+
+**Response 200:** `{ "received": true }` — for processed, duplicate and ignored events alike.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | WEBHOOK_SIGNATURE_INVALID | Signature header missing or wrong |
+| 400 | VALIDATION_FAILED | Signature valid but event ID header missing or body not the Razorpay envelope |
+| 500 | INTERNAL_ERROR | Processing failed; Razorpay will retry (FR-025 AC 6) |
+
+#### API-024 `GET /analysis-comparisons` — *new in v2.0*
+- **Purpose:** compare two of the caller's completed analyses.
+- **Auth / role:** user with tier `pro`.
+- **Implements:** FR-029.
+
+(A separate resource path, not `/analyses/compare`, so it can never clash with `/analyses/{analysisId}`.)
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `baseId` | query | string (uuid) | yes | UUID |
+| `targetId` | query | string (uuid) | yes | UUID, ≠ `baseId` |
+
+**Response 200**
+
+```json
+{
+  "base": {
+    "id": "c7d2b4e1-9f3a-4a6b-8c05-1e2d3f4a5b6c",
+    "status": "completed", "failureCode": null,
+    "jobRole": { "id": "6f1c2a8e-3b7d-4f0e-9a51-2c4d8e7b1a90", "slug": "backend-developer", "name": "Backend Developer" },
+    "experienceLevel": "mid", "fileName": "my-resume.pdf",
+    "overallScore": 71, "band": "fair",
+    "createdAt": "2026-10-20T09:16:02.481Z", "completedAt": "2026-10-20T09:16:31.902Z",
+    "rewriteCount": 5
+  },
+  "target": {
+    "id": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+    "status": "completed", "failureCode": null,
+    "jobRole": { "id": "6f1c2a8e-3b7d-4f0e-9a51-2c4d8e7b1a90", "slug": "backend-developer", "name": "Backend Developer" },
+    "experienceLevel": "mid", "fileName": "my-resume-v2.pdf",
+    "overallScore": 79, "band": "good",
+    "createdAt": "2026-10-22T11:02:40.120Z", "completedAt": "2026-10-22T11:03:05.551Z",
+    "rewriteCount": 3
+  },
+  "overallDelta": 8,
+  "sameJobRole": true,
+  "sameExperienceLevel": true,
+  "dimensions": [
+    { "dimension": "keyword_match", "baseScore": 67, "targetScore": 83, "delta": 16 },
+    { "dimension": "skills_coverage", "baseScore": 63, "targetScore": 71, "delta": 8 },
+    { "dimension": "experience_relevance", "baseScore": 80, "targetScore": 80, "delta": 0 },
+    { "dimension": "impact_quantification", "baseScore": 45, "targetScore": 65, "delta": 20 },
+    { "dimension": "structure_completeness", "baseScore": 100, "targetScore": 100, "delta": 0 },
+    { "dimension": "formatting_parseability", "baseScore": 90, "targetScore": 90, "delta": 0 }
+  ],
+  "skillsComparable": true,
+  "skillsNowFound": [ { "term": "Database design", "importance": "core" }, { "term": "Kafka", "importance": "preferred" } ],
+  "skillsNowMissing": [],
+  "stillMissing": [ { "term": "Golang", "importance": "preferred" } ]
+}
+```
+
+Check of the example: target overall = (83×20 + 71×25 + 80×20 + 65×15 + 100×10 + 90×10) / 100 = (1660 + 1775 + 1600 + 975 + 1000 + 900) / 100 = 79.10 → **79** (band `good`); `overallDelta` = 79 − 71 = **8**.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_FAILED | Missing / non-UUID IDs; `baseId = targetId` (`issue: "same_analysis"`) |
+| 403 | PRO_REQUIRED | Caller's tier is `free` |
+| 404 | NOT_FOUND | Either analysis unknown or not the caller's |
+| 409 | ANALYSIS_NOT_READY | Either analysis not `completed` |
+
 #### API-015 `GET /api/resume-optimizer/health/live`
 - **Purpose:** liveness for ECS/ALB; checks only that the process answers.
 - **Auth / role:** none. Not rate-limited. Not logged at `info` (to keep logs clean).
@@ -2181,6 +2423,12 @@ The worker has no HTTP port; its ECS container health check runs `node dist/work
 | ERR-023 | AI_BAD_RESPONSE | — | Job | We could not score this resume. It did not count towards your limit. Please try again. | FR-013 AC 4 (invalid output, refusal, max_tokens) |
 | ERR-024 | SERVICE_UNAVAILABLE | 503 | HTTP | The service is temporarily unavailable. Please try again shortly. | DB/Redis/JWKS unavailable (CR-003, 4.4); enqueue failure (FR-005 AC 5); readiness failure (API-016) |
 | ERR-025 | RESUME_TOO_LONG | 422 | HTTP | The resume has too much text (more than 40,000 characters). | FR-003 AC 4 (`K-07`); `details: [{ "field": "file", "issue": "max_chars", "limit": 40000 }]` |
+| ERR-026 | PRO_REQUIRED | 403 | HTTP | This feature is part of Resume Pro. | FR-029 AC 1 (v2.0) |
+| ERR-027 | ALREADY_SUBSCRIBED | 409 | HTTP | You already have an active Resume Pro subscription. | FR-023 AC 2; unique-index race in TBL-010 (v2.0) |
+| ERR-028 | NO_ACTIVE_SUBSCRIPTION | 409 | HTTP | You do not have an active Resume Pro subscription. | FR-026 AC 4 (v2.0) |
+| ERR-029 | PAYMENT_SIGNATURE_INVALID | 400 | HTTP | We could not verify this payment. If money was taken, it will be confirmed automatically within a few minutes. | FR-024 AC 2 (v2.0) |
+| ERR-030 | PAYMENT_PROVIDER_UNAVAILABLE | 503 | HTTP | Payments are temporarily unavailable. Please try again in a few minutes. | FR-023 AC 8, FR-024 AC 7, FR-026 AC 5 (v2.0) |
+| ERR-031 | WEBHOOK_SIGNATURE_INVALID | 400 | HTTP | Invalid signature. | FR-025 AC 1; API-023 only, never shown to users (v2.0) |
 
 When `failure_code` is `AI_UNAVAILABLE` or `INTERNAL_ERROR` on a failed job, `failureMessage` appends: " It did not count towards your limit." (because reservations are always released on failure, FR-008 AC 5).
 
