@@ -425,7 +425,7 @@ Upload PDF/DOCX · choose role and experience level · AI score /100 on several 
 | `EXTRACTED_TEXT_RETENTION_DAYS` / `REPORT_RETENTION_DAYS` / `ANALYSIS_RETENTION_DAYS` / `AUDIT_RETENTION_YEARS` | 30 / 30 / 365 / 2 | FR-023 |
 | `REPORT_URL_TTL_SEC` | 300 | FR-020 |
 | `RATE_LIMIT_UPLOAD` | 10 per hour per user | FR-004 |
-| `CONSENT_VERSION` | `2026-10` | FR-003 |
+| `CONSENT_VERSION` | `2026-10-r2` (v1.2; was `2026-10`) | FR-003 — bumped because Razorpay was added as a processor (L-9) |
 
 #### 3.3.5 Out of scope (v1)
 
@@ -481,6 +481,9 @@ flowchart LR
   subgraph AI["AI provider (external)"]
     LLM[CMP-007 AiPort → Anthropic Messages API]
   end
+  subgraph PAY["Payment provider (external, v1.2)"]
+    RZP[CMP-011 PaymentPort → Razorpay<br/>Subscriptions · Checkout · Webhooks]
+  end
   WEB -- "HTTPS JSON, Bearer JWT" --> API
   WEB -. "login redirect" .-> IDP
   API -- "JWKS fetch (cached)" --> IDP
@@ -495,6 +498,9 @@ flowchart LR
   WRK --> PDF
   API --> OBS
   WRK --> OBS
+  API -- "create / cancel subscription (REST, key + secret)" --> RZP
+  RZP -. "webhooks, X-Razorpay-Signature" .-> API
+  WEB -. "hosted Checkout (card/UPI never on our pages)" .-> RZP
 ```
 
 ### 4.2 Components
@@ -510,7 +516,8 @@ flowchart LR
 | CMP-007 | AI adapter | Implements `AiPort.analyse(input): Promise<AiResult>`: builds the prompt, calls the Messages API with structured JSON output, enforces timeout/retry/circuit rules, maps provider errors to the failure codes, records `ai_calls`. Only this adapter imports the provider SDK. | `@anthropic-ai/sdk` (TypeScript), Zod schema shared with FR-014 validation |
 | CMP-008 | Platform identity (external) | Issues the user's session JWT; publishes JWKS; owns plan/role claims. | SurfingBear platform (A-01) |
 | CMP-009 | PDF renderer | Deterministic PDF from the stored result and the plan-gated projection; runs in the worker process. | `@react-pdf/renderer` |
-| CMP-010 | Observability | Structured logs with redaction, error tracking, uptime checks, dashboards (queue depth, AI latency, failure codes, quota rejections). | pino → platform log sink; Sentry (api + web + worker); Better Stack uptime |
+| CMP-010 | Observability | Structured logs with redaction, error tracking, uptime checks, dashboards (queue depth, AI latency, failure codes, quota rejections, webhook lag). | pino → platform log sink; Sentry (api + web + worker); Better Stack uptime |
+| CMP-011 | Payment adapter (v1.2) | Implements `PaymentPort` (`createSubscription`, `cancelAtPeriodEnd`, `fetchSubscription`, `verifyWebhookSignature`) against Razorpay Subscriptions; the only place the Razorpay SDK and secrets are used. The web app loads Razorpay's hosted Checkout with the public key id; webhook ingestion lives in `modules/billing` and the state machine (BR-018) in `BillingService`. | `razorpay` Node SDK in api/worker; Razorpay Checkout.js in web; HMAC-SHA256 verification with `RAZORPAY_WEBHOOK_SECRET` |
 
 ### 4.3 Main flows
 
@@ -819,16 +826,134 @@ sequenceDiagram
   C->>P: audit purge.completed {counts} · release lock
 ```
 
+#### SEQ-08 Subscribe to Resume Pro — checkout and webhook activation (FR-031, FR-032, FR-034; v1.2)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (CMP-001)
+  participant A as API (CMP-002)
+  participant P as PostgreSQL
+  participant R as PaymentPort → Razorpay (CMP-011)
+  participant Q as Queue
+  participant W as Worker (CMP-003)
+  U->>A: POST /subscriptions/checkout
+  A->>P: entitlement (BR-017) and non-terminal subscription?
+  alt already Pro / non-terminal subscription exists
+    A-->>U: 409 SUBSCRIPTION_ALREADY_ACTIVE (ERR-050)
+  end
+  A->>R: create subscription (plan RAZORPAY_PLAN_ID, notes.userId)
+  alt provider error / timeout 10 s
+    A-->>U: 503 PAYMENT_PROVIDER_ERROR (ERR-052), nothing persisted
+  end
+  A->>P: INSERT subscriptions(status=created, provider_subscription_id) + audit
+  alt DB failure
+    A->>R: cancel the just-created provider subscription (best effort, logged)
+    A-->>U: 503 SERVICE_UNAVAILABLE (ERR-031)
+  end
+  A-->>U: 201 { subscriptionId, providerSubscriptionId, checkoutKeyId }
+  U->>R: hosted Checkout — card/UPI entered on Razorpay, never on our pages
+  R-->>U: payment result (browser return is informational only)
+  R->>A: POST /webhooks/razorpay subscription.activated / subscription.charged (X-Razorpay-Signature)
+  A->>A: verify HMAC signature
+  alt signature invalid
+    A-->>R: 401 WEBHOOK_SIGNATURE_INVALID (ERR-053), body discarded
+  end
+  A->>P: INSERT payment_events (unique provider_event_id)
+  alt duplicate event id
+    A-->>R: 200 (no side effects, BR-019)
+  end
+  A->>Q: add process-payment-event (jobId = eventId)
+  A-->>R: 200 acknowledged (p95 < 1 s, NFR-020)
+  Q->>W: process-payment-event
+  W->>P: SELECT subscription FOR UPDATE, check event created_at ≥ last_event_at
+  alt stale / out-of-order event
+    W->>P: mark event ignored
+  else in order
+    W->>P: UPDATE subscriptions status=active, period start/end, last_payment_at, last_event_at + audit subscription.active
+    W->>W: invalidate Redis plan cache ro:{env}:plan:{userId}
+  end
+  alt processing error
+    W-->>Q: nack → retry ×5 then event failed + Sentry alert
+  end
+  U->>A: GET /me/subscription (poll every 2 s for up to 60 s after returning from Checkout)
+  A-->>U: 200 { status: active, currentPeriodEnd }
+```
+
+#### SEQ-09 Cancel subscription and expiry (FR-033, BR-017, BR-018; v1.2)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (CMP-001)
+  participant A as API (CMP-002)
+  participant P as PostgreSQL
+  participant R as Razorpay (CMP-011)
+  participant C as Cron (worker, CMP-003)
+  U->>A: POST /subscriptions/cancel
+  A->>P: subscription in {active, past_due}?
+  alt none
+    A-->>U: 409 SUBSCRIPTION_NOT_ACTIVE (ERR-051)
+  else already cancelled
+    A-->>U: 200 current state (idempotent)
+  end
+  A->>R: cancel subscription (cancel_at_cycle_end = 1)
+  alt provider error / timeout
+    A-->>U: 503 PAYMENT_PROVIDER_ERROR (ERR-052), local state unchanged
+  end
+  A->>P: UPDATE status=cancelled, cancel_at_period_end=true, cancelled_at + audit
+  A->>A: invalidate plan cache
+  A-->>U: 200 { status: cancelled, currentPeriodEnd } — Pro continues until then
+  Note over C,P: every hour at :40 (expire-subscriptions)
+  C->>P: pg_try_advisory_lock(expire_subscriptions)
+  alt lock held elsewhere
+    C-->>C: skip this run
+  end
+  C->>P: UPDATE status=expired WHERE status IN (cancelled, past_due) AND current_period_end ≤ now()
+  C->>P: UPDATE status=abandoned WHERE status=created AND created_at < now() − CHECKOUT_ABANDON_HOURS
+  C->>C: invalidate plan cache for each affected user, audit subscription.expired
+  alt DB failure
+    C-->>C: log, release lock, next run retries (idempotent)
+  end
+```
+
+#### SEQ-10 Compare two analyses (FR-035; v1.2)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (CMP-001)
+  participant A as API (CMP-002)
+  participant P as PostgreSQL
+  U->>A: GET /analyses/compare?a=&b=
+  A->>A: entitlement (BR-017, cached 60 s)
+  alt plan = free
+    A-->>U: 402 PLAN_REQUIRED (ERR-054, details.feature = compare)
+  end
+  A->>P: SELECT both analyses WHERE user_id = sub AND deleted_at IS NULL
+  alt either missing / not owned
+    A-->>U: 404 NOT_FOUND (ERR-004)
+  else a = b, or either not completed
+    A-->>U: 422 COMPARE_INVALID (ERR-055)
+  else DB unavailable
+    A-->>U: 503 SERVICE_UNAVAILABLE (ERR-031)
+  end
+  A->>P: SELECT dimension scores, missing skills, suggestion counts for both
+  A->>A: overall and per-dimension deltas, resolved / newly missing skills, sameRole flag
+  A-->>U: 200 comparison (API-025)
+```
+
 ### 4.4 External integrations
 
 | System | Purpose | Protocol / auth | Failure handling |
 |---|---|---|---|
-| SurfingBear platform identity (CMP-008) | Verify the user's session; obtain `sub`, `plan`, `role` | JWT RS256 in `Authorization: Bearer`; JWKS over HTTPS, cached in Redis 10 min, refreshed on unknown `kid` | JWKS unreachable and cache empty → 503 `ERR-031`; cache present → verification continues. Invalid/expired token → 401 `ERR-002`. No fallback to unauthenticated access. |
+| SurfingBear platform identity (CMP-008) | Verify the user's session; obtain `sub`, `role` (a `plan` claim is ignored since v1.2 — FR-034) | JWT RS256 in `Authorization: Bearer`; JWKS over HTTPS, cached in Redis 10 min, refreshed on unknown `kid` | JWKS unreachable and cache empty → 503 `ERR-031`; cache present → verification continues. Invalid/expired token → 401 `ERR-002`. No fallback to unauthenticated access. |
 | Anthropic Messages API (via CMP-007) | Score resume, judge missing skills, propose rewrites | HTTPS, API key from env `AI_API_KEY`; SDK `@anthropic-ai/sdk`; structured JSON output; timeout 60 s; SDK retries disabled (the adapter owns retries) | Per FR-013: retry on timeout/429/529/5xx with backoff, circuit breaker 5 failures/60 s → open 30 s, no retry on 4xx/refusal, malformed JSON → one corrective retry; terminal failures become `analyses.failure_code` and refund quota. Data sent: masked text + rubric only; no files. Region: provider default (see L-1). |
 | AWS S3 `ap-south-1` (CMP-006) | Store resume files and reports; presigned downloads | HTTPS, IAM role of the service; SSE-KMS; bucket policy denies public access | PUT/DELETE timeout 10 s, 2 retries; failure → 503 `ERR-034` (upload) or job retry (worker). Lifecycle rules expire objects as a safety net. |
 | Managed PostgreSQL (CMP-004) | System of record | TLS, credentials from env; Prisma pool size 10 per process; statement timeout 15 s | Unavailable → 503 `ERR-031` for all requests; worker pauses; queue holds jobs. |
 | Managed Redis (CMP-005) | Queue, cache, rate limits, locks | TLS, password from env; `ioredis` with 2 s connect timeout | Unavailable → writes fail closed (503), reads continue from Postgres; queue consumers reconnect with backoff; no durable data lost (BR-004). |
 | Sentry / log sink / uptime (CMP-010) | Observability | HTTPS DSN; async transport | Never blocks requests; dropped events are logged locally. |
+| Razorpay (CMP-011, v1.2) | Sell and manage the Resume Pro subscription: create subscription, hosted Checkout, cancel at cycle end, fetch state; receive lifecycle webhooks | REST with `RAZORPAY_KEY_ID` + `RAZORPAY_KEY_SECRET` (api/worker only); Checkout.js in the browser with the public key id; webhooks signed with `RAZORPAY_WEBHOOK_SECRET` (HMAC-SHA256 over the raw body). Timeouts 10 s, 2 retries on network errors for idempotent reads only. **Data shared:** user id (as `notes.userId`), e-mail and phone prefilled into Checkout (processor listed in the consent notice, L-9). No card data reaches our systems. | Create/cancel failure → 503 `ERR-052`, nothing persisted; webhook outage → provider retries for 24 h plus our daily reconciliation (FR-033 AC-5); signature mismatch → 401 `ERR-053`; duplicate/out-of-order events → no-op (BR-019). Provider down does not affect existing Pro users (entitlement is local, BR-017). |
 
 ### 4.5 Tech stack and reasons
 
@@ -848,7 +973,8 @@ sequenceDiagram
 | Hosting | Containers (API ×2, worker ×2) on the company's standard container platform in `ap-south-1`; managed Postgres and Redis | Horizontal scaling of the worker by process count (NFR-005); managed stores give backups and PITR without ops effort. |
 | CI/CD | GitHub Actions | Company standard (CR-036); runs lint, typecheck, unit, Testcontainers integration tests, build, migrations. |
 | Observability | pino, Sentry, Better Stack | Structured logs with redaction (CR-010); Sentry captures 5xx with `requestId` (CR-016); uptime on `/ready` (CR-040). |
-| Testing | Jest + supertest + Testcontainers; Vitest + RTL; Playwright; k6 | Integration tests run against real Postgres/Redis/MinIO containers so constraints and locks are tested, not mocked; the AI port has a golden-fixture stub (NFR-017). |
+| Testing | Jest + supertest + Testcontainers; Vitest + RTL; Playwright; k6 | Integration tests run against real Postgres/Redis/MinIO containers so constraints and locks are tested, not mocked; the AI port has a golden-fixture stub (NFR-017); the payment port has a stub that emits recorded Razorpay webhook fixtures (TC-122–TC-126). |
+| Payments (v1.2) | Razorpay Subscriptions + hosted Checkout + Webhooks, behind `PaymentPort` | Mandated by Round 2. Subscriptions give recurring monthly billing and cancel-at-cycle-end natively (Round 2 points 1 and 4); hosted Checkout keeps card/UPI data off our pages (NFR-019, PCI SAQ-A); webhooks make activation server-verified rather than trusting the browser. The port isolates the SDK so a provider change touches one adapter. |
 
 ### 4.6 Configuration (environment variables)
 
@@ -879,6 +1005,11 @@ Every variable is listed in `.env.example` with this description (CR-020). Valid
 | `RATE_LIMIT_MULTIPLIER` | api | No | `1` | scales all rate limits per environment (CR-035) |
 | `NEXT_PUBLIC_API_URL` | web (build) | Yes | — | public base URL of the API, used only by the BFF route handlers server-side (see §4.8) |
 | `BASE_URL` | Playwright | Yes | — | environment under test (CR-ENV rule in CR-035) |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | api, worker | Yes (v1.2) | — | Razorpay API credentials; test-mode keys in local/dev/staging, live keys only in prod (CR-033) |
+| `RAZORPAY_WEBHOOK_SECRET` | api | Yes (v1.2) | — | HMAC secret configured on the Razorpay webhook (FR-032) |
+| `RAZORPAY_PLAN_ID` | api | Yes (v1.2) | — | id of the ₹299/month plan created in the Razorpay dashboard (A-17) |
+| `NEXT_PUBLIC_RAZORPAY_KEY_ID` | web (build) | Yes (v1.2) | — | public key id for Checkout.js (never the secret) |
+| `PRO_PRICE_MINOR` / `PRO_CURRENCY` / `CHECKOUT_ABANDON_HOURS` / `WEBHOOK_TOLERANCE_SEC` / `PLAN_CACHE_TTL_SEC` | api, worker | No | §3.3.4 | billing constants (v1.2) |
 | Constants of §3.3.4 (`MAX_FILE_BYTES`, `FREE_MONTHLY_ANALYSES`, …) | api, worker | No | §3.3.4 | business constants |
 
 Rate limiting algorithm (CR-024, §6.1): fixed window in Redis — key `ro:{env}:rl:{scope}:{userId|ip}:{windowStart}`, `INCR` + `EXPIRE` on first hit; limit check after increment; `Retry-After` = seconds to window end.
@@ -898,6 +1029,9 @@ All queues are BullMQ on Redis (CMP-005), prefix `ro:{env}:q`. Job ids are the e
 | cron | `purge-analyses-and-audit` | — | daily 02:00 UTC | — | FR-023 AC-4, AC-5 |
 | cron | `reconcile-queued` | — | every 5 min | — | BR-006: `queued` analyses older than 2 min with no job → re-add |
 | cron | `expire-report-blocks` | — | every 15 min | — | clear `reports.blocked_until` in the past |
+| `payments` (v1.2) | `process-payment-event` | `payment_events.id` | API-024 after the event row is committed | 5 / 1 min, 5, 15, 60, 360 min | apply the provider event to the subscription (FR-032 AC-4–AC-6, BR-019) [concurrency 1 per user via advisory lock on `user_id`] |
+| cron (v1.2) | `expire-subscriptions` | — | every hour at :40 | — (advisory lock) | FR-033 AC-4 and FR-031 AC-3 (expire / abandon), invalidate plan cache |
+| cron (v1.2) | `reconcile-subscriptions` | — | daily 02:30 UTC | — | FR-033 AC-5: compare non-terminal subscriptions with the provider |
 
 Worker lifecycle: on start, wait until `/ready` checks pass, then start consumers; on `SIGTERM`, stop taking new jobs and allow 60 s for in-flight jobs; a job that cannot finish is left to stalled-job recovery (FR-028).
 
@@ -909,13 +1043,14 @@ Worker lifecycle: on start, wait until `/ready` checks pass, then start consumer
 
 | ID | Route | Purpose | Key behaviour and states |
 |---|---|---|---|
-| SCR-001 | `/resume-optimizer` | Upload + role picker | Shows entitlements banner (API-002). If `consentRequired`, a modal shows the notice (i18n key `consent.notice.2026-10`, draft text below) with an "I agree" button → API-004. Drag-and-drop or file picker, client-side pre-check (type, 5 MiB) with the same Zod rule as the API; on submit → API-005 then polls API-006 every 2 s until `ready`/`extraction_failed`; then role (API-001, grouped by family) and level radio; "Analyse" → API-008 → navigates to SCR-002. States: idle · uploading (progress) · extracting (spinner) · extraction failed (error text per ERR code + "Upload another") · quota exhausted (banner with `resetsAt`, upgrade link) · erasure pending (upload disabled, text from ERR-025). |
-| SCR-002 | `/resume-optimizer/analyses/[id]` | Analysis status and result | Polls API-009 every 2 s while `queued/running` ("Analysing… usually under a minute"). On `failed`: `userMessage`, "Quota not used" badge when `refunded`, "Try again" → SCR-001 with the same resume preselected. On `completed`: score dial with band, six dimension cards (score, rationale, evidence quotes), missing skills list (locked items rendered as blurred rows with one "Unlock with Premium" CTA), suggestions list (original vs rewrite side by side, severity chip, "Suggestion — verify before use" label), disclaimer (FR-027) always visible, "Download PDF" → API-012 then polls API-013 until `ready` then opens `url`; "Delete this analysis" → confirm dialog → API-011. |
-| SCR-003 | `/resume-optimizer/analyses` | History | Server-rendered first page of API-010; filters by status and role; pagination; each row links to SCR-002; empty state "No analyses yet" with CTA to SCR-001. |
-| SCR-004 | `/resume-optimizer/privacy` | Data and privacy | Lists what is stored and the retention periods (text from §3.3.4), link to the notice, "Delete all my Resume Optimizer data" → two-step confirm → API-014 → shows request status (API-015) and disables upload while pending. |
+| SCR-001 | `/resume-optimizer` | Upload + role picker | Shows entitlements banner (API-002). If `consentRequired`, a modal shows the notice (i18n key `consent.notice.2026-10-r2`, draft text below) with an "I agree" button → API-004. Drag-and-drop or file picker, client-side pre-check (type, 5 MiB) with the same Zod rule as the API; on submit → API-005 then polls API-006 every 2 s until `ready`/`extraction_failed`; then role (API-001, grouped by family) and level radio; "Analyse" → API-008 → navigates to SCR-002. States: idle · uploading (progress) · extracting (spinner) · extraction failed (error text per ERR code + "Upload another") · quota exhausted (banner with `resetsAt`, upgrade link) · erasure pending (upload disabled, text from ERR-025). |
+| SCR-002 | `/resume-optimizer/analyses/[id]` | Analysis status and result | Polls API-009 every 2 s while `queued/running` ("Analysing… usually under a minute"). On `failed`: `userMessage`, "Quota not used" badge when `refunded`, "Try again" → SCR-001 with the same resume preselected. On `completed`: score dial with band, six dimension cards (score, rationale, evidence quotes), missing skills list (locked items rendered as blurred rows with one "Unlock with Resume Pro" CTA → SCR-005), suggestions list (original vs rewrite side by side, severity chip, "Suggestion — verify before use" label), disclaimer (FR-027) always visible, "Download PDF" → API-012 then polls API-013 until `ready` then opens `url`; "Delete this analysis" → confirm dialog → API-011. |
+| SCR-003 | `/resume-optimizer/analyses` | History | Server-rendered first page of API-010; filters by status and role; pagination; each row links to SCR-002; empty state "No analyses yet" with CTA to SCR-001. *(v1.2)* Pro users see a checkbox per completed row and a "Compare selected (2)" button → `/resume-optimizer/analyses/compare?a=&b=` (API-025) rendering overall delta, a per-dimension delta table, resolved / newly missing skills and a "different role" warning; free users see the same button disabled with a Resume Pro tooltip → SCR-005. |
+| SCR-004 | `/resume-optimizer/privacy` | Data and privacy | Lists what is stored and the retention periods (text from §3.3.4), link to the notice, "Delete all my Resume Optimizer data" → two-step confirm → API-014 → shows request status (API-015) and disables upload while pending. *(v1.2)* States that an active Resume Pro subscription is cancelled by erasure and that billing records are retained pseudonymised (L-9). |
+| SCR-005 | `/resume-optimizer/plan` (v1.2) | Resume Pro plan and billing | Shows current plan (API-021). **Free:** benefits list (unlimited analyses, all suggestions and missing skills, comparison), price "₹299 / month, incl. GST" (A-17), "Subscribe" → API-022 → opens Razorpay Checkout.js with `providerSubscriptionId` and `NEXT_PUBLIC_RAZORPAY_KEY_ID`; on return, polls API-021 every 2 s up to 60 s; states: activating (spinner) · active (success) · payment failed / closed Checkout ("No charge was made; you can try again") · still pending after 60 s ("We're confirming your payment; you'll see Pro within a minute"). **Pro:** status, current period end, "Cancel subscription" → confirm dialog stating access continues until the period end → API-023; cancelled state shows "Pro until <date>"; `past_due` shows a payment-problem banner; payment history table. Admin tokens cannot open this page (403). |
 
-**Draft consent notice (i18n key `consent.notice.2026-10`, pending legal review L-3; the builder ships this text, not their own):**
-"SurfingBear Resume Optimizer will read the resume you upload to score it and suggest improvements. To do this we store your file for up to 24 hours after analysis and its text for up to 30 days, and we send the text — with your e-mail, phone number and links removed — to our AI processing partner Anthropic, whose servers may be outside India. Your results are kept for up to 1 year unless you delete them earlier. You can delete a single analysis or all your data at any time from the Privacy page. For questions or to exercise your rights under the Digital Personal Data Protection Act, contact privacy@surfingbear.example (grievance officer). By continuing you agree to this processing."
+**Draft consent notice (i18n key `consent.notice.2026-10-r2`, pending legal review L-3 and L-9; the builder ships this text, not their own; v1.2 bumps `CONSENT_VERSION` so every user re-accepts once):**
+"SurfingBear Resume Optimizer will read the resume you upload to score it and suggest improvements. To do this we store your file for up to 24 hours after analysis and its text for up to 30 days, and we send the text — with your e-mail, phone number and links removed — to our AI processing partner Anthropic, whose servers may be outside India. Your results are kept for up to 1 year unless you delete them earlier. If you subscribe to Resume Pro, your name, e-mail and phone number are shared with our payment partner Razorpay to process the payment; we never see your card details. You can delete a single analysis or all your data at any time from the Privacy page. For questions or to exercise your rights under the Digital Personal Data Protection Act, contact privacy@surfingbear.example (grievance officer). By continuing you agree to this processing."
 
 ### 4.9 AI provider contract (`AiPort`, CMP-007)
 
