@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | Author | Sachin S M |
-| Version | v0.2 |
-| Last updated | 2026-10-20 |
+| Version | v0.3 |
+| Last updated | 2026-10-22 |
 | Status | Draft |
 | Backend stack | Spring Boot 3.4 (Java 21) |
 | Frontend stack | Next.js 15 (App Router, TypeScript) |
@@ -50,7 +50,7 @@ Rules every Divii / Hanriver project follows, written for this module. Each rule
 |---|---|---|---|
 | CR-001 | Authentication | The module never issues, stores or refreshes credentials. Every request is authenticated with the platform's access token: a JWT signed with RS256, read from the `sb_access` cookie (httpOnly, Secure, SameSite=Lax, Domain=`.surfingbear.com`) or, for service-to-service calls only, from `Authorization: Bearer <token>`. | Integration test: request with no token, expired token, wrong signature, wrong `iss` → each returns 401 `UNAUTHENTICATED`. |
 | CR-002 | Authentication | Token validation checks: signature against the platform JWKS (`PLATFORM_JWKS_URL`), `iss` = `PLATFORM_ISSUER`, `aud` contains `resume-optimizer`, `exp` in the future with at most 30 s clock skew. JWKS keys are cached in memory for 10 minutes and refetched once immediately when a token carries an unknown `kid`. | Unit tests on the token validator; test with a rotated key id. |
-| CR-003 | Authentication | The claims the module uses are `sub` (user id, string, max 64 chars), `plan` (`FREE` / `PREMIUM`) and `roles` (array, contains `USER` and optionally `ADMIN`). A missing or unknown `plan` is treated as `FREE` and logged at WARN with the request id (never the token). | Unit test per case. |
+| CR-003 | Authentication | The claims the module uses are `sub` (user id, string, max 64 chars), `plan` (`FREE` / `PREMIUM`) and `roles` (array, contains `USER` and optionally `ADMIN`). A missing or unknown `plan` is treated as `FREE` and logged at WARN with the request id (never the token). A missing `sub`, or a `sub` over 64 characters, makes the token invalid → 401 `UNAUTHENTICATED`. On `/api/v1/**` a valid token whose `roles` does not contain `USER` (for example a `PLATFORM_SERVICE` token) → 403 `FORBIDDEN`. | Unit test per case. |
 | CR-004 | Authentication | Service-to-service calls (platform → module, see FR-021) use a separate token whose `roles` contains `PLATFORM_SERVICE`. A user token can never reach `/internal/**`. | Integration test: user token on `/internal/**` → 403 `FORBIDDEN`. |
 
 ### 1.2 Roles and permissions
@@ -91,7 +91,7 @@ An `ADMIN` is also a normal user of the module; the extra role only adds the sta
 |---|---|---|---|
 | CR-012 | Errors | Every non-2xx response uses exactly the error body below, produced by one `@RestControllerAdvice`. No stack trace, SQL, class name or provider message ever reaches the client. | Integration test per error code; test that a forced exception returns `INTERNAL_ERROR` without stack trace. |
 | CR-013 | Errors | `code` values are fixed strings from the error code list (section 6.3). Clients act on `code`; `message` is English, for developers, and may change. The frontend shows its own translated text per code. | Contract test: every code in 6.3 exists as an enum constant; no other code is returned. |
-| CR-014 | Errors | 404 is about the resource in the URL path. A wrong value in the request body or query (for example an unknown job role code) is **400 `VALIDATION_FAILED`** with the field named in `details`. | Integration test: unknown `jobRoleCode` → 400, not 404. |
+| CR-014 | Errors | 404 is about the resource the request acts on: the id in the URL path, and `resumeId` in the body of API-007 (the resume being analysed), so a missing and a foreign id get the same 404 wherever the id is sent (CR-006). Any other wrong value in the request body or query (for example an unknown job role code) is **400 `VALIDATION_FAILED`** with the field named in `details`. | Integration test: unknown `jobRoleCode` → 400, not 404; unknown `resumeId` → 404 `RESUME_NOT_FOUND`. |
 
 Standard error body:
 
@@ -113,7 +113,7 @@ Standard error body:
 | `error.code` | string | yes | Value from section 6.3 |
 | `error.message` | string | yes | English, max 300 chars |
 | `error.requestId` | string (UUID) | yes | Same as `X-Request-Id` header |
-| `error.details` | array of `{field, issue}` | no | Present for `VALIDATION_FAILED`; may carry extra keys for other codes, e.g. `{ "resetAt": "2026-11-01T00:00:00+05:30" }` for `QUOTA_EXCEEDED` |
+| `error.details` | array | yes | One `{field, issue}` per failing field for `VALIDATION_FAILED`; for `QUOTA_EXCEEDED` exactly one entry `{ "field": "quota", "issue": "monthly limit reached", "resetAt": "2026-10-31T18:30:00Z" }` (UTC, CR-025); `[]` for every other code (6.1) |
 
 ### 1.5 Security
 
@@ -121,10 +121,10 @@ Standard error body:
 |---|---|---|---|
 | CR-015 | Secrets | Secrets (DB password, Redis password, AI API key, S3 credentials) come only from AWS Secrets Manager in dev/staging/prod and from a git-ignored `.env` locally. No secret is in git, Docker images or logs. | CI secret scan (gitleaks) blocks the merge; image scan. |
 | CR-016 | Transport | HTTPS only (TLS 1.2+), HSTS `max-age=31536000; includeSubDomains`. HTTP requests are redirected at the load balancer. | Staging check with `curl -I`. |
-| CR-017 | CORS | Allowed origins are an explicit list per environment (prod: `https://www.surfingbear.com`). `Access-Control-Allow-Credentials: true`. No wildcard. | Integration test with a foreign Origin → no CORS headers. |
-| CR-018 | CSRF | State-changing requests (POST, PUT, DELETE) that authenticate with the cookie must carry the header `X-Requested-With: SurfingBear`; without it they return 403 `FORBIDDEN`. Combined with SameSite=Lax this blocks cross-site form posts. | Integration test. |
+| CR-017 | CORS | Allowed origins are an explicit list per environment (prod: `https://www.surfingbear.com`). `Access-Control-Allow-Credentials: true`. No wildcard. Allowed methods `GET`, `POST`, `DELETE`; allowed request headers `Content-Type`, `X-Requested-With`, `X-Request-Id`; exposed response headers `X-Request-Id`, `Retry-After`, `Location`, `Content-Disposition`; `Access-Control-Max-Age: 600`. An `OPTIONS` preflight is answered by the CORS filter before the token, CSRF and rate-limit checks and is not counted towards the rate limit. | Integration test with a foreign Origin → no CORS headers. |
+| CR-018 | CSRF | State-changing requests (POST, PUT, DELETE) that authenticate with the cookie must carry the header `X-Requested-With` with the value `SurfingBear` exactly (case-sensitive); a missing header or any other value (for example `XMLHttpRequest`) returns 403 `FORBIDDEN`. Combined with SameSite=Lax this blocks cross-site form posts. | Integration test. |
 | CR-019 | Input validation | Every request field is validated with Bean Validation (`jakarta.validation`) before any service code runs. Uploaded files are checked by magic bytes, not by extension or the client's `Content-Type`. | Unit tests per DTO; file tests in FR-003. |
-| CR-020 | Rate limiting | Per user, enforced in Redis with a fixed one-minute window: 60 API requests/minute overall, and 10 resume uploads/hour. Excess returns 429 `RATE_LIMITED` with a `Retry-After` header (seconds). | Integration test with Testcontainers Redis. |
+| CR-020 | Rate limiting | Per user, enforced in Redis with a fixed one-minute window: 60 API requests/minute overall, and 10 resume uploads/hour. Both windows are clock windows in UTC (`ZoneOffset.UTC`): the minute and the hour in the Redis keys of 4.7 are UTC. Excess returns 429 `RATE_LIMITED` with a `Retry-After` header = whole seconds until the next UTC minute (API limit) or the next UTC hour (upload limit), minimum 1. | Integration test with Testcontainers Redis and a fixed clock. |
 | CR-021 | Data retention | Personal data is kept only as long as section 3.1 (FR-020) allows: resume file and extracted text 30 days after upload, analysis results 180 days after creation. | Retention job test (FR-020). |
 | CR-022 | Dependencies | CI fails on any dependency with a known Critical or High CVE (OWASP Dependency-Check for Maven, `npm audit --audit-level=high` for the frontend), unless an exception with an expiry date is recorded in `security-exceptions.md`. | CI job. |
 
@@ -134,7 +134,7 @@ Standard error body:
 |---|---|---|---|
 | CR-023 | i18n | All user-visible frontend text is in message files (`next-intl`, `messages/en.json`). No hard-coded UI strings in components. Launch language is English only; adding Hindi means adding `messages/hi.json` without code changes. | ESLint rule `no-literal-string` in JSX (eslint-plugin-i18next). |
 | CR-024 | i18n | The API returns machine values (codes, enums, ISO dates, numbers), never display text, except `error.message` (English, developer-facing) and AI-generated content (always English, because resumes are analysed in English, see section 3.3). | API review. |
-| CR-025 | Time | The API stores and returns timestamps in UTC, ISO-8601 with offset (`2026-10-19T08:30:00Z`). The only IST-based logic is the quota period (glossary) and the retention job schedule; both use `ZoneId.of("Asia/Kolkata")` explicitly. The frontend displays times in the browser's time zone. | Unit tests at the month boundary (31 Oct 23:59 IST vs 1 Nov 00:00 IST). |
+| CR-025 | Time | The API stores and returns timestamps in UTC, ISO-8601 with offset (`2026-10-19T08:30:00Z`). IST is used only in these places, each with `ZoneId.of("Asia/Kolkata")` explicitly: the quota period (glossary) and `resetAt`; the schedules of the jobs (4.3.7); the `day` of `upload_rejection_daily` and `analysis_outcome` and the dates of API-015; the date in the report and its file name (FR-016, API-011). Everything else, including the rate-limit windows (CR-020), is UTC. The frontend displays times in the browser's time zone. | Unit tests at the month boundary (31 Oct 23:59 IST vs 1 Nov 00:00 IST). |
 
 ### 1.7 Environments
 
@@ -246,7 +246,7 @@ resume-optimizer-web/
 ### 2.3 Branching and commits
 
 - Trunk-based: one long-lived branch, `main`, always deployable to dev.
-- Branch names: `feature/FR-006-start-analysis`, `fix/ERR-012-quota-boundary`, `chore/upgrade-spring-boot-3.4.2`. The ID in the name links the work to the spec.
+- Branch names: `feature/FR-006-start-analysis`, `fix/ERR-007-quota-boundary`, `chore/upgrade-spring-boot-3.4.2`. The ID in the name links the work to the spec.
 - Commit format (Conventional Commits): `<type>(<scope>): <message>`, types `feat`, `fix`, `docs`, `test`, `refactor`, `chore`, `perf`; scope = feature package. Example: `feat(analysis): release quota when an analysis fails`.
 - Pull requests are squash-merged; the PR title follows the commit format and the description lists the FR/NFR IDs it implements.
 
@@ -309,13 +309,13 @@ ATS scoring dimensions (FR-009):
 | FR-003 | Upload resume | The user uploads one resume file. | Must | 1. Accepts only PDF and DOCX by magic bytes; anything else (including a `.pdf` file that is really a PNG) → 415 `UNSUPPORTED_FILE_TYPE`. 2. Over 5 MB → 413 `FILE_TOO_LARGE` (checked before the full body is read; the server limit is 5 MB + 64 KB for multipart overhead). 3. Empty or missing file part → 400 `VALIDATION_FAILED` with `field: file`. 4. Password-protected PDF or DOCX → 422 `FILE_PROTECTED`. 5. Corrupt file that the parser cannot open → 422 `FILE_UNREADABLE`. 6. PDF with more than 5 pages → 422 `RESUME_TOO_LONG`. 7. On success: 201 with resume id, original file size, page count (PDF only, `null` for DOCX), text length, `expiresAt` = upload time + 30 days. 8. The original file name is not stored (it often contains the person's name); the stored object key is random. 9. More than 10 uploads in one clock hour → 429 `RATE_LIMITED`. |
 | FR-004 | Extract and check text | During upload the system extracts plain text from the file and checks it is analysable. | Must | 1. PDF text is extracted with Apache PDFBox, DOCX with Apache POI, synchronously within the upload request. 2. Whitespace is normalised (runs of spaces and tabs → one space, 3+ newlines → 2). 3. Fewer than 300 characters (typically a scanned image PDF) → 422 `NO_TEXT_FOUND`; no OCR is attempted. 4. More than 30,000 characters → 422 `RESUME_TOO_LONG`. 5. A file rejected under FR-003 or FR-004 leaves nothing stored (no DB row, no S3 object). |
 | FR-005 | Choose target role and level | The user picks a target job role from a fixed catalogue and one experience level. | Must | 1. The catalogue lists active roles with code, display name and category, sorted by category then name. 2. Each role has 10–30 catalogue skills, each marked `CORE` or `NICE_TO_HAVE`. 3. Starting an analysis with an unknown or inactive role code → 400 `VALIDATION_FAILED` with `field: jobRoleCode`; an invalid level → 400 `VALIDATION_FAILED` with `field: experienceLevel`. 4. The initial catalogue (seed data, section 5.5) has at least 20 roles. Roles are added by migration, not through an API. |
-| FR-006 | Start analysis | The user starts an analysis for a resume they own, a role and a level. | Must | 1. Returns 202 within 500 ms with the analysis id and status `QUEUED`; processing is asynchronous (FR-008). 2. Resume not found or not owned → 404 `RESUME_NOT_FOUND`. 3. Resume past its 30-day `expiresAt` → 410 `RESUME_EXPIRED`. 4. Already 2 analyses in `QUEUED`/`RUNNING` for this user → 409 `ANALYSIS_IN_PROGRESS`. 5. Quota used up → 403 `QUOTA_EXCEEDED` with `details.resetAt` (FR-007). 6. The analysis stores the role code, level, the user's plan at start time, and the prompt version used. 7. The same resume + role + level may be analysed again; each run is a new analysis and uses quota. |
+| FR-006 | Start analysis | The user starts an analysis for a resume they own, a role and a level. | Must | 1. Returns 202 within 500 ms with the analysis id and status `QUEUED`; processing is asynchronous (FR-008). 2. Resume not found or not owned → 404 `RESUME_NOT_FOUND`. 3. Resume past its 30-day `expiresAt` → 410 `RESUME_EXPIRED`. 4. Already 2 analyses in `QUEUED`/`RUNNING` for this user → 409 `ANALYSIS_IN_PROGRESS`. 5. Quota used up → 403 `QUOTA_EXCEEDED` with `details[0].resetAt` (FR-007, 6.1). 6. The analysis stores the role code, level, the user's plan at start time, and the prompt version used. 7. The same resume + role + level may be analysed again; each run is a new analysis and uses quota. |
 | FR-007 | Monthly quota | Each user has a limit of analyses per quota period by plan: FREE 3, PREMIUM 50. | Must | 1. One unit is reserved atomically when an analysis is created (FR-006); two parallel requests with one unit left produce exactly one 202 and one 403. 2. The unit is given back if the analysis ends `FAILED` (FR-008). 3. Deleting a completed analysis does not give the unit back. 4. The limit is read from the plan in the current token; the used count belongs to the user, so a user upgrading from FREE (3 used) to PREMIUM mid-month has 47 left. A downgrade from PREMIUM (10 used) to FREE has 0 left, never a negative number. 5. A new period starts at 00:00 IST on the 1st of each month; `resetAt` is that instant. 6. An analysis created at 23:59:59 IST on the last day counts in that month even if it completes in the next. |
 | FR-008 | Process analysis | A background worker takes queued analyses, calls the AI provider and stores the result. | Must | 1. Status moves only `QUEUED → RUNNING → COMPLETED` or `QUEUED → RUNNING → FAILED`; any other transition is rejected in code. 2. Before the call, emails, phone numbers and URLs in the text are replaced with `[EMAIL]`, `[PHONE]`, `[URL]` (NFR-009). 3. The AI call has a 45 s timeout; on timeout, HTTP 429/5xx or an invalid response it is retried once after 2 s. 4. If the retry also fails, status = `FAILED` with `failureReason` one of `AI_TIMEOUT`, `AI_PROVIDER_ERROR`, `AI_INVALID_RESPONSE`, and the quota unit is released. 5. A response is valid only if it matches the JSON schema in section 4.6.3 and the checks in 4.6.4 (all 6 dimension scores present as integers 0–100, arrays within their limits); otherwise it is `AI_INVALID_RESPONSE`. 6. An analysis still `RUNNING` 120 s after it started (worker crash) is marked `FAILED` / `AI_TIMEOUT` by a sweeper that runs every minute, and the unit is released. 7. An analysis in `QUEUED` for more than 5 minutes is re-queued once by the same sweeper (lost queue message); if it is still `QUEUED` 5 minutes after that re-queue, it is marked `FAILED` / `AI_TIMEOUT` and the unit is released. |
 | FR-009 | ATS score | The result contains a score out of 100 overall and per dimension. | Must | 1. Each of the 6 dimensions in the table above gets an integer 0–100 from the AI with a one-sentence explanation (max 300 chars). 2. The overall score is computed by the backend, not by the AI: `round(Σ(dimensionScore × weight) / 100)`, rounding half up. 3. The overall score has a band: 0–49 `POOR`, 50–69 `FAIR`, 70–84 `GOOD`, 85–100 `EXCELLENT`. 4. Scores are shown in full to FREE and PREMIUM users. |
 | FR-010 | Missing skills | The result lists the catalogue skills for the chosen role that the resume does not show. | Must | 1. The prompt gives the AI the role's catalogue skills; the AI returns which are missing. 2. The backend keeps only skills that exist in that role's catalogue (names compared case-insensitively) and drops the rest. 3. Each missing skill carries its importance (`CORE` / `NICE_TO_HAVE`); `CORE` are listed first, then by catalogue order. 4. An empty list is a valid result. 5. Shown in full to FREE and PREMIUM users. |
 | FR-011 | Rewrite suggestions | The result contains suggested rewrites for weak lines of the resume. | Must | 1. Between 0 and 15 suggestions. 2. Each has: the original line, the suggested rewrite (max 400 chars), the reason (max 300 chars), the dimension it improves, and a severity `HIGH` / `MEDIUM` / `LOW`. 3. The original line must appear in the extracted text (exact match after whitespace normalisation); suggestions that fail this check are dropped, and if more than half are dropped the response counts as `AI_INVALID_RESPONSE`. 4. Rank = order by severity (`HIGH` first), then by the line's position in the resume; rank starts at 1. 5. A suggested rewrite never introduces a placeholder token (`[EMAIL]`, `[PHONE]`, `[URL]`); such suggestions are dropped. |
-| FR-012 | Plan-based visibility | FREE users see only some suggestions. | Must | 1. For an analysis started on FREE, the API returns only suggestions with rank 1–3 plus `hiddenSuggestionCount`; hidden suggestions are never sent to the browser. 2. For an analysis started on PREMIUM, all suggestions are returned and `hiddenSuggestionCount` = 0. 3. Visibility follows the plan **at the time of reading**: a user who upgrades sees all suggestions of their earlier analyses; a user who downgrades sees only ranks 1–3 again. 4. The same rule applies to the PDF report (FR-016). |
+| FR-012 | Plan-based visibility | FREE users see only some suggestions. | Must | 1. If the reader's current plan (token) is FREE, the API returns only suggestions with rank 1–3 plus `hiddenSuggestionCount`; hidden suggestions are never sent to the browser. 2. If the reader's current plan is PREMIUM, all suggestions are returned and `hiddenSuggestionCount` = 0. 3. Visibility follows the plan **at the time of reading**: a user who upgrades sees all suggestions of their earlier analyses; a user who downgrades sees only ranks 1–3 again. 4. The same rule applies to the PDF report (FR-016). |
 | FR-013 | View analysis | The user opens one analysis to see its status and, when complete, the result. | Must | 1. Returns status, role, level, created time and, if `COMPLETED`, scores, band, missing skills and suggestions (per FR-012). 2. If `FAILED`, returns `failureReason` and no result. 3. Not found or not owned → 404 `ANALYSIS_NOT_FOUND`. 4. The frontend polls every 3 s while status is `QUEUED` or `RUNNING`, and stops after 150 s with a "taking longer than expected" message. |
 | FR-014 | Analysis history | The user lists their own analyses, newest first. | Must | 1. Paginated, page size default 20, max 50. 2. Each item: id, status, role name, level, overall score and band (`null` if not completed), created time. 3. Filter by status is optional. 4. Shows only analyses still within the 180-day retention. |
 | FR-015 | Reuse a resume | The user can start a new analysis (another role or level) on a resume uploaded earlier, without uploading again. | Should | 1. The user lists their resumes that have not expired: id, size, page count, uploaded time, `expiresAt`, number of analyses. 2. Starting an analysis follows FR-006 (including `RESUME_EXPIRED`). |
@@ -517,7 +517,7 @@ sequenceDiagram
     API->>DB: INSERT storage_deletion (UPLOAD_ROLLBACK), then delete object now
     API-->>UI: 500 INTERNAL_ERROR
   end
-  API-->>UI: 201 resume (id, size, pageCount, textLength, expiresAt)
+  API-->>UI: 201 resume object (API-004)
 ```
 
 File detection rules in CMP-006 (bytes, never the extension or the client's `Content-Type`):
@@ -546,7 +546,7 @@ INSERT INTO usage_counter (user_id, quota_period, used) VALUES (:userId, :period
   ON CONFLICT (user_id, quota_period) DO NOTHING;
 SELECT used FROM usage_counter WHERE user_id = :userId AND quota_period = :period FOR UPDATE;
 SELECT count(*) FROM analysis WHERE user_id = :userId AND status IN ('QUEUED','RUNNING');  -- >= 2: 409
--- used >= limit(plan from token): 403 QUOTA_EXCEEDED, details.resetAt
+-- used >= limit(plan from token): 403 QUOTA_EXCEEDED, details[0].resetAt
 UPDATE usage_counter SET used = used + 1, updated_at = now() WHERE user_id = :userId AND quota_period = :period;
 INSERT INTO analysis (... status 'QUEUED', quota_period :period, plan_at_start :plan, prompt_version :pv ...);
 ```
@@ -568,14 +568,14 @@ sequenceDiagram
   alt 2 in progress
     Q-->>UI: 409 ANALYSIS_IN_PROGRESS (rollback)
   else limit reached
-    Q-->>UI: 403 QUOTA_EXCEEDED, details.resetAt (rollback)
+    Q-->>UI: 403 QUOTA_EXCEEDED, details[0].resetAt (rollback)
   end
   DB-->>API: commit
   API->>R: after commit: XADD ro:env:queue:analysis MAXLEN ~ 10000 analysisId requestId
   alt Redis unavailable
     Note over API,R: log WARN, still answer 202. The sweeper re-queues after 5 min (4.3.4)
   end
-  API-->>UI: 202 {analysisId, status QUEUED}
+  API-->>UI: 202 analysis (id, status QUEUED, API-007)
   loop every 3 s while QUEUED or RUNNING, at most 150 s
     UI->>API: GET /api/v1/analyses/{analysisId}
   end
@@ -671,11 +671,12 @@ sequenceDiagram
   participant J as CMP-015 retry job
   C->>PV: POST /api/v1/erasure-requests {"confirm":"DELETE"}, or DELETE /api/v1/consents/current, or POST /internal/v1/erasure-requests {userId}
   PV->>DB: BEGIN
-  PV->>DB: SELECT storage_key FROM resume WHERE user_id AND storage_key IS NOT NULL FOR UPDATE
-  alt nothing stored for this user
+  PV->>DB: lock the user's resume rows (SELECT id FROM resume WHERE user_id FOR UPDATE), then: any resume, consent or usage_counter row for user_id?
+  alt none of the three exists
     PV->>DB: COMMIT, no erasure record (FR-019 criterion 6, FR-021 criterion 3)
     PV-->>C: 202
   end
+  PV->>DB: SELECT storage_key FROM resume WHERE user_id AND storage_key IS NOT NULL
   PV->>DB: INSERT erasure_record (source, notice_version if CONSENT_WITHDRAWN)
   PV->>DB: INSERT storage_deletion per key (ERASURE)
   PV->>DB: DELETE resume (cascades resume_text, analysis and children), DELETE consent, DELETE usage_counter
@@ -694,7 +695,7 @@ sequenceDiagram
   end
 ```
 
-"Nothing stored for this user" means no resume, consent or counter row. The immediate S3 deletes run after the commit in an `@TransactionalEventListener(phase = AFTER_COMMIT)` on a bounded executor, so the 202 does not wait for S3. Deleting a single resume (FR-018) uses the same `storage_deletion` path with reason `RESUME_DELETED`, after checking that none of its analyses is `QUEUED`/`RUNNING`.
+"Nothing stored for this user" means no `resume` (any status), `consent` or `usage_counter` row; a user with only a consent row, or only `EXPIRED` resumes, is erased normally. The immediate S3 deletes run after the commit in an `@TransactionalEventListener(phase = AFTER_COMMIT)` on a bounded executor, so the 202 does not wait for S3. Deleting a single resume (FR-018) uses the same `storage_deletion` path with reason `RESUME_DELETED`, after checking that none of its analyses is `QUEUED`/`RUNNING`.
 
 #### 4.3.7 Retention (FR-020, NFR-011)
 
@@ -891,7 +892,7 @@ Every value below is a typed `@ConfigurationProperties` field with this default,
 | Property | Env variable | Default | Used by |
 |---|---|---|---|
 | `app.mode` | `APP_MODE` | `api` | 4 (run mode) |
-| `app.upload.max-bytes` | `UPLOAD_MAX_BYTES` | `5242880` | FR-003; `spring.servlet.multipart.max-request-size` = this + 65536 |
+| `app.upload.max-bytes` | `UPLOAD_MAX_BYTES` | `5242880` | FR-003; `spring.servlet.multipart.max-file-size` = this, `spring.servlet.multipart.max-request-size` = this + 65536 |
 | `app.upload.max-pdf-pages` | `UPLOAD_MAX_PDF_PAGES` | `5` | FR-003 |
 | `app.upload.hourly-limit` | `UPLOAD_HOURLY_LIMIT` | `10` | CR-020 |
 | `app.api.per-minute-limit` | `API_PER_MINUTE_LIMIT` | `60` | CR-020 |
@@ -1190,7 +1191,7 @@ Purpose: proof that an erasure request was carried out (FR-019 criterion 5, FR-0
 | id | uuid | NO | PK | gen_random_uuid() | |
 | user_id | varchar(64) | NO | | | |
 | source | varchar(20) | NO | | | `ck_erasure_record_source`: in (`USER`, `CONSENT_WITHDRAWN`, `PLATFORM`) |
-| notice_version | varchar(20) | YES | | | the version withdrawn; `ck_erasure_record_notice_version`: `(source = 'CONSENT_WITHDRAWN') = (notice_version IS NOT NULL)` |
+| notice_version | varchar(20) | YES | | | for `CONSENT_WITHDRAWN`: the user's most recently accepted version (latest `accepted_at`), or the current `app.privacy.notice-version` if the user has no consent row; `ck_erasure_record_notice_version`: `(source = 'CONSENT_WITHDRAWN') = (notice_version IS NOT NULL)` |
 | requested_at | timestamptz | NO | | now() | |
 | db_completed_at | timestamptz | NO | | | commit time of the deleting transaction (NFR-012: within 5 s of `requested_at`) |
 | completed_at | timestamptz | YES | | | when the last S3 object of this request was deleted; `ck_erasure_record_completed_at`: `completed_at IS NULL OR completed_at >= db_completed_at` |
@@ -1331,47 +1332,678 @@ Catalogue sort order (FR-005 criterion 1): category in the order `ENGINEERING`, 
 ## 6. API design
 
 ### 6.1 Common rules
-- Base path:
-- Auth header / cookie:
-- Pagination format:
-- Date / time format and timezone:
-- Standard error format (must match section 1.4):
+
+**Base URLs and paths**
+
+| Path prefix | Host (prod) | Who calls it | Auth |
+|---|---|---|---|
+| `/api/v1/**` | `https://ro-api.surfingbear.com` (A-10) | CMP-001 Web UI, from the browser | `sb_access` cookie only (CR-001); a `Authorization` header on these paths is ignored |
+| `/internal/v1/**` | same host; reachable only from the platform's VPC through an internal load balancer listener | SurfingBear platform | `Authorization: Bearer <token>` only, `roles` contains `PLATFORM_SERVICE` (CR-004) |
+| `/actuator/health/liveness`, `/actuator/health/readiness` | management port 8081, not routed by the public load balancer | ECS and the load balancer | none |
+
+The module has no other HTTP endpoints. A path that matches no route returns 404 `NOT_FOUND`; a known path with the wrong method returns 405 `METHOD_NOT_ALLOWED`.
+
+**Order of the common checks.** Every request to `/api/v1/**` passes these checks in this order before any endpoint-specific check; the first one that fails decides the response:
+
+1. Token present and valid (CR-001 – CR-003) → else 401 `UNAUTHENTICATED`.
+2. For `POST`, `PUT`, `DELETE`: header `X-Requested-With` equal to `SurfingBear` exactly (CR-018) → else 403 `FORBIDDEN`.
+3. `USER` in the token's `roles` (CR-003) → else 403 `FORBIDDEN`.
+4. Per-user API rate limit, 60 requests per minute (CR-020) → else 429 `RATE_LIMITED` with `Retry-After`.
+5. Role check where the endpoint needs one (only API-015) → else 403 `FORBIDDEN`.
+6. Endpoint checks, in the order given for each endpoint below.
+
+`/internal/v1/**` runs check 1 (with the `PLATFORM_SERVICE` role required, else 403 `FORBIDDEN`) and then the endpoint checks. It skips checks 2–4: there is no cookie to protect, and the platform's own retry policy (4.4) bounds its rate.
+
+**Requests**
+
+- JSON bodies: `Content-Type: application/json`, UTF-8. A JSON endpoint called with another content type, or with a body that is not valid JSON, returns 400 `VALIDATION_FAILED` with `details: [{ "field": "body", "issue": "..." }]`.
+- Unknown JSON fields and unknown query parameters are ignored (Jackson `FAIL_ON_UNKNOWN_PROPERTIES = false`), so the frontend can be deployed ahead of the API.
+- Field validation uses Bean Validation (CR-019); every failing field is listed in `details`, not only the first.
+- An empty or absent JSON body on an endpoint that takes one is treated as an object with every field missing, so each required field is reported in `details`.
+- Ids in a path are UUIDs. A path id that is not a valid UUID is treated like an id that does not exist: 404 with that resource's not-found code (CR-006, CR-014), never 400.
+- String values are trimmed before validation, except `confirm` (API-013), which must match exactly.
+
+**Responses**
+
+- Section 6 is the wire contract. Where a diagram in section 4 names a field or status differently, section 6 wins.
+- Success bodies are the resource itself, with no wrapper object. `201` and `202` responses that create something include a `Location` header where a GET for it exists.
+- `204` and the erasure `202`s have an empty body.
+- Every response, success or error, carries `X-Request-Id` (CR-010) and `Cache-Control: no-store` (every response is about one user's data).
+- Field names are camelCase (2.1). In resource bodies a field whose value is unknown is present with `null`, never left out, so the client can rely on the shape. The items of `error.details` are the exception: `resetAt` appears only in the `QUOTA_EXCEEDED` item and is left out of every other item.
+- Timestamps are UTC ISO-8601 with `Z`, e.g. `2026-10-19T08:30:00Z` (CR-025). Dates with no time (API-015) are `YYYY-MM-DD` in IST. `resetAt` is the UTC instant of 00:00 IST on the 1st of the next month, e.g. `2026-10-31T18:30:00Z`.
+- Enumerated values are the upper-case codes of section 3 and 5 (`QUEUED`, `MID`, `CORE` ...); display text comes from the frontend's message files (CR-023, CR-024).
+
+**Pagination** (API-005, API-008)
+
+| Query parameter | Type | Default | Validation |
+|---|---|---|---|
+| `page` | integer | `1` | ≥ 1, else 400 `VALIDATION_FAILED` (`field: page`) |
+| `size` | integer | `20` | 1–50, else 400 `VALIDATION_FAILED` (`field: size`) |
+
+Response envelope:
+
+```json
+{
+  "items": [],
+  "page": 1,
+  "size": 20,
+  "totalItems": 57,
+  "totalPages": 3
+}
+```
+
+A `page` beyond `totalPages` returns 200 with an empty `items` and the real totals. Sort order is fixed per endpoint and cannot be chosen by the client.
+
+**Errors.** Every non-2xx body is the error body of 1.4, produced by `GlobalExceptionHandler` (CR-012). `details` is an array in every case:
+
+| Code | `details` |
+|---|---|
+| `VALIDATION_FAILED` | one `{ "field": "<name>", "issue": "<text>" }` per failing field |
+| `QUOTA_EXCEEDED` | exactly one entry `{ "field": "quota", "issue": "monthly limit reached", "resetAt": "<UTC instant>" }`; "`details[0].resetAt`" in this spec means this value |
+| any other code | `[]` |
+
+A `503` from the load balancer while no API task is healthy (4.4) is not produced by the module and has no error body; the frontend treats it like `INTERNAL_ERROR`.
 
 ### 6.2 Endpoints
 
-#### API-001 `<METHOD> <path>`
-- **Purpose:**
-- **Auth / role:**
-- **Implements:** FR-xxx
+Summary:
 
-**Request**
-
-| Field | In (path/query/body) | Type | Required | Validation |
+| ID | Method and path | Purpose | Auth / role | Implements |
 |---|---|---|---|---|
+| API-001 | `GET /api/v1/job-roles` | Role catalogue | USER | FR-005 |
+| API-002 | `POST /api/v1/consents` | Accept the current privacy notice | USER | FR-001 |
+| API-003 | `DELETE /api/v1/consents/current` | Withdraw consent (erases all data) | USER | FR-002 |
+| API-004 | `POST /api/v1/resumes` | Upload a resume | USER + consent | FR-003, FR-004 |
+| API-005 | `GET /api/v1/resumes` | List own active resumes | USER | FR-015 |
+| API-006 | `DELETE /api/v1/resumes/{resumeId}` | Delete a resume and its analyses | USER | FR-018 |
+| API-007 | `POST /api/v1/analyses` | Start an analysis | USER + consent | FR-005, FR-006, FR-007 |
+| API-008 | `GET /api/v1/analyses` | Analysis history | USER | FR-014 |
+| API-009 | `GET /api/v1/analyses/{analysisId}` | Status and result of one analysis | USER | FR-009 – FR-013 |
+| API-010 | `DELETE /api/v1/analyses/{analysisId}` | Delete an analysis | USER | FR-017 |
+| API-011 | `GET /api/v1/analyses/{analysisId}/report` | Download the PDF report | USER | FR-016, FR-012 |
+| API-012 | `GET /api/v1/usage` | Quota used and remaining | USER | FR-023, FR-007 |
+| API-013 | `POST /api/v1/erasure-requests` | Erase all my data | USER | FR-019 |
+| API-014 | `POST /internal/v1/erasure-requests` | Erase a deleted platform account | PLATFORM_SERVICE | FR-021 |
+| API-015 | `GET /api/v1/admin/usage-stats` | Aggregated statistics | ADMIN | FR-022 |
+| API-016 | `GET /api/v1/consents/current` | Has the user accepted the current notice | USER | FR-001 |
+
+"USER" means any valid user token (every user has the `USER` role, CR-003). "+ consent" means the endpoint returns 403 `CONSENT_REQUIRED` without a consent row for the current notice version (FR-001). Each endpoint below lists only its own checks and errors; the common ones (401, 403 `FORBIDDEN` for the CSRF header, 429, 500) apply to every `/api/v1/**` endpoint as described in 6.1 and are not repeated.
+
+#### API-001 `GET /api/v1/job-roles`
+- **Purpose:** the catalogue for the role picker (FR-005).
+- **Auth / role:** USER. Consent is not required, so the picker can render before the notice is accepted.
+- **Implements:** FR-005 · CMP-004 · TBL-002, TBL-003
+
+**Request:** no parameters. Not paginated (the catalogue is small, 21 roles at launch).
+
+**Response 200.** Only `is_active = true` roles, sorted by category in the order of 5.5, then `name` ascending; skills sorted by `position`.
+
+```json
+{
+  "items": [
+    {
+      "code": "BACKEND_ENGINEER",
+      "name": "Backend Engineer",
+      "category": "ENGINEERING",
+      "skills": [
+        { "name": "Java", "importance": "CORE", "position": 1 },
+        { "name": "AWS", "importance": "NICE_TO_HAVE", "position": 10 }
+      ]
+    }
+  ]
+}
+```
+
+| Field | Type | Note |
+|---|---|---|
+| `items[].code` | string | `jobRoleCode` for API-007 |
+| `items[].name` | string | English role name (catalogue data, not UI text) |
+| `items[].category` | string | `ENGINEERING`, `DATA`, `PRODUCT_DESIGN`, `MARKETING_SALES`, `BUSINESS_OPERATIONS` |
+| `items[].skills[]` | array | 10–30 entries: `name` string, `importance` `CORE` / `NICE_TO_HAVE`, `position` integer 1–30 |
+
+**Errors:** common only.
+
+#### API-016 `GET /api/v1/consents/current`
+- **Purpose:** tells the UI whether to show the privacy notice before upload (FR-001).
+- **Auth / role:** USER.
+- **Implements:** FR-001 · CMP-003 · TBL-001
+
+**Request:** no parameters.
 
 **Response 200**
 
 ```json
-{}
+{ "noticeVersion": "2026-10-v1", "accepted": false, "acceptedAt": null }
+```
+
+| Field | Type | Note |
+|---|---|---|
+| `noticeVersion` | string | `app.privacy.notice-version`; the UI shows the notice text for this version from its message files |
+| `accepted` | boolean | a TBL-001 row exists for this user and this version |
+| `acceptedAt` | string (UTC) or null | `accepted_at` of that row |
+
+**Errors:** common only.
+
+#### API-002 `POST /api/v1/consents`
+- **Purpose:** record acceptance of the current privacy notice.
+- **Auth / role:** USER.
+- **Implements:** FR-001 · CMP-003 · TBL-001
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `noticeVersion` | body | string | yes | must equal the current `app.privacy.notice-version`; otherwise 400 `VALIDATION_FAILED` (`field: noticeVersion`, issue `must be the current notice version`). This stops an old open tab from accepting a notice the user never saw. |
+
+```json
+{ "noticeVersion": "2026-10-v1" }
+```
+
+**Response 201** when a new row was stored (with `Location: /api/v1/consents/current`), **200** when this user had already accepted this version (FR-001 criterion 4; no second row, no `Location`):
+
+```json
+{ "noticeVersion": "2026-10-v1", "accepted": true, "acceptedAt": "2026-10-22T09:15:04Z" }
 ```
 
 **Errors**
 
 | HTTP | Error code | When |
 |---|---|---|
+| 400 | `VALIDATION_FAILED` | `noticeVersion` missing, blank or not the current version |
+
+#### API-003 `DELETE /api/v1/consents/current`
+- **Purpose:** withdraw consent; erases everything the module holds about the user (FR-002).
+- **Auth / role:** USER.
+- **Implements:** FR-002, FR-019 · CMP-003, CMP-014, CMP-015 · TBL-001, TBL-004 – TBL-012
+
+**Request:** no body.
+
+**Response 202**, empty body. The erasure of 4.3.6 runs with source `CONSENT_WITHDRAWN` and `notice_version` as defined in TBL-011 (the most recently accepted version, else the current one). It is idempotent: calling it again, or calling it with no consent stored, returns 202 and does nothing more. After it, API-004 and API-007 return 403 `CONSENT_REQUIRED` until API-002 is called again.
+
+**Errors:** common only.
+
+#### API-004 `POST /api/v1/resumes`
+- **Purpose:** upload one resume (FR-003) and extract its text (FR-004).
+- **Auth / role:** USER + consent.
+- **Implements:** FR-003, FR-004 · CMP-005, CMP-006, CMP-015 · TBL-004, TBL-005, TBL-012, TBL-013
+
+**Request:** `Content-Type: multipart/form-data` with one part named `file`. Multipart is resolved lazily (`spring.servlet.multipart.resolve-lazily=true`), so checks 1–2 below run before the body is read. Size check: a `Content-Length` header over `app.upload.max-bytes` + 65,536 → 413 at once, without reading the body; for a chunked body or an oversized part, Spring raises `MaxUploadSizeExceededException` while reading, which `GlobalExceptionHandler` maps to 413 `FILE_TOO_LARGE`. A request that is not `multipart/form-data` → 400 `VALIDATION_FAILED` (`field: file`).
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `file` | multipart part | binary | yes | rules of FR-003 / FR-004, checked in the order below; the part's file name and `Content-Type` are ignored |
+
+Endpoint checks, in order (4.3.1): (1) upload rate limit 10 per clock hour; (2) consent; (3) size: part larger than `app.upload.max-bytes`, or a request body larger than that + 65,536 bytes; (4) part present and not empty; (5) magic bytes; (6) protection; (7) parse; (8) page count; (9) text length.
+
+**Response 201**
+
+```json
+{
+  "id": "0b8f6a0e-4c1d-4f0e-a7a6-3f1f2a9d6c11",
+  "status": "ACTIVE",
+  "mimeType": "application/pdf",
+  "fileSizeBytes": 248331,
+  "pageCount": 2,
+  "textLength": 4912,
+  "uploadedAt": "2026-10-22T09:16:40Z",
+  "expiresAt": "2026-11-21T09:16:40Z",
+  "analysisCount": 0
+}
+```
+
+This is the same resume object as API-005's items. `pageCount` is `null` for DOCX. No `Location` header (there is no single-resume GET).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 429 | `RATE_LIMITED` | 11th upload attempt in the same clock hour (rejected attempts count too); `Retry-After` = seconds to the next hour |
+| 403 | `CONSENT_REQUIRED` | no consent to the current notice version |
+| 413 | `FILE_TOO_LARGE` | file over 5,242,880 bytes |
+| 400 | `VALIDATION_FAILED` | not `multipart/form-data`, no part `file`, or the part is empty (`field: file`) |
+| 415 | `UNSUPPORTED_FILE_TYPE` | magic bytes are not PDF or DOCX (table in 4.3.1) |
+| 422 | `FILE_PROTECTED` | password-protected PDF or DOCX |
+| 422 | `FILE_UNREADABLE` | the parser cannot open it, zip-bomb guard, or extraction over 10 s |
+| 422 | `RESUME_TOO_LONG` | PDF over 5 pages, or text over 30,000 characters |
+| 422 | `NO_TEXT_FOUND` | text under 300 characters after normalisation |
+
+Each 413, 415 and 422 increments `upload_rejection_daily` for today (IST) and that code. Nothing else is stored for a rejected file (FR-004 criterion 5).
+
+#### API-005 `GET /api/v1/resumes`
+- **Purpose:** list the user's resumes that can still be analysed (FR-015).
+- **Auth / role:** USER.
+- **Implements:** FR-015 · CMP-005 · TBL-004, TBL-006
+
+**Request:** `page`, `size` (6.1). Returns only rows with `status = 'ACTIVE' AND expires_at > now()`, sorted by `uploaded_at` descending.
+
+**Response 200:** the pagination envelope with `items` of the resume object shown in API-004. `analysisCount` = number of TBL-006 rows for that resume, any status.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `page` or `size` out of range |
+
+#### API-006 `DELETE /api/v1/resumes/{resumeId}`
+- **Purpose:** delete a resume, its file, its text and all its analyses (FR-018).
+- **Auth / role:** USER.
+- **Implements:** FR-018 · CMP-005, CMP-015 · TBL-004 – TBL-009, TBL-012
+
+**Request:** `resumeId` (path, UUID). Works for `ACTIVE` and `EXPIRED` rows of the user.
+
+**Response 204**, empty body.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | `RESUME_NOT_FOUND` | no such id, another user's id, or not a UUID |
+| 409 | `ANALYSIS_IN_PROGRESS` | an analysis of this resume is `QUEUED` or `RUNNING` |
+
+#### API-007 `POST /api/v1/analyses`
+- **Purpose:** start an analysis of an owned resume for a role and level (FR-006).
+- **Auth / role:** USER + consent.
+- **Implements:** FR-005, FR-006, FR-007 · CMP-008, CMP-007, CMP-009, CMP-004 · TBL-006, TBL-010, TBL-004
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `resumeId` | body | string | yes | missing or blank → 400 `VALIDATION_FAILED` (`field: resumeId`); present but not a valid UUID → 404 `RESUME_NOT_FOUND`, like an unknown id (CR-014) |
+| `jobRoleCode` | body | string | yes | an active TBL-002 code, else 400 `VALIDATION_FAILED` (`field: jobRoleCode`) |
+| `experienceLevel` | body | string | yes | `FRESHER`, `JUNIOR`, `MID`, `SENIOR`, `LEAD`, else 400 `VALIDATION_FAILED` (`field: experienceLevel`) |
+
+```json
+{ "resumeId": "0b8f6a0e-4c1d-4f0e-a7a6-3f1f2a9d6c11", "jobRoleCode": "BACKEND_ENGINEER", "experienceLevel": "MID" }
+```
+
+Endpoint checks in the order of 4.3.2: body validation → consent → resume owned → resume not expired → in-progress limit → quota.
+
+**Response 202**, `Location: /api/v1/analyses/{id}`:
+
+```json
+{
+  "id": "7d2e9c4b-1f3a-4b8e-9c55-0e6a1d2f3b44",
+  "status": "QUEUED",
+  "resumeId": "0b8f6a0e-4c1d-4f0e-a7a6-3f1f2a9d6c11",
+  "jobRoleCode": "BACKEND_ENGINEER",
+  "experienceLevel": "MID",
+  "createdAt": "2026-10-22T09:17:02Z"
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | a field missing or invalid, as in the table above |
+| 403 | `CONSENT_REQUIRED` | no consent to the current notice version |
+| 404 | `RESUME_NOT_FOUND` | `resumeId` is not a valid UUID, does not exist, or belongs to another user |
+| 410 | `RESUME_EXPIRED` | resume `EXPIRED`, or `expires_at <= now()` |
+| 409 | `ANALYSIS_IN_PROGRESS` | the user already has 2 analyses `QUEUED` or `RUNNING` |
+| 403 | `QUOTA_EXCEEDED` | `used >= limit` for this period; `details[0].resetAt` set |
+
+#### API-008 `GET /api/v1/analyses`
+- **Purpose:** the user's analysis history, newest first (FR-014).
+- **Auth / role:** USER.
+- **Implements:** FR-014 · CMP-008 · TBL-006, TBL-002
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `status` | query | string | no | `QUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, else 400 `VALIDATION_FAILED` (`field: status`) |
+| `page`, `size` | query | integer | no | 6.1 |
+
+Returns the user's analyses with `created_at > now() - 180 days` (rows the nightly job has not yet deleted are hidden too), sorted by `created_at` descending, then `id`.
+
+**Response 200:** the pagination envelope with items:
+
+```json
+{
+  "id": "7d2e9c4b-1f3a-4b8e-9c55-0e6a1d2f3b44",
+  "status": "COMPLETED",
+  "resumeId": "0b8f6a0e-4c1d-4f0e-a7a6-3f1f2a9d6c11",
+  "jobRole": { "code": "BACKEND_ENGINEER", "name": "Backend Engineer" },
+  "experienceLevel": "MID",
+  "overallScore": 68,
+  "scoreBand": "FAIR",
+  "createdAt": "2026-10-22T09:17:02Z"
+}
+```
+
+`overallScore` and `scoreBand` are `null` unless `COMPLETED`. `resumeId` stays set after the resume expires (the row is kept, FR-020 criterion 2).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `status`, `page` or `size` invalid |
+
+#### API-009 `GET /api/v1/analyses/{analysisId}`
+- **Purpose:** status of one analysis and, when complete, its result (FR-013). Polled by the UI every 3 s (FR-013 criterion 4).
+- **Auth / role:** USER.
+- **Implements:** FR-009 – FR-013 · CMP-008 · TBL-006 – TBL-009, TBL-002
+
+**Request:** `analysisId` (path, UUID).
+
+**Response 200**
+
+```json
+{
+  "id": "7d2e9c4b-1f3a-4b8e-9c55-0e6a1d2f3b44",
+  "status": "COMPLETED",
+  "resumeId": "0b8f6a0e-4c1d-4f0e-a7a6-3f1f2a9d6c11",
+  "jobRole": { "code": "BACKEND_ENGINEER", "name": "Backend Engineer" },
+  "experienceLevel": "MID",
+  "createdAt": "2026-10-22T09:17:02Z",
+  "startedAt": "2026-10-22T09:17:03Z",
+  "finishedAt": "2026-10-22T09:17:31Z",
+  "failureReason": null,
+  "result": {
+    "overallScore": 68,
+    "scoreBand": "FAIR",
+    "dimensions": [
+      { "code": "KEYWORD_MATCH", "score": 72, "weight": 25, "explanation": "Most backend keywords appear, but no job title matches the role." }
+    ],
+    "missingSkills": [
+      { "name": "Docker", "importance": "NICE_TO_HAVE" }
+    ],
+    "suggestions": [
+      {
+        "rank": 1,
+        "originalLine": "Worked on APIs for the payments team.",
+        "suggestedText": "Built 12 REST APIs in Spring Boot for the payments team, handling [X] requests per day.",
+        "reason": "States what was built and the scale, with action verbs.",
+        "dimension": "IMPACT",
+        "severity": "HIGH"
+      }
+    ],
+    "hiddenSuggestionCount": 6
+  }
+}
+```
+
+| Field | Type | Note |
+|---|---|---|
+| `status` | string | `QUEUED`, `RUNNING`, `COMPLETED`, `FAILED` |
+| `startedAt`, `finishedAt` | string (UTC) or null | set on `RUNNING` and on `COMPLETED` / `FAILED` |
+| `failureReason` | string or null | `AI_TIMEOUT`, `AI_PROVIDER_ERROR`, `AI_INVALID_RESPONSE` when `FAILED`; else `null`. These are status values, not error codes: the response is still 200. |
+| `result` | object or null | present only when `COMPLETED` |
+| `result.dimensions` | array of 6 | in the order of the dimension table in 3.1; `score` 0–100, `weight` as stored (TBL-007), `explanation` ≤ 300 chars |
+| `result.missingSkills` | array, 0–30 | in TBL-008 `position` order (`CORE` first) |
+| `result.suggestions` | array | ordered by `rank`. If the **reader's current plan** (token) is `FREE`, only ranks 1–3; if `PREMIUM`, all (FR-012). `suggestedText` ≤ 400 chars, `reason` ≤ 300 chars |
+| `result.hiddenSuggestionCount` | integer | total suggestions minus those returned; 0 for `PREMIUM` |
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | `ANALYSIS_NOT_FOUND` | no such id, another user's id, not a UUID, or older than 180 days |
+
+#### API-010 `DELETE /api/v1/analyses/{analysisId}`
+- **Purpose:** delete one analysis and its results (FR-017).
+- **Auth / role:** USER.
+- **Implements:** FR-017 · CMP-008 · TBL-006 – TBL-009
+
+**Request:** `analysisId` (path, UUID).
+
+**Response 204**, empty body. The quota unit is not given back (FR-007 criterion 3).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | `ANALYSIS_NOT_FOUND` | no such id, another user's id, not a UUID, or older than 180 days |
+| 409 | `ANALYSIS_IN_PROGRESS` | the analysis is `QUEUED` or `RUNNING` |
+
+#### API-011 `GET /api/v1/analyses/{analysisId}/report`
+- **Purpose:** download a completed analysis as a PDF (FR-016).
+- **Auth / role:** USER.
+- **Implements:** FR-016, FR-012 · CMP-013, CMP-008 · TBL-006 – TBL-009, TBL-002
+
+**Request:** `analysisId` (path, UUID).
+
+**Response 200:** `Content-Type: application/pdf`, `Content-Disposition: attachment; filename="resume-analysis-<yyyy-MM-dd>.pdf"` where the date is the analysis's `created_at` in IST. Content per FR-016 criteria 2–4, suggestions filtered by the reader's current plan exactly as API-009. Rendered on request, not stored.
+
+**Errors** (always returned as JSON with `Content-Type: application/json`, whatever the `Accept` header)
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | `ANALYSIS_NOT_FOUND` | as API-009 |
+| 409 | `ANALYSIS_NOT_READY` | status is `QUEUED`, `RUNNING` or `FAILED` |
+
+#### API-012 `GET /api/v1/usage`
+- **Purpose:** the user's quota for the current period (FR-023).
+- **Auth / role:** USER.
+- **Implements:** FR-023, FR-007 · CMP-007 · TBL-010
+
+**Request:** no parameters.
+
+**Response 200**
+
+```json
+{
+  "plan": "FREE",
+  "quotaPeriod": "2026-10",
+  "limit": 3,
+  "used": 1,
+  "remaining": 2,
+  "resetAt": "2026-10-31T18:30:00Z"
+}
+```
+
+| Field | Type | Note |
+|---|---|---|
+| `plan` | string | from the token (CR-003) |
+| `quotaPeriod` | string | `yyyy-MM`, IST, now |
+| `limit` | integer | `app.quota.free-monthly` or `premium-monthly` |
+| `used` | integer | TBL-010 `used` for this user and period; 0 if no row |
+| `remaining` | integer | `max(0, limit - used)` |
+| `resetAt` | string (UTC) | 00:00 IST on the 1st of the next month |
+
+**Errors:** common only.
+
+#### API-013 `POST /api/v1/erasure-requests`
+- **Purpose:** erase everything the module holds about the user (FR-019).
+- **Auth / role:** USER.
+- **Implements:** FR-019 · CMP-014, CMP-015 · TBL-001, TBL-004 – TBL-012
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `confirm` | body | string | yes | exactly `DELETE` (case-sensitive, not trimmed), else 400 `VALIDATION_FAILED` (`field: confirm`) |
+
+```json
+{ "confirm": "DELETE" }
+```
+
+**Response 202**, empty body. Erasure of 4.3.6 with source `USER`. A second call returns 202 and does nothing more (FR-019 criterion 6).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `confirm` missing or not exactly `DELETE` |
+
+#### API-014 `POST /internal/v1/erasure-requests`
+- **Purpose:** erase a user whose platform account was deleted (FR-021).
+- **Auth / role:** `Authorization: Bearer` token with `PLATFORM_SERVICE` in `roles` (CR-004).
+- **Implements:** FR-021 · CMP-002, CMP-014, CMP-015 · TBL-001, TBL-004 – TBL-012
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `userId` | body | string | yes | 1–64 characters (CR-003), else 400 `VALIDATION_FAILED` (`field: userId`) |
+
+```json
+{ "userId": "usr_8f2c41" }
+```
+
+**Response 202**, empty body, also for a user id the module has never seen (FR-021 criterion 3). Erasure of 4.3.6 with source `PLATFORM`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | `UNAUTHENTICATED` | no Bearer token, or invalid |
+| 403 | `FORBIDDEN` | valid token without `PLATFORM_SERVICE` (e.g. a user token) |
+| 400 | `VALIDATION_FAILED` | `userId` missing or too long |
+
+#### API-015 `GET /api/v1/admin/usage-stats`
+- **Purpose:** aggregated daily numbers for monitoring (FR-022). No personal data.
+- **Auth / role:** `ADMIN` in `roles` (CR-007).
+- **Implements:** FR-022 · CMP-017 · TBL-013, TBL-014
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `from` | query | date `YYYY-MM-DD` (IST) | yes | valid date |
+| `to` | query | date `YYYY-MM-DD` (IST) | yes | valid date; `from <= to`; `to <= today (IST)`; at most 90 days inclusive (`to - from <= 89`); a missing or unparseable value names that parameter; `from > to`, a range over 90 days and a `to` after today all name `to` (400 `VALIDATION_FAILED`) |
+
+**Response 200.** One entry per day from `from` to `to`, including days with no data (zeros, and `null` times).
+
+```json
+{
+  "from": "2026-10-20",
+  "to": "2026-10-21",
+  "days": [
+    {
+      "date": "2026-10-20",
+      "analysesCreated": 412,
+      "analysesCompleted": 401,
+      "analysesFailed": { "AI_TIMEOUT": 6, "AI_PROVIDER_ERROR": 3, "AI_INVALID_RESPONSE": 2 },
+      "analysesByPlan": { "FREE": 350, "PREMIUM": 62 },
+      "uploadsRejected": { "FILE_TOO_LARGE": 4, "UNSUPPORTED_FILE_TYPE": 9, "FILE_PROTECTED": 1, "FILE_UNREADABLE": 2, "RESUME_TOO_LONG": 3, "NO_TEXT_FOUND": 7 },
+      "avgProcessingMs": 21480,
+      "p95ProcessingMs": 38200
+    }
+  ]
+}
+```
+
+| Field | Source (TBL-014 `analysis_outcome` unless stated) |
+|---|---|
+| `analysesCreated` | rows with that `day` (an analysis is counted once it has finished, see TBL-014) |
+| `analysesCompleted` | rows with `status = 'COMPLETED'` |
+| `analysesFailed.<reason>` | rows with `status = 'FAILED'` per `failure_reason`; every reason present, 0 if none |
+| `analysesByPlan.<plan>` | rows per `plan`; both plans present |
+| `uploadsRejected.<code>` | TBL-013 `count` per `error_code`; all six codes present, 0 if none |
+| `avgProcessingMs` | `round(avg(duration_ms))` over `COMPLETED` rows; `null` if none |
+| `p95ProcessingMs` | `percentile_cont(0.95)` of `duration_ms` over `COMPLETED` rows, rounded; `null` if none |
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 403 | `FORBIDDEN` | token without `ADMIN` |
+| 400 | `VALIDATION_FAILED` | `from` / `to` missing or invalid as above |
 
 ### 6.3 Error code list
 
+The `ErrorCode` enum holds exactly these values (CR-013). `message` is the default English text; it is for developers and may change.
+
 | ID | Code | HTTP | Message | When it happens |
 |---|---|---|---|---|
+| ERR-001 | `UNAUTHENTICATED` | 401 | Authentication is required. | No token, expired, bad signature, wrong `iss` / `aud`, unknown `kid` (CR-001, CR-002) |
+| ERR-002 | `FORBIDDEN` | 403 | You are not allowed to do this. | `X-Requested-With` missing or not exactly `SurfingBear` on a cookie POST/DELETE (CR-018); token without `USER` on `/api/v1/**` (CR-003); non-admin on API-015; non-`PLATFORM_SERVICE` on `/internal/**` (CR-004) |
+| ERR-003 | `VALIDATION_FAILED` | 400 | One or more fields are invalid. | Any field, query or body problem; `details` lists each field (6.1) |
+| ERR-004 | `NOT_FOUND` | 404 | No such endpoint. | No route matches the path |
+| ERR-005 | `METHOD_NOT_ALLOWED` | 405 | Method not allowed on this endpoint. | Known path, wrong HTTP method |
+| ERR-006 | `CONSENT_REQUIRED` | 403 | Accept the current privacy notice first. | API-004 / API-007 without consent to the current version (FR-001, FR-002) |
+| ERR-007 | `QUOTA_EXCEEDED` | 403 | Monthly analysis limit reached. | API-007 with `used >= limit` (FR-007); `details[0].resetAt` |
+| ERR-008 | `RATE_LIMITED` | 429 | Too many requests. | Over 60 requests/minute, or over 10 uploads/hour (CR-020); `Retry-After` header |
+| ERR-009 | `FILE_TOO_LARGE` | 413 | The file is larger than 5 MB. | API-004, file over 5,242,880 bytes (FR-003) |
+| ERR-010 | `UNSUPPORTED_FILE_TYPE` | 415 | Only PDF and DOCX files are accepted. | API-004, magic bytes not PDF / DOCX (FR-003, 4.3.1) |
+| ERR-011 | `FILE_PROTECTED` | 422 | The file is password protected. | API-004 (FR-003) |
+| ERR-012 | `FILE_UNREADABLE` | 422 | The file could not be read. | API-004, parser failure, zip-bomb guard, extraction over 10 s (FR-003) |
+| ERR-013 | `RESUME_TOO_LONG` | 422 | The resume is too long. | API-004, PDF over 5 pages or text over 30,000 characters (FR-003, FR-004) |
+| ERR-014 | `NO_TEXT_FOUND` | 422 | No readable text was found in the file. | API-004, text under 300 characters (FR-004) |
+| ERR-015 | `RESUME_NOT_FOUND` | 404 | Resume not found. | API-006 path id, API-007 `resumeId`: missing, another user's, or not a UUID (CR-006) |
+| ERR-016 | `RESUME_EXPIRED` | 410 | The resume has expired; upload it again. | API-007 on an expired resume (FR-006) |
+| ERR-017 | `ANALYSIS_NOT_FOUND` | 404 | Analysis not found. | API-009 / 010 / 011: missing, another user's, not a UUID, or older than 180 days |
+| ERR-018 | `ANALYSIS_IN_PROGRESS` | 409 | An analysis is still in progress. | API-007 with 2 in progress (FR-006); API-010 on a running analysis (FR-017); API-006 with a running analysis of the resume (FR-018) |
+| ERR-019 | `ANALYSIS_NOT_READY` | 409 | The analysis is not complete. | API-011 when status is not `COMPLETED` (FR-016) |
+| ERR-020 | `INTERNAL_ERROR` | 500 | Something went wrong. Try again later. | Any unexpected exception, S3 put failure, DB connection timeout (4.4); never carries a stack trace (CR-012) |
+
+`AI_TIMEOUT`, `AI_PROVIDER_ERROR` and `AI_INVALID_RESPONSE` are values of `analysis.failure_reason` returned inside API-009 with HTTP 200, not error codes.
 
 ---
 
 ## 7. Traceability matrix
 
+Every FR and NFR, with the components (4.2), tables (5.2) and endpoints (6.2) that implement it, and how it is verified. Test class names follow 2.1 (`*Test` unit, `*IT` integration with Testcontainers).
+
+### 7.1 Functional requirements
+
 | Requirement | Component(s) | Table(s) | API(s) | Verified by |
 |---|---|---|---|---|
-| FR-001 | CMP-00x | TBL-00x | API-00x | <test / acceptance criterion> |
+| FR-001 Give consent | CMP-001, CMP-003 | TBL-001 | API-016, API-002; enforced in API-004, API-007 | `ConsentIT`: upload / start without consent → 403 `CONSENT_REQUIRED`; accept twice → 201 then 200, one row; new notice version → 403 again |
+| FR-002 Withdraw consent | CMP-003, CMP-014, CMP-015 | TBL-001, TBL-004 – TBL-012 | API-003 | `ErasureIT` (source `CONSENT_WITHDRAWN`, `notice_version` set); upload afterwards → 403 |
+| FR-003 Upload resume | CMP-002, CMP-005, CMP-006, CMP-015 | TBL-004, TBL-012, TBL-013 | API-004 | `ResumeUploadIT` with the fixed file set (PNG as `.pdf`, 5 MB + 1 byte, protected PDF and DOCX, corrupt file, 6-page PDF, 11th upload in an hour) → each code of the API-004 table |
+| FR-004 Extract and check text | CMP-006, CMP-005 | TBL-005, TBL-004, TBL-013 | API-004 | `TextExtractorTest` (normalisation order, 299 / 300 / 30,000 / 30,001 characters); `ResumeUploadIT`: rejected file leaves no row and no S3 object |
+| FR-005 Choose role and level | CMP-001, CMP-004 | TBL-002, TBL-003 | API-001, API-007 | `CatalogueSeedIT` (≥ 20 roles, 10–30 skills each, sort order); `AnalysisStartIT`: unknown role / level → 400 naming the field |
+| FR-006 Start analysis | CMP-008, CMP-007, CMP-009 | TBL-006, TBL-010, TBL-004 | API-007 | `AnalysisStartIT`: 202 within 500 ms, each error of the API-007 table in check order, stored `plan_at_start` and `prompt_version` |
+| FR-007 Monthly quota | CMP-007, CMP-008, CMP-010, CMP-012 | TBL-010, TBL-006 | API-007, API-012 | `QuotaConcurrencyIT` (2 parallel starts, 1 unit left → one 202, one 403); `QuotaPeriodTest` (31 Oct 23:59:59 IST vs 1 Nov 00:00 IST); release on `FAILED`; upgrade / downgrade cases |
+| FR-008 Process analysis | CMP-009, CMP-010, CMP-011, CMP-012, CMP-007 | TBL-006, TBL-005, TBL-010, TBL-014 | API-009 (status) | `AnalysisWorkerIT` with WireMock (timeout, 429, 5xx, invalid JSON, success after one retry); `SweeperIT` (stuck `RUNNING`, lost and twice-lost `QUEUED`) |
+| FR-009 ATS score | CMP-010, CMP-011 | TBL-006, TBL-007 | API-009, API-011 | `OverallScoreTest` (weights, half-up rounding, band edges 49/50, 69/70, 84/85) |
+| FR-010 Missing skills | CMP-010, CMP-011, CMP-004 | TBL-008, TBL-003 | API-009, API-011 | `MissingSkillFilterTest` (non-catalogue skill dropped, case-insensitive match, `CORE` first) |
+| FR-011 Rewrite suggestions | CMP-010, CMP-011 | TBL-009 | API-009, API-011 | `SuggestionCheckTest` (line not in text dropped, placeholder in rewrite dropped, over half dropped → `AI_INVALID_RESPONSE`, ranking) |
+| FR-012 Plan-based visibility | CMP-008, CMP-013, CMP-001 | TBL-009, TBL-006 | API-009, API-011 | `VisibilityIT`: FREE reader gets ranks 1–3 and `hiddenSuggestionCount`; same analysis read with a PREMIUM token gets all; PDF text checked the same way |
+| FR-013 View analysis | CMP-008, CMP-001 | TBL-006 – TBL-009 | API-009 | `AnalysisReadIT` (each status, another user's id → 404); Playwright: polling every 3 s, stops at 150 s |
+| FR-014 Analysis history | CMP-008, CMP-001 | TBL-006, TBL-002 | API-008 | `AnalysisHistoryIT` (order, status filter, page / size limits, 181-day-old row hidden) |
+| FR-015 Reuse a resume | CMP-005, CMP-008 | TBL-004, TBL-006 | API-005, API-007 | `ResumeListIT` (expired hidden, `analysisCount`); `AnalysisStartIT` on an expired resume → 410 |
+| FR-016 Download PDF report | CMP-013, CMP-008 | TBL-006 – TBL-009, TBL-002 | API-011 | `ReportRendererTest` (text extracted from the PDF has every FR-016 item and no name or contact data); `ReportIT` (409 when not `COMPLETED`, file name) |
+| FR-017 Delete an analysis | CMP-008 | TBL-006 – TBL-009, TBL-010 | API-010 | `AnalysisDeleteIT` (204, children gone, quota unchanged, 409 while running) |
+| FR-018 Delete a resume | CMP-005, CMP-015 | TBL-004 – TBL-009, TBL-012 | API-006 | `ResumeDeleteIT` (cascade, S3 failure → `storage_deletion` row, 409 while running) |
+| FR-019 Erase all my data | CMP-014, CMP-015, CMP-010 | TBL-001, TBL-004 – TBL-012 | API-013 | `ErasureIT` (every user table empty for the user, one `erasure_record`, S3 objects gone, second call → 202 no change, running analysis's result discarded) |
+| FR-020 Automatic deletion | CMP-016, CMP-015 | TBL-004 – TBL-014, TBL-015 | none (scheduled job) | `RetentionJobIT` with a fixed clock (30-day expiry, 180-day delete, running analysis skipped, batches of 500) |
+| FR-021 Platform account deletion | CMP-002, CMP-014, CMP-015 | TBL-001, TBL-004 – TBL-012 | API-014 | `InternalErasureIT` (PLATFORM_SERVICE → 202, unknown user → 202, user token → 403) |
+| FR-022 Usage statistics | CMP-017 | TBL-013, TBL-014 | API-015 | `AdminStatsIT` (zero days present, p95, 91-day range → 400, non-admin → 403, no user ids in the body) |
+| FR-023 Show my usage | CMP-007, CMP-001 | TBL-010 | API-012 | `UsageIT` (no row → used 0, downgrade → remaining 0); Playwright: "Analyse" disabled at 0 |
+
+### 7.2 Non-functional requirements
+
+| Requirement | Component(s) | Table(s) | API(s) | Verified by |
+|---|---|---|---|---|
+| NFR-001 Read latency | CMP-002, CMP-004, CMP-005, CMP-007, CMP-008 | TBL-006, TBL-004 (indexes in 5.3) | API-001, API-005, API-008, API-009, API-012 | k6 on staging, 20 req/s |
+| NFR-002 Upload latency | CMP-005, CMP-006, CMP-015 | TBL-004, TBL-005 | API-004 | k6 with the fixed test-file set |
+| NFR-003 Analysis time | CMP-009, CMP-010, CMP-011, CMP-012 | TBL-006 | API-007, API-009 | `analysis_duration_seconds` histogram |
+| NFR-004 Report time | CMP-013 | TBL-006 – TBL-009 | API-011 | k6; `report_render_seconds` |
+| NFR-005 Availability | CMP-002 (all API components) | all | all `/api/v1/**` | Uptime check on liveness; restore drill |
+| NFR-006 Scalability | CMP-009, CMP-010 | TBL-006 | API-007 | Load test with `FakeAiClient`, 2 s latency, 10 worker tasks |
+| NFR-007 Encryption | CMP-015, infrastructure (4.4) | all | all | AWS Config rules |
+| NFR-008 Vulnerabilities | all | — | all | ZAP baseline; dependency scan in CI (CR-022) |
+| NFR-009 AI data minimised | CMP-011 | TBL-005 (stored text is not redacted; only the sent copy is) | none | Redactor test set of 4.6.1 (50 samples); prompt-builder test |
+| NFR-010 Data location | CMP-015, infrastructure (4.4) | all | — | Infrastructure-as-code review |
+| NFR-011 Retention enforced | CMP-016 | TBL-004, TBL-005, TBL-006 | none | Retention audit job (06:00 IST), `retention_violations_total` alert |
+| NFR-012 Erasure completes | CMP-014, CMP-015 | TBL-011, TBL-012 | API-003, API-013, API-014 | `ErasureIT` timing (`db_completed_at - requested_at` < 5 s); alert on `storage_deletion` rows older than 24 h |
+| NFR-013 Metrics and alerts | CMP-002, CMP-010, CMP-011, CMP-009 | — | all | Synthetic failure on staging fires each alert |
+| NFR-014 Tracing | CMP-002, CMP-009, CMP-010, CMP-011, CMP-015 | — | all | Trace sample review on staging |
+| NFR-015 AI cost | CMP-011 | TBL-006 (`input_tokens`, `output_tokens`) | none | `ai_tokens_total`; provider dashboard |
+| NFR-016 Accessibility | CMP-001 | — | — | axe in Playwright, 0 serious / critical |
+| NFR-017 Test coverage | all backend components | — | — | JaCoCo gate in CI |
+| NFR-018 Browsers and screens | CMP-001 | — | — | Playwright on Chromium, Firefox, WebKit, 360 px viewport |
+
+### 7.3 Values that appear in more than one place
+
+Each value is defined once in 4.7 and must read the same everywhere below. A change to one of them is a change to every place in its row.
+
+| Value | Where it appears |
+|---|---|
+| 5 MB (5,242,880 bytes) | FR-003, 3.1 fixed values, 4.7 `app.upload.max-bytes`, TBL-004 `ck_resume_file_size_bytes`, API-004, ERR-009 |
+| 5 PDF pages | FR-003, 4.3.1, 4.7, TBL-004 `ck_resume_page_count`, API-004, ERR-013 |
+| 300 / 30,000 characters | FR-004, 4.7, TBL-004 `ck_resume_text_length`, TBL-005, API-004, ERR-013, ERR-014 |
+| 10 uploads/hour, 60 requests/minute | CR-020, FR-003 criterion 9, 4.7, Redis keys (4.7), 6.1, ERR-008 |
+| FREE 3 / PREMIUM 50 analyses | FR-007, A-3, 4.7, API-012 |
+| 3 visible suggestions on FREE | FR-012, A-3, 4.7, TBL-009 note, API-009, API-011 |
+| 2 analyses in progress | FR-006 criterion 4, 4.3.2, 4.7, API-007, ERR-018 |
+| 30 / 180 days retention | CR-021, FR-020, 4.3.7, 4.7, TBL-004 `expires_at`, API-004 `expiresAt`, API-008, ERR-017 |
+| Page size 20, max 50 | FR-014 criterion 1, 6.1 |
+| 90-day statistics range | FR-022, API-015 |
 
 ---
 
@@ -1381,3 +2013,4 @@ Catalogue sort order (FR-005 criterion 1): category in the order `ENGINEERING`, 
 |---|---|---|---|---|---|
 | v0.1 | 2026-10-19 | Sachin S M | Sections 1–3: common requirements, coding conventions, functional and non-functional requirements, assumptions and scope | First draft, round 1 | CR-001–CR-031, FR-001–FR-023, NFR-001–NFR-018 |
 | v0.2 | 2026-10-20 | Sachin S M | Section 4 architecture (17 components, run modes, 7 flows, integrations, stack reasons, AI request/prompt/schema/validation, configuration, Redis keys) and section 5 database (ERD, 15 tables, indexes, delete rules, catalogue seed). FR-008 criterion 7: an analysis still queued 5 min after its re-queue fails as `AI_TIMEOUT`. NFR-015: `max_tokens` 8000, because current models count reasoning in the output. A-9: temperature removed. A-10 added. Section references in 3.1 and NFR-009 point at the new subsections. | Round 1. The FR-008 and NFR-015 changes close gaps found while designing the worker and the AI call: without the first, a twice-lost message would stay `QUEUED` forever and hold a quota unit; without the second, a 4,000-token cap would cut off responses as `AI_INVALID_RESPONSE`. | CMP-001–CMP-017, TBL-001–TBL-015, FR-008, NFR-015, A-9, A-10 |
+| v0.3 | 2026-10-22 | Sachin S M | Section 6 API design: common rules (paths, check order, request and response rules, pagination, error `details` per code), 16 endpoints with request fields, validation, example responses and errors, and the error code list ERR-001–ERR-020. Section 7 traceability: every FR and NFR mapped to components, tables, endpoints and tests, plus a table of values that appear in more than one place. API-016 `GET /api/v1/consents/current` added (the UI needs to know whether to show the notice). CR-014 now names `resumeId` in the body of API-007 as the resource the request acts on (404, as FR-006 criterion 2 already said). 1.4: `error.details` is always an array; `QUOTA_EXCEEDED` carries `resetAt` in its single entry, in UTC (the old example used `+05:30`, against CR-025). FR-006 criterion 5 and 4.3.2 say `details[0].resetAt`. 2.3 branch example uses ERR-007 (quota), not ERR-012. | Round 1. A self-run build test (a separate Claude Code agent reading only this file) then logged 15 guesses, all fixed in this version: `resumeId` not a UUID → 404; the erasure guard checks resume, consent and counter rows; `max-file-size` set and the 413 mechanism stated; FR-012 criteria 1–2 follow the reader's plan; section 6 is the wire contract over diagram labels; `details` items may omit `resetAt`; API-010 404 includes 180 days; rate-limit windows are UTC with a defined `Retry-After`; CORS methods, headers and preflight (CR-017); exact `X-Requested-With` value; `Location` on API-002; withdrawn `notice_version`; `sub` and `USER` role edge cases (CR-003); field names for 400s on API-004, API-015 and empty bodies. Before that, writing the endpoints exposed three contradictions in sections 1–4: CR-014 (body value → 400) against FR-006 (unknown `resumeId` → 404), the IST `resetAt` example against CR-025, and `details.resetAt` on a field defined as an array. Each is fixed at the source so the same fact reads the same everywhere (rubric F). | API-001–API-016, ERR-001–ERR-020, CR-003, CR-014, CR-017, CR-018, CR-020, CR-025, FR-006, FR-012, TBL-011, 1.4, 2.3, 4.3.1, 4.3.2, 4.3.6, 4.7 |
