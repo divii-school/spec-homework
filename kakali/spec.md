@@ -601,6 +601,7 @@ flowchart LR
   AUTH[CMP-015 Platform auth<br/>JWKS endpoint]
   AI[CMP-016 Anthropic Messages API]
   OBS[CMP-017 CloudWatch + OTel collector]
+  RZP[CMP-020 Razorpay<br/>Subscriptions API + Checkout]
 
   WEB -- "HTTPS /resume-optimizer/*" --> CF
   WEB -- "HTTPS /api/resume-optimizer/v1/* (cookie sb_access)" --> CF
@@ -615,6 +616,10 @@ flowchart LR
   WRK -- "HTTPS, x-api-key" --> AI
   API --> OBS
   WRK --> OBS
+  WEB -- "Checkout.js (card/UPI entry, hosted by Razorpay)" --> RZP
+  API -- "HTTPS Basic auth key_id:key_secret (CMP-018)" --> RZP
+  RZP -- "signed webhooks POST /api/resume-optimizer/webhooks/razorpay (CMP-019)" --> CF
+  WRK -- "daily reconciliation (CMP-021)" --> RZP
 ```
 
 Inside `ro-api` and `ro-worker` (same codebase, different entrypoints) the modules are:
@@ -630,12 +635,18 @@ flowchart TB
     C3 --> C6
     C3 --> C5
     C3 --> C10[CMP-010 ReportRenderer]
+    G --> C18[CMP-018 Billing + TierService]
+    C19[CMP-019 Razorpay webhook receiver] --> C18
+    G --> C22[CMP-022 Comparison]
+    C3 --> C18
+    C22 --> C18
   end
   subgraph ro-worker
     C12[CMP-012 AnalysisProcessor] --> C8[CMP-008 ScoringEngine]
     C12 --> C9[CMP-009 AiClient + breaker]
     C12 --> C6b[CMP-006 Quota]
     C11[CMP-011 Retention & Sweeper jobs]
+    C21[CMP-021 Billing reconciliation job]
   end
 ```
 
@@ -645,14 +656,14 @@ flowchart TB
 |---|---|---|---|
 | CMP-001 | `ro-web` | Renders W-01…W-03, calls the API with the platform cookie, polls analysis status, shows localized messages. Holds no secrets and no server-side state; pages are client components behind a server layout that only reads `sb_locale`. | Next.js 15 (App Router), React 19, TanStack Query 5, next-intl, Tailwind CSS 4 |
 | CMP-002 | Edge routing | TLS termination, HTTP→HTTPS, routes `/resume-optimizer*` → `ro-web` target group and `/api/resume-optimizer/*` → `ro-api` target group, AWS WAF managed rules (common, known bad inputs) and a WAF rate rule of 2,000 requests / 5 min per IP. No request-body size limit at the edge: the API enforces `K-04` itself (Multer stops reading at `K-04` + 1 bytes) so every oversized upload gets the standard JSON `413 FILE_TOO_LARGE`. The WAF rules exclude the `/api/resume-optimizer/v1/analyses` body from body inspection (binary uploads cause false positives). | Platform CloudFront distribution (behaviours added for our paths) → our ALB |
-| CMP-003 | Analyses API (`modules/analyses`) | HTTP endpoints API-005…API-010: accepts the upload, runs FR-002/FR-003 via CMP-007, reserves quota via CMP-006, creates the analysis row, enqueues the job, serves results with plan-based visibility, deletes and erases. Also hosts the global guards (auth CR-001…CR-006, rate limit CR-019) and the error filter (CR-013). | NestJS 11, Multer (`memoryStorage`, `limits.fileSize = K-04 + 1`), class-validator |
+| CMP-003 | Analyses API (`modules/analyses`) | HTTP endpoints API-005…API-010: accepts the upload, runs FR-002/FR-003 via CMP-007, asks CMP-018 `TierService` for the tier, reserves quota via CMP-006 (free tier only), creates the analysis row, enqueues the job, serves results with plan-based visibility, deletes and erases. Also hosts the global guards (auth CR-001…CR-006, rate limit CR-019) and the error filter (CR-013). | NestJS 11, Multer (`memoryStorage`, `limits.fileSize = K-04 + 1`), class-validator |
 | CMP-004 | Job-role catalog (`modules/job-roles`) | Reads active roles (API-001) and lets admins manage roles and terms (API-011…API-014); provides `getTermsForRole(jobRoleId)` to CMP-012. | NestJS, Prisma |
 | CMP-005 | Consent (`modules/consent`) | Stores and checks consent for `K-08` (API-003, API-004); `withdraw(userId)` used by erase. | NestJS, Prisma |
-| CMP-006 | Quota (`modules/quota`) | Owns `usage_counters`: `reserve(tx, userId, plan)`, `commit(tx, userId, period)`, `release(tx, userId, period)`, `get(userId, plan)` (API-002). Always called inside the caller's transaction. | NestJS, Prisma `$transaction` + `SELECT … FOR UPDATE` |
+| CMP-006 | Quota (`modules/quota`) | Owns `usage_counters`: `reserve(tx, userId)` (free tier only), `commit(tx, userId, period, tier)` (`used` or `pro_used`), `release(tx, userId, period)`, `get(userId, tier)` (API-002). Always called inside the caller's transaction. | NestJS, Prisma `$transaction` + `SELECT … FOR UPDATE` |
 | CMP-007 | Resume parser (`modules/parsing`) | Pure function `parse(buffer) → { kind, pageCount, text, hasEmail, hasPhone, redactedText, wordCount }` or a typed parse error (FR-002 steps 3–6, FR-003). Runs in a `piscina` pool of `PARSER_THREADS` threads with a `K-23` (10 s) task timeout. | `pdfjs-dist` 4 (legacy build for Node), `mammoth` 1, `yauzl` (DOCX ZIP inspection with size guard), `piscina` 4 |
 | CMP-008 | Scoring engine (`modules/scoring/deterministic`) | Pure functions for the four code-scored dimensions, missing skills and explanations (3.5). No I/O. | TypeScript |
 | CMP-009 | AI client (`modules/scoring/ai`) | Builds the prompt (4.7), calls Anthropic with timeout/retry (FR-013), validates the JSON with zod, applies FR-011 checks, and maintains the Redis circuit breaker. `AI_MODE=fake` swaps in `FakeAiClient` that returns fixtures. | `@anthropic-ai/sdk` (TypeScript), zod 3 |
-| CMP-010 | Report renderer (`modules/report`) | Builds the PDF for API-008 from an analysis DTO already filtered by plan; streams it to the response. | `pdfkit` 0.15, Noto Sans TTF bundled in `apps/api/assets/fonts/` |
+| CMP-010 | Report renderer (`modules/report`) | Builds the PDF for API-008 from an analysis DTO already filtered by tier (FR-012); streams it to the response. | `pdfkit` 0.15, Noto Sans TTF bundled in `apps/api/assets/fonts/` |
 | CMP-011 | Retention & sweeper (`modules/retention`) | BullMQ repeatable jobs `retention` (daily 20:30 UTC) and `sweep-stuck` (every 60 s) on queue `ro-maintenance` (FR-017, FR-022). | BullMQ 5 repeatable jobs, Prisma |
 | CMP-012 | Analysis processor (`modules/scoring/analysis.processor.ts`) | Consumes `resume-analysis` jobs: sets `processing`, loads text + role terms, runs CMP-008 and CMP-009, writes results and `completed` (or `failed`) with quota commit/release in one transaction (FR-005 AC 6–7). | BullMQ 5 `WorkerHost` (`@nestjs/bullmq`), concurrency `K-45` |
 | CMP-013 | PostgreSQL | System of record: catalog, consents, analyses and results, quota counters, audit events. | Amazon RDS for PostgreSQL 16, Multi-AZ in prod, encrypted, backups `K-34` |
@@ -660,6 +671,11 @@ flowchart TB
 | CMP-015 | Platform auth (external) | Issues and signs the user's JWT; publishes JWKS. | SurfingBear platform |
 | CMP-016 | Anthropic API (external) | AI scoring of two dimensions and rewrite suggestions. | `POST https://api.anthropic.com/v1/messages` |
 | CMP-017 | Observability | Collects logs (CloudWatch Logs), metrics (OpenTelemetry → CloudWatch EMF), traces (OTel → AWS X-Ray) and runs alarms (4.8). | ADOT collector sidecar, CloudWatch Alarms → PagerDuty |
+| CMP-018 | Billing (`modules/billing`) | *(New in v2.0.)* Owns Resume Pro: API-018 – API-022, the Razorpay REST client (create, fetch, cancel subscriptions; fetch payments and invoices), writes to TBL-010 / TBL-011, and `TierService` (FR-027), the single place that computes `free` / `pro`. | NestJS, Prisma, `razorpay` Node SDK 2.x (REST calls with `K-75` timeout), Redis tier cache |
+| CMP-019 | Razorpay webhook receiver (`modules/billing/webhooks`) | *(New in v2.0.)* API-023: verifies the HMAC on the raw body, de-duplicates by event ID (TBL-012), applies subscription state and charged periods in one transaction (FR-025 AC 1 – 7). | NestJS controller with `rawBody: true` (Nest `NestFactory.create(AppModule, { rawBody: true })`), Prisma |
+| CMP-020 | Razorpay (external) | *(New in v2.0.)* Payment gateway: hosted Checkout for card / UPI / netbanking mandates, recurring charges, retries, receipts, invoices, webhooks. | Razorpay Subscriptions API `https://api.razorpay.com/v1`, Checkout `https://checkout.razorpay.com/v1/checkout.js` |
+| CMP-021 | Billing reconciliation (`modules/billing/reconcile.job.ts`) | *(New in v2.0.)* Daily repeatable job `billing-reconcile` on queue `ro-maintenance` (FR-025 AC 8): re-fetches live subscriptions and paid invoices, inserts missed periods, expires stale `created` rows. | BullMQ repeatable job in `ro-worker` |
+| CMP-022 | Comparison (`modules/comparison`) | *(New in v2.0.)* API-024: loads two owned completed analyses with dimensions and missing skills, checks tier via `TierService`, computes deltas and skill sets (FR-029). Stateless. | NestJS, Prisma |
 
 ### 4.3 Main flows
 
@@ -800,7 +816,7 @@ sequenceDiagram
   else status != completed
     A-->>U: 409 ANALYSIS_NOT_READY
   else
-    A->>A: apply FR-012 visibility from plan claim
+    A->>A: apply FR-012 visibility from tier (TierService, FR-027)
     A->>PDF: render(dto)
     PDF-->>U: 200 application/pdf (streamed, not stored)
   end
@@ -824,6 +840,142 @@ sequenceDiagram
   A-->>U: 200 { deletedAnalyses: n, consentWithdrawn }
 ```
 
+#### 4.3.7 Subscribe to Resume Pro and activate (FR-023, FR-024, FR-027) — *new in v2.0*
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (W-04)
+  participant A as ro-api (CMP-018)
+  participant DB as PostgreSQL
+  participant RZ as Razorpay API (CMP-020)
+  participant CO as Razorpay Checkout (browser)
+  participant R as Redis
+  U->>A: POST /me/subscription/checkout (API-019)
+  A->>DB: live subscription without scheduled cancel? created < 30 min?
+  alt already subscribed
+    A-->>U: 409 ALREADY_SUBSCRIBED
+  else reusable created row
+    A-->>U: 200 { razorpaySubscriptionId (existing) }
+  else new
+    A->>RZ: POST /v1/subscriptions {plan_id, total_count, expire_by, notes.userId, start_at?}
+    alt Razorpay error / timeout 10 s
+      A-->>U: 503 PAYMENT_PROVIDER_UNAVAILABLE
+    else ok
+      RZ-->>A: { id: sub_…, status: created }
+      A->>DB: insert subscriptions(status=created); audit subscription_started
+      A-->>U: 200 { razorpayKeyId, razorpaySubscriptionId, amountPaise, startsAt }
+    end
+  end
+  U->>CO: open Checkout(key, subscription_id)
+  CO->>RZ: payment + mandate (card / UPI AutoPay / e-mandate)
+  CO-->>U: handler({ razorpay_payment_id, razorpay_subscription_id, razorpay_signature })
+  U->>A: POST /me/subscription/verify (API-020)
+  A->>A: HMAC_SHA256(payment_id|subscription_id, key_secret) == signature?
+  alt mismatch
+    A-->>U: 400 PAYMENT_SIGNATURE_INVALID
+  else ok
+    A->>RZ: GET /v1/subscriptions/{id}, GET /v1/payments/{paymentId}
+    alt Razorpay down
+      A-->>U: 503 PAYMENT_PROVIDER_UNAVAILABLE (web polls API-018; webhook will activate)
+    else captured, INR, amount = K-70
+      A->>DB: update subscriptions; insert subscription_payments (ON CONFLICT DO NOTHING)
+      A->>R: DEL ro:tier:<userId>
+      A-->>U: 200 { tier: "pro", proUntil }
+    end
+  end
+```
+
+#### 4.3.8 Monthly renewal, failed payment and webhook processing (FR-025) — *new in v2.0*
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant RZ as Razorpay
+  participant W as ro-api webhook (CMP-019)
+  participant DB as PostgreSQL
+  participant R as Redis
+  RZ->>W: POST /api/resume-optimizer/webhooks/razorpay (raw body, X-Razorpay-Signature, x-razorpay-event-id)
+  W->>W: HMAC_SHA256(rawBody, webhook_secret) == signature?
+  alt invalid
+    W-->>RZ: 400 WEBHOOK_SIGNATURE_INVALID
+  else valid
+    W->>DB: BEGIN; INSERT payment_events(event_id) ON CONFLICT DO NOTHING
+    alt duplicate event
+      W->>DB: ROLLBACK
+      W-->>RZ: 200
+    else new
+      alt subscription.charged
+        W->>DB: update subscriptions (if event.created_at >= last_event_at); insert subscription_payments(new period)
+        W->>R: DEL ro:tier:<userId>
+      else subscription.pending
+        W->>DB: status = pending (Pro continues until proUntil, then grace ends)
+      else subscription.halted
+        W->>DB: status = halted
+        W->>RZ: POST /v1/subscriptions/{id}/cancel {cancel_at_cycle_end: 0} (after commit)
+      else subscription.cancelled / completed
+        W->>DB: status, ended_at
+      end
+      W->>DB: payment_events.outcome = processed; COMMIT
+      W-->>RZ: 200 (within 5 s)
+    end
+  end
+  Note over RZ,W: On 5xx/timeout Razorpay retries; daily reconciliation (CMP-021) repairs anything still missed
+```
+
+#### 4.3.9 Cancel Resume Pro (FR-026) — *new in v2.0*
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (W-04)
+  participant A as ro-api (CMP-018)
+  participant DB as PostgreSQL
+  participant RZ as Razorpay
+  U->>A: POST /me/subscription/cancel (API-021)
+  A->>DB: live subscription for user?
+  alt none
+    A-->>U: 409 NO_ACTIVE_SUBSCRIPTION
+  else already cancel_at_cycle_end
+    A-->>U: 200 (same state)
+  else
+    A->>RZ: POST /v1/subscriptions/{id}/cancel {cancel_at_cycle_end: 1}
+    alt Razorpay error
+      A-->>U: 503 PAYMENT_PROVIDER_UNAVAILABLE
+    else ok
+      A->>DB: cancel_at_cycle_end = true, cancel_requested_at = now(); audit subscription_cancel_requested
+      A-->>U: 200 { tier: "pro", proUntil, subscription.cancelAtPeriodEnd: true }
+    end
+  end
+  Note over U,DB: Tier stays pro until proUntil (no grace when cancelling) and becomes free by date, with no job needed
+```
+
+#### 4.3.10 Compare two analyses (FR-029) — *new in v2.0*
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (W-05)
+  participant A as ro-api (CMP-022)
+  participant T as TierService (CMP-018)
+  participant DB as PostgreSQL
+  U->>A: GET /analysis-comparisons?baseId&targetId (API-024)
+  A->>T: getTier(userId)
+  alt free
+    A-->>U: 403 PRO_REQUIRED
+  else pro
+    A->>DB: load both WHERE id IN (…) AND user_id = $1, with dimension scores and missing skills
+    alt one missing
+      A-->>U: 404 NOT_FOUND
+    else one not completed
+      A-->>U: 409 ANALYSIS_NOT_READY
+    else
+      A->>A: deltas (target − base), skill set differences if same role
+      A-->>U: 200 comparison
+    end
+  end
+```
+
 ### 4.4 External integrations
 
 | System | Purpose | Protocol / auth | Failure handling |
@@ -833,6 +985,7 @@ sequenceDiagram
 | PostgreSQL (CMP-013) | System of record | TLS, user/password from `DATABASE_URL` (Secrets Manager); Prisma pool size 10 per task | Multi-AZ failover (~60–120 s). During failover API returns `503 SERVICE_UNAVAILABLE` (Prisma connection errors are mapped to ERR-024); `/health/ready` fails so ALB drains tasks; worker jobs fail and are swept (FR-022) |
 | Redis (CMP-014) | Queue, rate limit, breaker | TLS + AUTH token in `REDIS_URL` | Rate limit fails open (CR-019); breaker check fails **closed** (treated as closed, i.e. calls allowed); enqueue failure → FR-005 AC 5 (`503`, quota released); `/health/ready` fails if Redis is down for the API (cannot enqueue) |
 | File storage | — | — | **None.** Original files are never stored (A-08, NFR-008); PDF reports are generated on demand. |
+| Razorpay (CMP-020) — *new in v2.0* | Resume Pro subscriptions and payments | Server → Razorpay: HTTPS REST `https://api.razorpay.com/v1`, HTTP Basic auth `RAZORPAY_KEY_ID:RAZORPAY_KEY_SECRET`, timeout `K-75`. Browser → Razorpay: hosted Checkout with the public `key_id`. Razorpay → server: webhooks to API-023 signed with `RAZORPAY_WEBHOOK_SECRET`. Webhook events enabled in the Razorpay dashboard: `subscription.authenticated`, `.activated`, `.charged`, `.pending`, `.halted`, `.cancelled`, `.completed`, `.updated` | Checkout / cancel calls fail → `503 PAYMENT_PROVIDER_UNAVAILABLE`, nothing stored, user retries. Verify fetch fails → webhook activates (FR-024 AC 7). Missed or late webhooks → Razorpay retries for 24 h, then daily reconciliation (FR-025 AC 8). Entitlement never depends on a live Razorpay call: it is computed from TBL-011 dates (FR-027), so a Razorpay outage never removes Pro from a paying user |
 
 ### 4.5 Tech stack and reasons
 
@@ -846,6 +999,8 @@ sequenceDiagram
 | Database | PostgreSQL 16 (given) | Transactions and row locks are needed for exact quota counting (FR-008 AC 8); CHECK constraints and FKs enforce enums and ownership; `ON DELETE CASCADE` makes erasure a single statement. |
 | Cache / queue | Redis 7 (given) | BullMQ requires it; atomic `INCR`+`EXPIRE` gives cheap per-user rate limiting and a shared circuit-breaker counter across tasks. |
 | AI provider | Anthropic Claude, model `K-46` (`claude-opus-5-5`), adaptive thinking, effort `K-48` (`medium`), structured JSON output | Strong at careful reading and following "do not invent facts" rules, which FR-011 depends on. Structured outputs (`output_config.format` with a JSON schema) make the reply machine-parseable, cutting `AI_BAD_RESPONSE`. Estimated cost ~$0.10 per analysis (≈ 6k input + ≈ 4k output tokens incl. thinking) fits NFR-015. Model is an env var so it can be changed without a code change. |
+| Payments (v2.0) | Razorpay Subscriptions + hosted Checkout | Named by the Round 2 brief. It is also the right fit for India: UPI AutoPay, RuPay / Visa / Mastercard mandates and e-NACH under RBI recurring-payment rules are handled by Razorpay, including the pre-debit notifications RBI requires. Hosted Checkout keeps card data off our servers (PCI SAQ-A, NFR-022). Subscription state comes from signed webhooks, which suits the existing async design. |
+| Entitlement source (v2.0) | Paid periods in PostgreSQL (TBL-011), not live Razorpay state and not the platform token | A date range is easy to reason about and to test (FR-027 AC 6). It survives Razorpay outages, and "access until end of paid month" after cancel falls out of the data with no scheduled job. |
 | PDF parsing | `pdfjs-dist` | Mozilla's parser handles real-world PDFs, reports page count, and raises a specific `PasswordException` for encrypted files (FR-002 step 4). |
 | DOCX parsing | `mammoth` + `yauzl` pre-check | `mammoth.extractRawText` gives clean paragraph text; `yauzl` lets us check ZIP entries and uncompressed size before parsing (ZIP-bomb guard). |
 | PDF report | `pdfkit` | Pure JS, no headless browser: small image, fast (< 300 ms for a 3-page report), no Chromium security surface in the API container. |
@@ -876,7 +1031,7 @@ Validated with zod at startup (CR-016). Missing or invalid → exit 1.
 | `PLATFORM_JWKS_URL` | api | yes | HTTPS URL (`http://localhost:4000/...` allowed in `local`/`test`) | no |
 | `PLATFORM_ISSUER` | api | yes | URL string | no |
 | `WEB_ORIGIN` | api | yes | origin, no trailing slash | no |
-| `UPGRADE_URL` | api, web (`NEXT_PUBLIC_UPGRADE_URL`) | yes | HTTPS URL | no |
+| `UPGRADE_URL` | — | **Deprecated in v2.0** (not read any more; was the platform upgrade link, K-09) | — | — |
 | `AI_MODE` | worker | no | `real` (default) \| `fake`; `fake` is rejected when `APP_ENV=prod` | no |
 | `ANTHROPIC_API_KEY` | worker | yes if `AI_MODE=real` | `sk-ant-…` | yes |
 | `AI_MODEL` | worker | no | default `claude-opus-5-5` | no |
@@ -886,6 +1041,11 @@ Validated with zod at startup (CR-016). Missing or invalid → exit 1.
 | `PARSER_THREADS` | api | no | integer 1–4, default `2` | no |
 | `LOG_LEVEL` | all | no | default `info` (`debug` in `local`/`dev`) | no |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | all | no | default `http://localhost:4318` (ADOT sidecar) | no |
+| `RAZORPAY_MODE` | api, worker | no | `real` (default) \| `fake`; `fake` is rejected when `APP_ENV=prod` (v2.0) | no |
+| `RAZORPAY_KEY_ID` | api, worker | yes if `RAZORPAY_MODE=real` | `rzp_test_…` (non-prod) / `rzp_live_…` (prod; any other prefix rejected when `APP_ENV=prod`) (v2.0) | no (public; sent to the browser in API-019) |
+| `RAZORPAY_KEY_SECRET` | api, worker | yes if `RAZORPAY_MODE=real` | string (v2.0) | yes |
+| `RAZORPAY_WEBHOOK_SECRET` | api | yes if `RAZORPAY_MODE=real` | string, ≥ 16 chars, set in the Razorpay dashboard webhook (v2.0) | yes |
+| `RAZORPAY_PLAN_ID` | api | yes if `RAZORPAY_MODE=real` | `^plan_[A-Za-z0-9]{14}$` (`K-71`) (v2.0) | no |
 
 Key rotation for `RESUME_TEXT_KEY`: set the new key and ID, move the old one to `RESUME_TEXT_KEY_PREVIOUS`, deploy. Because text is purged after `K-31` (30 days), `RESUME_TEXT_KEY_PREVIOUS` can be removed 32 days later (`K-31` plus up to 24 h for the daily purge, plus 1 day margin).
 
@@ -1000,7 +1160,7 @@ If Redis cannot be reached, `state` returns `closed` (fail open, 4.4) and record
 |---|---|---|---|
 | `ro_http_request_duration_seconds` | histogram | `route`, `method`, `status` | api |
 | `ro_upload_rejected_total` | counter | `code` (ERR code) | api |
-| `ro_analysis_created_total` | counter | `plan` | api |
+| `ro_analysis_created_total` | counter | `plan` (`free` / `pro`, v2.0) | api |
 | `ro_analysis_finished_total` | counter | `status`, `failure_code` | worker, sweeper |
 | `ro_analysis_duration_seconds` | histogram | `status` | worker (`completed_at − created_at`) |
 | `ro_ai_attempt_total` | counter | `outcome` (`ok`, `timeout`, `rate_limited`, `server_error`, `bad_response`, `refusal`, `max_tokens`) | worker |
@@ -1010,6 +1170,11 @@ If Redis cannot be reached, `state` returns `closed` (fail open, 4.4) and record
 | `ro_rewrites_dropped_total` | counter | `check` (FR-011 check number) | worker |
 | `ro_queue_waiting` | gauge | `queue` | worker (every 15 s) |
 | `ro_retention_rows_total` | counter | `category` | retention job |
+| `ro_billing_checkout_total` | counter | `outcome` (`created`, `reused`, `already_subscribed`, `provider_error`) — v2.0 | api |
+| `ro_billing_activation_seconds` | histogram | — (Checkout handler → `pro`, NFR-021) — v2.0 | api |
+| `ro_billing_webhook_total` | counter | `event_type`, `outcome` (`processed`, `ignored`, `duplicate`, `failed`, `bad_signature`) — v2.0 | api |
+| `ro_billing_reconciled_total` | counter | `kind` (`period_inserted`, `status_updated`, `expired`) — v2.0 | worker |
+| `ro_pro_active_users` | gauge | — (users with tier `pro`, computed hourly) — v2.0 | worker |
 
 **Alerts** (CloudWatch Alarms → PagerDuty `resume-optimizer` service):
 
@@ -1025,6 +1190,11 @@ If Redis cannot be reached, `state` returns `closed` (fail open, 4.4) and record
 | `JwksFetchFailing` | JWKS fetch errors > 0 for 5 min | ticket |
 | `AiCostHigh` | 7-day mean cost per completed analysis > $0.20 (NFR-015) | ticket |
 | `PiiInLogs` | `log-pii-scan` finds a hit (CR-010) | page |
+| `WebhookFailures` (v2.0) | `ro_billing_webhook_total{outcome=failed}` > 0 for 15 min, or `bad_signature` > 10 in 5 min | page |
+| `BillingWebhookGap` (v2.0) | `ro_billing_reconciled_total{kind=period_inserted}` > 0 in a reconciliation run (a paid period was missed by webhooks, NFR-024) | ticket |
+| `BillingAmountMismatch` (v2.0) | A captured payment with amount ≠ `K-70` (FR-024 AC 4) | page |
+| `ReconcileJobMissed` (v2.0) | No successful `billing-reconcile` run in 26 h | ticket |
+| `ProFairUseExceeded` (v2.0) | A user's `pro_used` > `K-80` in the current IST month (NFR-025) | ticket |
 
 ---
 
