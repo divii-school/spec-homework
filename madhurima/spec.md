@@ -3,12 +3,9 @@
 | Field | Value |
 |---|---|
 | Author | Madhurima Gorain |
-| Version | v1.1 |
-| Last updated | 2026-10-19 |
+| Version | v1.2 |
+| Last updated | 2026-10-22 |
 | Status | Draft |
-| Backend stack | Go 1.23 |
-| Frontend stack | Next.js 15 (App Router, TypeScript) |
-| Data stores | PostgreSQL 16, Redis 7 |
 
 **ID rules.** IDs are permanent and never renumbered or reused. A removed item is marked **Deprecated** and its row is kept.
 
@@ -21,31 +18,6 @@
 | `TBL-` | Database table |
 | `API-` | API endpoint |
 | `ERR-` | Error code |
-
-### 0. Glossary and fixed values
-
-These values are used throughout the spec. If a section and this table ever disagree, this table wins and the section is a bug.
-
-| Name | Value | Used in |
-|---|---|---|
-| Max upload size | 5 MiB = 5,242,880 bytes | FR-003, API-004, ERR-005 |
-| Allowed file types | PDF (`application/pdf`), DOCX (`application/vnd.openxmlformats-officedocument.wordprocessingml.document`) | FR-003, API-004, ERR-004 |
-| Max PDF pages | 10 | FR-003, ERR-020 |
-| Extracted text length | min 300, max 30,000 characters (Unicode code points, after whitespace normalisation) | FR-004, ERR-007, ERR-021 |
-| Free plan quota | 3 analyses per calendar month | FR-013, ERR-009 |
-| Pro plan quota | 30 analyses per calendar month | FR-013, ERR-009 |
-| Quota month | Calendar month in `Asia/Kolkata` (IST, UTC+05:30), key `YYYY-MM` | FR-013, TBL-010 |
-| Suggestions visible to free users | first 3 (by display order) | FR-012 |
-| Max suggestions per analysis | 20 | FR-011 |
-| Max missing skills per analysis | 15 | FR-010 |
-| Resume file + extracted text retention | 30 days after upload | FR-018, NFR-007 |
-| Analysis retention | 365 days after creation | FR-018, NFR-007 |
-| Erasure request completion | within 24 hours | FR-017, NFR-008 |
-| Database backup retention | 7 days | NFR-008 |
-| Current consent version | `2026-10-v1` | FR-002, TBL-002 |
-| AI prompt version | `analysis-v1` | FR-009, TBL-006 |
-| Experience levels | `entry` (0–2 yrs), `mid` (3–5 yrs), `senior` (6–9 yrs), `lead` (10+ yrs) | FR-006, TBL-006, API-008 |
-| Plans | `free`, `pro` | CR-002, FR-013 |
 
 ---
 
@@ -67,7 +39,7 @@ These values are used throughout the spec. If a section and this table ever disa
 | CR-012 | Security | All input is validated at the HTTP boundary (Gin `binding` struct tags, which use `go-playground/validator`); unknown JSON fields are rejected (`binding.EnableDecoderDisallowUnknownFields = true`) → 400 `VALIDATION_FAILED`. JSON bodies are limited to 16 KiB; multipart uploads to 5 MiB + 64 KiB overhead. | Unit tests per handler |
 | CR-013 | Security | Rate limits per user (Redis, fixed 1-minute or 1-hour windows): all endpoints 120 requests/min; API-004 upload 10/hour; API-008 create analysis 10/hour. Exceeding → 429 `RATE_LIMITED` with `Retry-After` (seconds). | Integration test |
 | CR-014 | Security | Users can only see and change their own data. Every query on user data filters by `user_id` from the token. Another user's ID returns 404 `NOT_FOUND` (not 403), so IDs cannot be probed. | Integration test with two users |
-| CR-015 | Data retention | Retention periods are the fixed values in section 0 and are enforced by scheduled jobs (FR-018), not by manual work. | Job tests; staging check |
+| CR-015 | Data retention | Retention periods are the fixed values in 3.3 and are enforced by scheduled jobs (FR-018), not by manual work. | Job tests; staging check |
 | CR-016 | Security | Browser-state-changing requests (POST, DELETE) using the cookie must send `Content-Type: application/json` or `multipart/form-data` and pass the `Origin` header check against the CORS allow-list; otherwise 403 `FORBIDDEN`. The `sb_access` cookie is `SameSite=Lax`, set by the platform. | Integration test |
 | CR-017 | i18n | UI text exists in English (`en`, default) and Hindi (`hi`). The locale comes from the `locale` JWT claim, falling back to `en`. API `message` fields are English only; the frontend shows a translated text keyed by the error `code`. | Frontend test: every error code has `en` and `hi` strings |
 | CR-018 | i18n | The API sends and accepts times only as RFC 3339 UTC with milliseconds (`2026-10-19T08:30:00.000Z`). The UI shows dates in IST, format `19 Oct 2026, 2:00 PM`. Scores are integers. | Contract tests |
@@ -142,7 +114,7 @@ Go implementation: handlers return `*apperr.Error{Code, HTTPStatus, Message, Det
 - **Rate limiting:** CR-013. Implemented as Redis `INCR` + `EXPIRE` on key `rl:{userId}:{bucket}:{windowStart}`. If Redis is down, rate limiting **fails open** (request allowed, `WARN` logged) because quotas are enforced separately in PostgreSQL (FR-013).
 - **Transport:** TLS 1.2+ only, HSTS `max-age=31536000`. TLS ends at the Nginx load balancer (1.7).
 - **Encryption at rest:** managed PostgreSQL and Redis with disk encryption turned on; S3 bucket default encryption SSE-S3 (AES-256) for every object.
-- **Data retention:** section 0 and FR-018.
+- **Data retention:** 3.3 (Fixed values) and FR-018.
 - **Security headers (frontend):** `Content-Security-Policy: default-src 'self'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`.
 - **Dependency scanning:** `govulncheck` and `npm audit --audit-level=high` in CI; a high or critical finding fails the build.
 
@@ -287,7 +259,7 @@ A PR is approved only if all of these are true (checklist in the PR template):
 | ID | Title | Description | Priority | Acceptance criteria |
 |---|---|---|---|---|
 | FR-001 | Access through platform session | A user who is logged in to SurfingBear opens the module and is recognised without any login step. On the first request for a new `sub`, the API creates a `users` row (just-in-time). | Must | 1. A valid token for an unknown `sub` creates exactly one TBL-001 row, also under 10 parallel first requests (unique `platform_user_id` + `INSERT … ON CONFLICT DO NOTHING`). 2. `last_seen_at` is updated at most once per hour per user. 3. Missing/invalid/expired token → 401 `UNAUTHENTICATED`, and the frontend redirects to `https://app.surfingbear.com/login?returnTo=<current URL>`. 4. API-001 returns plan, quota and consent status. |
-| FR-002 | DPDP consent | Before the first upload, the user must read and accept the consent notice (version in section 0). | Must | 1. API-004 and API-008 return 403 `CONSENT_REQUIRED` if the user has no TBL-002 row with `consent_version` = current version and `withdrawn_at IS NULL`. 2. API-003 accepts only the current version; any other → 409 `CONSENT_VERSION_OUTDATED`. 3. Accepting twice is idempotent (returns the existing record, 200). 4. When the current version changes, every user must accept again before the next upload; old analyses stay viewable. 5. An audit event `consent.accepted` is written. |
+| FR-002 | DPDP consent | Before the first upload, the user must read and accept the consent notice (version in 3.3, Fixed values). | Must | 1. API-004 and API-008 return 403 `CONSENT_REQUIRED` if the user has no TBL-002 row with `consent_version` = current version and `withdrawn_at IS NULL`. 2. API-003 accepts only the current version; any other → 409 `CONSENT_VERSION_OUTDATED`. 3. Accepting twice is idempotent (returns the existing record, 200). 4. When the current version changes, every user must accept again before the next upload; old analyses stay viewable. 5. An audit event `consent.accepted` is written. |
 | FR-003 | Upload resume | A user uploads one resume file (PDF or DOCX) using multipart field `file`. | Must | 1. Size > 5,242,880 bytes → 413 `FILE_TOO_LARGE`. 2. Empty file (0 bytes) → 400 `VALIDATION_FAILED`. 3. Type is decided by magic bytes: PDF starts with `%PDF-`; DOCX is a ZIP (`PK\x03\x04`) containing `word/document.xml`. Anything else (including `.doc`, images, renamed files) → 415 `UNSUPPORTED_FILE_TYPE`. 4. PDF with more than 10 pages → 422 `TOO_MANY_PAGES`. 5. Encrypted/password-protected or corrupt files → 422 `FILE_UNREADABLE`. 6. On success the file is stored in S3 under `resumes/{userId}/{resumeId}` with server-side encryption, a TBL-005 row is created with `status = active` and `expires_at = uploaded_at + 30 days`, and 201 is returned. 7. The original file name is stored (max 255 chars, path parts stripped) only for display to its owner. 8. Uploading the same file again (same SHA-256 for the same user while the earlier one is `active`) returns 200 with the existing resume instead of storing a copy. |
 | FR-004 | Extract resume text | During upload (synchronously), the text is extracted so it can be analysed. | Must | 1. PDF: `pdftotext -layout -enc UTF-8` with a 10 s timeout; timeout → 422 `FILE_UNREADABLE`. 2. DOCX: read `word/document.xml` (`<w:t>` runs, `<w:p>` → newline, `<w:tab>` → tab); max uncompressed size 20 MiB (zip-bomb guard), otherwise `FILE_UNREADABLE`. 3. Whitespace is normalised (runs of spaces → one space, more than 2 blank lines → 2). 4. Fewer than 300 characters → 422 `TEXT_TOO_SHORT` (covers scanned image PDFs; OCR is out of scope). 5. More than 30,000 characters → 422 `TEXT_TOO_LONG`. 6. If extraction fails, the S3 object is deleted and no TBL-005 row remains. 7. Extraction of a 5 MiB / 10-page file completes within NFR-001. |
 | FR-005 | Manage own resumes | A user lists their resumes, views one, and deletes one. | Must | 1. API-005 lists only `active` resumes of the caller, newest first, paginated (6.1). 2. API-006 returns metadata only, never the extracted text. 3. API-007 deletes the S3 object and the row's `extracted_text` and `original_filename`, sets `status = deleted`, `deleted_at = now()`; returns 204. 4. Deleting does not delete analyses already created from it (they keep their results; `resume_id` stays for history but the resume shows as deleted). 5. Deleting an already deleted/expired resume → 404 `NOT_FOUND`. 6. A resume with a `queued` or `processing` analysis can still be deleted; that analysis then fails with `RESUME_EXPIRED` (FR-019). |
@@ -298,12 +270,12 @@ A PR is approved only if all of these are true (checklist in the PR template):
 | FR-010 | Missing skills | The system lists skills important for the chosen role that the resume does not show. | Must | 1. The AI receives the role's skill list (TBL-004) and may return only skills from that list; any other skill is dropped by the backend. 2. Max 15 skills, each with importance `critical`, `important` or `nice_to_have` taken from TBL-004, not from the AI. 3. Ordered by importance (critical first), then by the skill's `display_order` in TBL-004. 4. An empty list is valid (resume already covers all skills). 5. Missing skills are shown to free and pro users alike. |
 | FR-011 | Rewrite suggestions | The system suggests rewrites for weak resume lines. | Must | 1. Each suggestion has `originalText` (5–500 chars), `suggestedText` (5–600 chars), `reason` (1–300 chars), `dimension` (one of the six) and `severity` (`high`, `medium`, `low`). 2. `originalText` must appear in the redacted resume text that was sent to the AI (exact match after whitespace normalisation, see 4.6); suggestions that do not match are dropped. 3. Max 20 suggestions; ordered by severity (high → low), then by first position of `originalText` in the resume; this order is stored as `display_order` 1…n. 4. Suggestions must not invent facts: the prompt forbids adding numbers, employers, dates or skills that are not in the original line, and placeholders like `[X%]` are used when a metric is recommended. 5. Zero suggestions is valid. |
 | FR-012 | Plan-based visibility | Free users see only part of the suggestions. | Must | 1. For an analysis with `plan_at_creation = free` **and** current token plan `free`, API-010 and API-011 return only suggestions with `display_order` ≤ 3, plus `lockedSuggestionCount` = total − returned. 2. If the user is `pro` now, all suggestions of all their analyses are returned (upgrade unlocks history). 3. Locked suggestion text never leaves the server (not in API, not in the PDF, not in logs). 4. Scores and missing skills are always fully visible. |
-| FR-013 | Monthly quota | Each plan has a monthly analysis limit (section 0). | Must | 1. Limit is checked when creating an analysis using `usage_counters` for the current IST month, with `SELECT … FOR UPDATE`; `used ≥ limit` → 403 `QUOTA_EXCEEDED` with `details` containing `limit`, `used`, `resetsAt` (first day of next month 00:00 IST, as UTC). 2. A failed analysis gives the quota back (FR-019). 3. API-001 shows `quota.limit`, `quota.used`, `quota.remaining`, `quota.resetsAt`. 4. A downgrade from pro to free with `used` > 3 leaves `remaining = 0` (never negative). 5. Counters are never reset by a job; a new month simply uses a new row. |
+| FR-013 | Monthly quota | Each plan has a monthly analysis limit (3.3, Fixed values). | Must | 1. Limit is checked when creating an analysis using `usage_counters` for the current IST month, with `SELECT … FOR UPDATE`; `used ≥ limit` → 403 `QUOTA_EXCEEDED` with `details` containing `limit`, `used`, `resetsAt` (first day of next month 00:00 IST, as UTC). 2. A failed analysis gives the quota back (FR-019). 3. API-001 shows `quota.limit`, `quota.used`, `quota.remaining`, `quota.resetsAt`. 4. A downgrade from pro to free with `used` > 3 leaves `remaining = 0` (never negative). 5. Counters are never reset by a job; a new month simply uses a new row. |
 | FR-014 | Analysis history | A user sees a list of their past analyses. | Must | 1. API-009 returns the caller's analyses, newest first, paginated, with `id`, `status`, `overallScore`, `jobRole`, `experienceLevel`, `resume.originalFilename` (or `null` if the resume was deleted/expired), `createdAt`. 2. Filter `status` (optional, one of the four statuses). 3. Analyses older than 365 days are not present (FR-018). |
 | FR-015 | Download PDF report | A user downloads a completed analysis as a PDF. | Must | 1. API-011 returns `application/pdf`, A4, with `Content-Disposition: attachment; filename="surfingbear-ats-report-<YYYY-MM-DD>.pdf"` (date of analysis in IST; no personal data in the file name). 2. Content: title, analysis date (IST), job role, level, overall score, table of six dimensions with score and rationale, missing skills with importance, visible suggestions (FR-012), for free users a line "N more suggestions available with SurfingBear Pro", footer with analysis ID and "Generated by SurfingBear Resume Optimizer". 3. Not completed → 409 `ANALYSIS_NOT_READY`. 4. The PDF is generated on each request and not stored (no extra copy of personal data). 5. Uses embedded Noto Sans so all characters render. |
 | FR-016 | Delete analysis | A user deletes one analysis. | Should | 1. API-012 hard-deletes the TBL-006 row and its children (TBL-007/008/009 via `ON DELETE CASCADE`); returns 204. 2. Quota is **not** given back. 3. A `queued`/`processing` analysis can be deleted; the worker then finds no row and ends the task without error. 4. Audit event `analysis.deleted`. |
 | FR-017 | Erase all my data | Under the DPDP Act, a user can ask to erase all their data in this module. This also withdraws consent. | Must | 1. API-013 (body `confirm` = `DELETE MY DATA`) creates a TBL-011 request (`status = pending`) and pushes a message to `ro:queue:erasure`; returns 202 with request ID. 2. A second request while one is `pending`/`processing` → 409 `ERASURE_IN_PROGRESS`. 3. The job deletes all S3 objects under `resumes/{userId}/`, then the user's TBL-001 row; FKs cascade to TBL-002, 005, 006, 007, 008, 009, 010. Audit events keep only the (now meaningless) UUID. 4. Completed within 24 h (on failure the request goes back to `pending`; a sweep every 15 min retries it, up to 96 attempts; after that status `failed` and a Slack alert fires). 5. API-014 shows `pending`, `processing`, `completed` or `failed`. 6. After completion the next API call with the same `sub` creates a fresh empty user (FR-001) and needs new consent. 7. Data in DB backups disappears when those backups expire (≤ 7 days, NFR-008); the consent notice says so. |
-| FR-018 | Automatic retention | Data is deleted automatically after the periods in section 0. | Must | 1. Daily job at 02:00 IST: resumes with `expires_at < now()` and `status = active` → S3 object deleted, `extracted_text` and `original_filename` set to NULL, `status = expired`. 2. Same job: analyses with `created_at < now() − 365 days` are hard-deleted (cascade). 3. Resume rows with status `expired`/`deleted` whose last analysis is gone and `uploaded_at < now() − 365 days` are hard-deleted. 4. S3 lifecycle rule deletes any object under `resumes/` older than 31 days as a safety net. 5. Same job: `audit_events` older than 1 year and `erasure_requests` older than 3 years are deleted. 6. Each run logs counts (no IDs) and emits metric `ro_retention_deleted_total{kind}`. |
+| FR-018 | Automatic retention | Data is deleted automatically after the periods in 3.3 (Fixed values). | Must | 1. Daily job at 02:00 IST: resumes with `expires_at < now()` and `status = active` → S3 object deleted, `extracted_text` and `original_filename` set to NULL, `status = expired`. 2. Same job: analyses with `created_at < now() − 365 days` are hard-deleted (cascade). 3. Resume rows with status `expired`/`deleted` whose last analysis is gone and `uploaded_at < now() − 365 days` are hard-deleted. 4. S3 lifecycle rule deletes any object under `resumes/` older than 31 days as a safety net. 5. Same job: `audit_events` older than 1 year and `erasure_requests` older than 3 years are deleted. 6. Each run logs counts (no IDs) and emits metric `ro_retention_deleted_total{kind}`. |
 | FR-019 | Failure handling | AI, storage or other failures during analysis are handled without losing quota. | Must | 1. AI call: timeout 60 s; on timeout, HTTP 429 or 5xx, retry up to 2 more times after 2 s and 8 s. 2. AI response not matching the schema in 4.6 (or fewer than 6 dimensions) → retry once with the same input; still invalid → `failed` with `failure_code = AI_INVALID_RESPONSE`. 3. All retries exhausted → `failed`, `failure_code = AI_UNAVAILABLE`. 4. Resume deleted/expired before processing → `failed`, `RESUME_EXPIRED`. 5. Any other error → `failed`, `INTERNAL_ERROR`. 6. Moving to `failed` and decrementing `usage_counters.used` for the analysis' quota month (`quota_period`) happen in one transaction, never below 0. 7. The UI shows a message per failure code and a "Try again" button that calls API-008 again. |
 | FR-020 | Admin usage statistics | A support admin sees aggregate usage to monitor the service. | Could | 1. API-015 requires `support_admin`; others → 403 `FORBIDDEN`. 2. Returns for a date range (max 92 days): analyses created, completed, failed by `failure_code`, average overall score, count per job role, count per plan. 3. No user IDs, file names or resume content in the response. 4. Audit event `admin.stats_viewed`. |
 | FR-021 | Web user interface | The Next.js frontend provides the screens for all user actions. | Must | 1. `/{locale}/resume-optimizer` — dashboard: quota card (API-001), resumes list (API-005), analysis history (API-009), "New analysis" button. 2. `/{locale}/resume-optimizer/new` — step 1 consent (if needed, API-003), step 2 upload or pick existing resume (API-004/005), step 3 role + level (API-002), "Analyse" → API-008 → redirect to result page. Client-side checks mirror FR-003 size/type before upload. 3. `/{locale}/resume-optimizer/analyses/{analysisId}` — progress state while polling (FR-008), then overall score, dimension bars, missing skills, suggestions (locked ones shown as blurred placeholders with an upgrade link to `https://app.surfingbear.com/pricing`), "Download PDF" (API-011), "Delete" (API-012). 4. Settings link "Delete all my data" → confirm dialog → API-013, then status (API-014). 5. Every API error code has a translated message (CR-017). |
@@ -331,6 +303,29 @@ A PR is approved only if all of these are true (checklist in the PR template):
 | NFR-017 | Compatibility | Supported clients | Latest 2 versions of Chrome, Edge, Firefox, Safari; Android Chrome; screen width ≥ 360 px | Playwright on Chromium, Firefox, WebKit |
 
 ### 3.3 Assumptions and out of scope
+
+**Fixed values** (limits and constants decided for this system). These values are decided here and used throughout the spec. If another section ever disagrees with this table, this table wins.
+
+| Name | Value | Used in |
+|---|---|---|
+| Max upload size | 5 MiB = 5,242,880 bytes | FR-003, API-004, ERR-005 |
+| Allowed file types | PDF (`application/pdf`), DOCX (`application/vnd.openxmlformats-officedocument.wordprocessingml.document`) | FR-003, API-004, ERR-004 |
+| Max PDF pages | 10 | FR-003, ERR-020 |
+| Extracted text length | min 300, max 30,000 characters (Unicode code points, after whitespace normalisation) | FR-004, ERR-007, ERR-021 |
+| Free plan quota | 3 analyses per calendar month | FR-013, ERR-009 |
+| Pro plan quota | 30 analyses per calendar month | FR-013, ERR-009 |
+| Quota month | Calendar month in `Asia/Kolkata` (IST, UTC+05:30), key `YYYY-MM` | FR-013, TBL-010 |
+| Suggestions visible to free users | first 3 (by display order) | FR-012 |
+| Max suggestions per analysis | 20 | FR-011 |
+| Max missing skills per analysis | 15 | FR-010 |
+| Resume file + extracted text retention | 30 days after upload | FR-018, NFR-007 |
+| Analysis retention | 365 days after creation | FR-018, NFR-007 |
+| Erasure request completion | within 24 hours | FR-017, NFR-008 |
+| Database backup retention | 7 days | NFR-008 |
+| Current consent version | `2026-10-v1` | FR-002, TBL-002 |
+| AI prompt version | `analysis-v1` | FR-009, TBL-006 |
+| Experience levels | `entry` (0–2 yrs), `mid` (3–5 yrs), `senior` (6–9 yrs), `lead` (10+ yrs) | FR-006, TBL-006, API-008 |
+| Plans | `free`, `pro` | CR-002, FR-013 |
 
 **Assumptions** (decisions not given in the product description):
 
@@ -1477,5 +1472,6 @@ Failure codes stored in `analyses.failure_code` (TBL-006) are exactly: `AI_UNAVA
 
 | Version | Date | Author | What changed | Why | Affected IDs |
 |---|---|---|---|---|---|
-| v1.0 | 2026-10-19 | Madhurima Gorain | Initial version: sections 0–8 | Round 1 submission | All |
+| v1.0 | 2026-10-19 | Madhurima Gorain | Initial version: sections 1–8 | Round 1 submission | All |
 | v1.1 | 2026-10-19 | Madhurima Gorain | Changed tools to ones I use: Gin instead of chi; own Redis-list queue + goroutine worker pool with DLQ instead of asynq (new 4.7); pgx with hand-written SQL + golang-migrate instead of sqlc + goose; Docker Compose on VMs instead of ECS; metrics endpoint + Slack alerts instead of OpenTelemetry/Prometheus; idempotency via DB unique key instead of Redis key | Keep the design to tools I can explain and build | CR-010, CR-012, CR-020, FR-003, FR-007, FR-017, NFR-001, NFR-002, NFR-005–NFR-008, NFR-010, NFR-011, CMP-002, CMP-003, CMP-007, CMP-010–CMP-014, TBL-006, API-016, API-017, API-018 (new) |
+| v1.2 | 2026-10-22 | Madhurima Gorain | Moved the fixed-values table from a separate section 0 into 3.3 | Follow the template's section order and numbering | — |
