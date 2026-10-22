@@ -1,58 +1,78 @@
-# Architecture Spec Homework
+# AI at Work — Architecture Spec Homework
 
-**AI at Work** — Write one Markdown spec that is detailed enough to build the entire system from it alone.
+Coordinator: **Saswat Kumar Sahoo** · Slack: **#ai-spec-homework**
 
-## Objective
+## What this is
 
-Train the team to produce a single `.md` architecture specification covering Requirements, Coding Conventions, ERD/DB, API Design, and Traceability — using AI tools, but designed from the ground up.
+Each participant writes **one Markdown spec (`spec.md`)** detailed enough that the whole system could be built from that file alone, with no other context.
+You may use AI as much as you like. What is scored is how **precise, complete and consistent** the document is, and how well it stays consistent when requirements change.
 
-## Sample System
+No code is written in this repo. Only Markdown.
 
-**Event Check-in System (이벤트 체크인 시스템)** — Organizers create events, attendees register, and check in via QR code.
+## Participants and folders
 
-## Documents
+| Participant | Folder |
+|---|---|
+| Saswat | [`saswat/`](saswat/) |
+| Sovan | [`sovan/`](sovan/) |
+| Sandip | [`sandip/`](sandip/) |
+| Kakali | [`kakali/`](kakali/) |
+| Vaishali | [`vaishali/`](vaishali/) |
+| Neeraj | [`neeraj/`](neeraj/) |
+| Bilal | [`bilal/`](bilal/) |
+| Madhurima | [`madhurima/`](madhurima/) |
+| Nikky | [`nikky/`](nikky/) |
+| Pranesh | [`pranesh/`](pranesh/) |
+| Pratiksha | [`pratiksha/`](pratiksha/) |
+| Sachin | [`sachin/`](sachin/) |
 
-| File | Description |
-|------|-------------|
-| [architecture-spec-template.md](architecture-spec-template.md) | Standard template — all 8 sections with format rules and examples |
-| [homework-brief.md](homework-brief.md) | Homework brief — sample system, scope, timeline, submission rules |
-| [evaluation-rubric.md](evaluation-rubric.md) | Evaluation rubric — 100-point scoring with build-test validation |
+Each folder has:
+- `spec.md` — your spec. It starts as a copy of [`TEMPLATE.md`](TEMPLATE.md); fill it in.
+- `process.md` — links to your AI conversations and short notes on how you worked.
 
 ## Timeline
 
-| Date | Milestone |
-|------|-----------|
-| Oct 10 (Fri) | Kickoff — brief + template shared, Q&A |
-| Oct 17 (Fri) | First submission — push to repo |
-| Oct 20 (Mon) | Build test — specs are cross-tested |
-| Oct 21 (Tue) | Requirement change issued |
-| Oct 23 (Thu) | Revised submission |
-| Oct 24 (Fri) | Evaluation + review meeting |
+Group A: Saswat, Sovan, Sandip, Kakali, Vaishali, Neeraj
+Group B (joined Oct 16): Bilal, Madhurima, Nikky, Pranesh, Pratiksha, Sachin
 
-## How to Submit
+| Step | Group A | Group B |
+|---|---|---|
+| Start | Wed, Oct 14 | Fri, Oct 16 |
+| Round 1 deadline | Tue, Oct 20, 23:59 IST | Thu, Oct 22, 23:59 IST |
+| Holiday | Wed, Oct 21 | Wed, Oct 21 |
+| Round 2: requirement change | Thu, Oct 22 – Fri, Oct 23, 23:59 IST | Fri, Oct 23 – Mon, Oct 26, 23:59 IST |
+| Build test | Mon, Oct 26 | Tue, Oct 27 |
+| Scores and review (everyone) | Wed, Oct 28 | Wed, Oct 28 |
 
-1. Create your branch: `spec/[your-name]`
-2. Write `spec.md` following the template
-3. Include `ai-log/` folder with your AI conversation history
-4. Include `README.md` with your reflection (what was hardest, what you'd do differently)
-5. Open a PR to `main`
+**Start here:** read [`BRIEF.md`](BRIEF.md) (the system to specify and the rules) and [`RUBRIC.md`](RUBRIC.md) (how you are scored).
 
-## Participants
+## Rules
 
-| Name | Branch | Status |
-|------|--------|--------|
-| Saswat | `spec/saswat` | — |
-| Sovan | `spec/sovan` | — |
-| TBD | `spec/[name]` | — |
+1. **Edit only your own folder.** Do not change other people's files, `README.md` or `TEMPLATE.md`.
+2. **Commit often** — at least once a day while you work. The history is part of how the work is evaluated, so please do not squash commits.
+3. **Write clear commit messages**, for example `add ERD and DB tables`, `add API error codes`, `round 2: add new requirement`.
+4. **Push directly to `main`** (no pull requests needed), but always pull first.
+5. Keep everything in Markdown. Diagrams in Mermaid, inside the `.md` file.
 
-## Evaluation
+## How to commit (quick guide)
 
-- **100 points** total across 8 sections
-- Heaviest: ERD/DB (20 pts) + API Design (20 pts) + Requirements (15 pts)
-- **Build Test**: Hand the spec to Claude Code with no other context — every guess counts against the spec
-- **Revision Round**: +10 bonus points for maintaining consistency after a requirement change
-- Grade A (90+) = buildable with zero guesswork
+First time only:
 
-## Owner
+```bash
+git clone https://github.com/divii-school/spec-homework.git
+cd spec-homework
+```
 
-Saswat leads. Created by 최광철 TL.
+Every time you work:
+
+```bash
+git pull                                  # get the latest
+# ... edit <your-name>/spec.md ...
+git add <your-name>/
+git commit -m "add requirements section"
+git push
+```
+
+If `git push` is rejected, run `git pull` and then `git push` again. Because everyone edits only their own folder, there should be no conflicts.
+
+Questions → **#ai-spec-homework** on Slack.
