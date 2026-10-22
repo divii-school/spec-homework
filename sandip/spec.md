@@ -198,6 +198,7 @@ resume-optimizer/
 │   │   │   │   ├── queue/{queue.module.ts, queues.ts}
 │   │   │   │   ├── storage/{storage.port.ts, s3-storage.adapter.ts}
 │   │   │   │   ├── ai/{ai.port.ts, anthropic.adapter.ts, prompts/, schemas/}
+│   │   │   │   ├── payments/{payment.port.ts, razorpay.adapter.ts}        # v1.2 (CMP-011)
 │   │   │   │   └── pdf/{pdf-renderer.ts, templates/}
 │   │   │   └── modules/
 │   │   │       ├── roles/            # job roles + levels catalogue
@@ -205,7 +206,8 @@ resume-optimizer/
 │   │   │       ├── resumes/          # upload, validation, storage, parsing
 │   │   │       ├── analyses/         # orchestration, scoring, results, gating
 │   │   │       ├── reports/          # PDF generation + download
-│   │   │       ├── usage/            # quota + plan entitlements
+│   │   │       ├── usage/            # quota counters
+│   │   │       ├── billing/          # v1.2: subscriptions, checkout, webhooks, EntitlementService (FR-031..FR-034)
 │   │   │       ├── privacy/          # deletion requests, purge, data export
 │   │   │       ├── admin/
 │   │   │       ├── audit/
@@ -1146,6 +1148,7 @@ erDiagram
   analyses ||--o| reports : "rendered as"
   analyses ||--o{ ai_calls : "made"
   role_skills ||--o{ missing_skills : "snapshot of"
+  subscriptions ||--o{ payment_events : "receives"
 
   job_roles {
     uuid id PK
@@ -1302,9 +1305,46 @@ erDiagram
     inet ip
     timestamptz created_at
   }
+  subscriptions {
+    uuid id PK
+    uuid user_id "sentinel after erasure"
+    text erased_user_hash
+    text provider
+    text provider_subscription_id UK
+    text provider_plan_id
+    text status
+    int price_minor
+    char3 currency
+    timestamptz current_period_start
+    timestamptz current_period_end
+    boolean cancel_at_period_end
+    timestamptz cancelled_at
+    timestamptz halted_at
+    timestamptz last_payment_at
+    timestamptz last_event_at
+    timestamptz expired_at
+  }
+  payment_events {
+    uuid id PK
+    uuid subscription_id FK
+    text provider
+    text provider_event_id UK
+    text event_type
+    timestamptz provider_created_at
+    timestamptz received_at
+    text status
+    smallint attempts
+    text last_error
+    jsonb payload "card data stripped"
+    text provider_payment_id
+    int amount_minor
+    char3 currency
+    text payment_status
+    timestamptz applied_at
+  }
 ```
 
-(`consents`, `usage_counters`, `deletion_requests` and `audit_logs` key on `user_id` only; they have no FK because users live in the platform.)
+(`consents`, `usage_counters`, `deletion_requests`, `audit_logs` and, since v1.2, `subscriptions` key on `user_id` only; they have no FK because users live in the platform. `payment_events` reach the user only through `subscriptions`.)
 
 ### 5.2 Tables
 
@@ -1462,9 +1502,9 @@ Purpose: authoritative quota counter per user and period (FR-009, BR-004).
 |---|---|---|---|---|---|
 | id | uuid | NO | PK | gen_random_uuid() | |
 | user_id | uuid | NO | | | `uq_usage_counters_user_period (user_id, period_type, period_key)` |
-| period_type | text | NO | | | `ck IN ('month','day')` |
+| period_type | text | NO | | | `ck IN ('month','day')` — `day` is Deprecated since v1.2 (BR-003); no new `day` rows are written |
 | period_key | text | NO | | | `YYYY-MM` or `YYYY-MM-DD` in `QUOTA_TIMEZONE` |
-| plan | text | NO | | | `ck IN ('free','premium')`; plan at first use in the period |
+| plan | text | NO | | | `ck IN ('free','pro')` (v1.2: value renamed from `premium`, existing rows migrated — A-21); plan at first use in the period |
 | count | int | NO | | 0 | `ck count ≥ 0` |
 | limit_snapshot | int | NO | | | limit applied in this period (for the entitlements view) |
 
@@ -1518,6 +1558,51 @@ Purpose: who did what to which entity (CR-012, FR-024). The app DB role has INSE
 | ip | inet | YES | | | user actions only |
 | created_at | timestamptz | NO | | now() | |
 
+#### TBL-014 `subscriptions` (v1.2)
+Purpose: one Resume Pro subscription attempt or term per row; the source of the user's plan (FR-031–FR-034, BR-017, BR-018). Billing record: never deleted by application code; pseudonymised on erasure (§5.4).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | | | platform `sub`; on erasure replaced by the sentinel `00000000-0000-0000-0000-000000000000` |
+| erased_user_hash | text | YES | | | `sha256(original user_id)` set on erasure so finance can still group a person's records without identifying them |
+| provider | text | NO | | 'razorpay' | `ck IN ('razorpay')` |
+| provider_subscription_id | text | NO | UK | | `uq_subscriptions_provider_subscription_id` |
+| provider_plan_id | text | NO | | | `RAZORPAY_PLAN_ID` at creation |
+| status | text | NO | | 'created' | `ck IN ('created','active','past_due','cancelled','expired','abandoned')` (BR-018) |
+| price_minor | int | NO | | | `ck price_minor > 0`; snapshot of `PRO_PRICE_MINOR` (29900) |
+| currency | char(3) | NO | | 'INR' | |
+| current_period_start | timestamptz | YES | | | from the activating/charged event |
+| current_period_end | timestamptz | YES | | | `ck (status IN ('active','past_due','cancelled')) = (current_period_end IS NOT NULL)`; drives BR-017 |
+| cancel_at_period_end | boolean | NO | | false | |
+| cancelled_at | timestamptz | YES | | | |
+| halted_at | timestamptz | YES | | | provider halted after failed retries |
+| last_payment_at | timestamptz | YES | | | |
+| last_event_at | timestamptz | YES | | | provider `created_at` of the last applied event (BR-019 ordering) |
+| expired_at | timestamptz | YES | | | set by the expiry job or `completed` event |
+
+#### TBL-015 `payment_events` (v1.2, append-only except `status`/`attempts`/`applied_at`)
+Purpose: inbox of provider webhooks (idempotency key) and the user's payment history (FR-032, FR-037).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | also the BullMQ job id |
+| subscription_id | uuid | YES | FK → subscriptions(id) | | `ON DELETE RESTRICT`; null when the event references an unknown subscription (stored, status `ignored`) |
+| provider | text | NO | | 'razorpay' | |
+| provider_event_id | text | NO | UK | | `uq_payment_events_provider_event_id` — idempotency (BR-019) |
+| event_type | text | NO | | | e.g. `subscription.activated`, `subscription.charged`, `payment.failed` |
+| provider_created_at | timestamptz | NO | | | from the payload; ordering (BR-019) |
+| received_at | timestamptz | NO | | now() | |
+| status | text | NO | | 'pending' | `ck IN ('pending','applied','ignored','failed')` |
+| attempts | smallint | NO | | 0 | |
+| last_error | text | YES | | | error code only |
+| payload | jsonb | NO | | | raw event with the `card` object and any `vpa`/account fields removed before insert (NFR-019); kept for audit and reconciliation |
+| provider_payment_id | text | YES | | | set for payment events |
+| amount_minor | int | YES | | | |
+| currency | char(3) | YES | | | |
+| payment_status | text | YES | | | `ck IN ('captured','failed','refunded')` |
+| applied_at | timestamptz | YES | | | |
+
 ### 5.3 Indexes
 
 | ID | Table | Index | Columns | Why |
@@ -1543,6 +1628,13 @@ Purpose: who did what to which entity (CR-012, FR-024). The app DB role has INSE
 | IDX-19 | analysis_dimension_scores | `uq_dimension_scores_analysis_dimension` | (analysis_id, dimension) UNIQUE | exactly one row per dimension; result read |
 | IDX-20 | missing_skills | `uq_missing_skills_analysis_skill` | (analysis_id, role_skill_id) UNIQUE | no duplicate skill per analysis; result read |
 | IDX-21 | suggestions | `idx_suggestions_analysis_rank` | (analysis_id, rank) | ordered result read |
+| IDX-22 | subscriptions | `uq_subscriptions_provider_subscription_id` | (provider_subscription_id) UNIQUE | webhook → subscription lookup (FR-032) |
+| IDX-23 | subscriptions | `uq_subscriptions_user_nonterminal` | (user_id) UNIQUE WHERE status IN ('created','active','past_due','cancelled') | at most one live subscription per user (BR-018, FR-031 AC-2) |
+| IDX-24 | subscriptions | `idx_subscriptions_user_period_end` | (user_id, current_period_end DESC) | entitlement predicate BR-017 on every plan check (FR-034) |
+| IDX-25 | subscriptions | `idx_subscriptions_expiry` | (current_period_end) WHERE status IN ('cancelled','past_due') | hourly expiry job (FR-033 AC-4) |
+| IDX-26 | payment_events | `uq_payment_events_provider_event_id` | (provider_event_id) UNIQUE | idempotent webhook inbox (BR-019) |
+| IDX-27 | payment_events | `idx_payment_events_subscription_created` | (subscription_id, provider_created_at DESC) | payment history (FR-037) and ordering guard |
+| IDX-28 | payment_events | `idx_payment_events_pending` | (received_at) WHERE status = 'pending' | retry/alert dashboard (NFR-020) |
 
 All foreign keys not listed above are covered by an index named `idx_<table>_<fk>`.
 
@@ -1560,6 +1652,8 @@ All foreign keys not listed above are covered by an index named `idx_<table>_<fk
 | reports.analysis_id | analyses.id | 1 : 0..1 | CASCADE (object deleted by the same job before the row) |
 | ai_calls.analysis_id | analyses.id | N : 0..1 | SET NULL — metrics outlive the analysis |
 | consents / usage_counters / deletion_requests / audit_logs.user_id | platform user | N : 1 (logical) | no FK; see erasure below |
+| subscriptions.user_id (v1.2) | platform user | N : 1 (logical) | no FK; pseudonymised on erasure (sentinel id + hash), row kept |
+| payment_events.subscription_id (v1.2) | subscriptions.id | N : 0..1 | RESTRICT — billing records are never deleted by application code; purged only by the retention job after the statutory period (A-17, L-9: 8 years default) |
 
 **What happens when a user asks to delete their data (FR-021, FR-022, BR-014):**
 
@@ -1576,6 +1670,7 @@ All foreign keys not listed above are covered by an index named `idx_<table>_<fk
 | `ai_calls` | unchanged (no PII) | unchanged |
 | `audit_logs` | new rows added; existing rows never changed | new rows added; existing rows kept (record of compliance) |
 | `deletion_requests` | — | row kept with `completed_at` |
+| `subscriptions`, `payment_events` (v1.2) | unchanged | active/past_due subscription cancelled at the provider (FR-033) before pseudonymisation; `subscriptions.user_id` set to the sentinel id and `erased_user_hash` filled; `payment_events.payload` reduced to `{ event_type, amount, currency, provider ids }` (names, e-mail, phone removed); rows retained for the statutory period (L-9) then purged |
 
 Hard deletion of remaining rows happens by the retention purge (FR-023), which is the only path that issues `DELETE` on `analyses`; cascades then remove scores, skills, suggestions and reports.
 
