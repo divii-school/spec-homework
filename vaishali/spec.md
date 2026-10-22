@@ -3,9 +3,9 @@
 | Field | Value |
 |---|---|
 | Author | Vaishali Naruka |
-| Version | v1.0 |
-| Last updated | 2026-10-20 |
-| Status | Review (round 1 submission) |
+| Version | v1.1 |
+| Last updated | 2026-10-22 |
+| Status | Review (round 2 submission) |
 
 **What this document is.** The single source for building the SurfingBear Resume Optimizer ("RO") module: a Next.js web client, a NestJS API, a NestJS background worker, PostgreSQL and Redis. A developer must be able to build, test and deploy RO from this file alone. If this file is silent on something, that is a defect in this file: raise it, do not guess.
 
@@ -697,7 +697,7 @@ The browser only talks to `resume.surfingbear.com`. The ALB routes by path, so w
 | CMP-007 | Redactor | Apply §3.5.2 rules, compute `hasContact` | Pure TS functions |
 | CMP-008 | Analyses (API side) | Create (quota + insert + enqueue), list, get with gating (FR-013), delete | NestJS module, BullMQ `Queue`, TBL-005 – TBL-007, TBL-010 |
 | CMP-009 | Quota | Period function, reserve/release (§3.5.6), `getQuota(userId, plan)` | NestJS service, TBL-008 |
-| CMP-010 | Analysis processor | Consume `run-analysis` jobs, run the pipeline (§4.3.2), write results, fail + release on error | NestJS standalone app (`worker.ts`), BullMQ `Worker`, concurrency 5 per task |
+| CMP-010 | Analysis processor | Consume `run-analysis` jobs, run the pipeline (§4.3.2), write results, fail + release on error | NestJS standalone app (`worker.ts`), BullMQ `Worker`, concurrency 5 per task, FR-026 (runs `reconcile-subscriptions`) |
 | CMP-011 | Scoring engine | Section detection, D1/D2/D3/D5, missing skills (§3.5.3, §3.5.4), candidate lines | Pure TS, no I/O |
 | CMP-012 | AI client | Build prompt, call Bedrock, retries, circuit breaker, validate output (§4.7) | `@aws-sdk/client-bedrock-runtime` (`ConverseCommand`), `zod` |
 | CMP-013 | Report generator | Render the PDF (§4.9) as a stream | `pdfkit` |
@@ -1043,7 +1043,7 @@ Entitlement is **not** read from this state: Pro ⇔ `paid_until > now()` (FR-02
 | System | Purpose | Protocol / auth | Failure handling |
 |---|---|---|---|
 | SurfingBear platform — JWKS | Public keys to verify `sb_access` | HTTPS `GET AUTH_JWKS_URL`, no auth, timeout 3 s | Keys cached in memory `CFG-21`. If a refresh fails, the cached keys are used (no TTL expiry while the platform is unreachable). Keys are fetched once at process start (not lazily) and, while that fails, retried every `CFG-46` (5 s) until the first success; the fetch timeout is `CFG-35` (3 s). If there are no cached keys at all (fresh task start) → requests get `503 SERVICE_UNAVAILABLE` (ERR-019) and `/health/ready` reports not ready. |
-| SurfingBear platform — login / upgrade pages | Redirect targets | Browser navigation to `PLATFORM_LOGIN_URL`, `PLATFORM_UPGRADE_URL` | None needed (outside RO). |
+| SurfingBear platform — login page | Redirect target | Browser navigation to `PLATFORM_LOGIN_URL` (v1.1: the platform upgrade page is no longer used; upgrades happen in SCR-08) | None needed (outside RO). |
 | AWS Bedrock (Claude) | D4 score + rewrite suggestions | `ConverseCommand` over HTTPS, SigV4 with the ECS task IAM role (`bedrock:InvokeModel` on the one model ARN only), region `ap-south-1` | Timeout `CFG-12`, 3 attempts (FR-018), circuit breaker (§4.7.4), daily cap `CFG-27`. Analyses fail cleanly with quota released. Rest of RO keeps working (NFR-006). |
 | PostgreSQL (RDS) | All data | TLS, password auth (Secrets Manager), Prisma pool `connection_limit=10` per task | API: Prisma errors of connection type → `503 SERVICE_UNAVAILABLE`; `/health/ready` fails → ALB stops routing. Worker: job throws, BullMQ retries the job up to 3 times with exponential backoff 5 s (job-level), then the sweep fails it. |
 | Redis (ElastiCache) | Queues, rate limits, breaker | TLS, AUTH token | API: if Redis is down, rate limiting **fails open** (requests are allowed, a `warn` log is written); `POST /analyses` returns `503` because the job cannot be queued (FR-008 AC 6). Worker: BullMQ reconnects automatically. |
@@ -1110,7 +1110,7 @@ Validated at start-up with the entrypoint's `zod` schema (`apiEnv` for `main.ts`
 | `AI_TIMEOUT_MS` | worker | no | `45000` | CFG-12 |
 | `AI_DAILY_CALL_CAP` | worker | no | `0` (unlimited) | CFG-27; `200` in `dev` |
 | `FREE_MONTHLY_ANALYSES` | api | no | `3` | CFG-05 |
-| `PRO_MONTHLY_ANALYSES` | api | no | `50` | CFG-06 |
+| `PRO_MONTHLY_ANALYSES` | — | **Deprecated in v1.1** | — | Pro is unlimited (FR-009); the variable is no longer read |
 | `WORKER_CONCURRENCY` | worker | no | `5` | |
 | `LOG_LEVEL` | all | no | per CR-013 | |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | api, worker | no | `http://localhost:4318` | ADOT sidecar |
@@ -2639,22 +2639,28 @@ Test files are under `apps/api/test/` (`*.e2e-spec.ts`), `apps/api/src/**` (`*.s
 | FR-006 | CMP-001 (SCR-03, SCR-06), CMP-005 | TBL-004, TBL-005 | API-005, API-006, API-007 | `resumes.e2e-spec.ts` FR-006.1–5 |
 | FR-007 | CMP-001 (SCR-03), CMP-015 | TBL-001 | API-008 | `job-roles.e2e-spec.ts` FR-007.1–2; web FR-007.3 |
 | FR-008 | CMP-008, CMP-009, CMP-017 | TBL-001, TBL-004, TBL-005, TBL-008 | API-009 | `analyses.e2e-spec.ts` FR-008.1–6 |
-| FR-009 | CMP-001 (SCR-01), CMP-009 | TBL-005, TBL-008 | API-001, API-009 | `quota.spec.ts` (period function); `analyses.e2e-spec.ts` FR-009.1–6 (AC 6 = 10 parallel requests) |
+| FR-009 | CMP-001 (SCR-01), CMP-009, CMP-020 (plan, v1.1) | TBL-005, TBL-008, TBL-011 (v1.1) | API-001, API-009 | `quota.spec.ts` (period function); `analyses.e2e-spec.ts` FR-009.1–7 (AC 6 = 10 parallel requests; AC 7 = Pro user with `used = 60` still accepted) |
 | FR-010 | CMP-010, CMP-011, CMP-012 | TBL-002, TBL-005, TBL-006 | API-011 | `scoring.spec.ts` FR-010.1–4, 6; `worker.e2e-spec.ts` FR-010.5 |
 | FR-011 | CMP-011 | TBL-002, TBL-007 | API-011 | `scoring.spec.ts` FR-011.1–4; `analyses.e2e-spec.ts` FR-011.5 |
 | FR-012 | CMP-010, CMP-012 | TBL-010 | API-011 | `suggestion-validator.spec.ts` FR-012.1–4; `worker.e2e-spec.ts` FR-012.5 |
-| FR-013 | CMP-001 (SCR-04), CMP-008, CMP-013 | TBL-010 | API-011, API-013 | `analyses.e2e-spec.ts` FR-013.1–3, 5; `reports.e2e-spec.ts` FR-013.4 |
+| FR-013 | CMP-001 (SCR-04), CMP-008, CMP-013, CMP-020 (plan, v1.1) | TBL-010, TBL-011 (v1.1) | API-011, API-013 | `analyses.e2e-spec.ts` FR-013.1–3, 5; `reports.e2e-spec.ts` FR-013.4 |
 | FR-014 | CMP-001 (SCR-04), CMP-008 | TBL-005 | API-011 | `analyses.e2e-spec.ts` FR-014.1; web `analysis.spec.ts` FR-014.2–3 (fake timers) |
 | FR-015 | CMP-001 (SCR-05), CMP-008 | TBL-005 | API-010 | `analyses.e2e-spec.ts` FR-015.1–3 (pagination with 45 rows) |
 | FR-016 | CMP-001 (SCR-05), CMP-008 | TBL-005, TBL-006, TBL-007, TBL-008, TBL-010 | API-012 | `analyses.e2e-spec.ts` FR-016.1–3 |
-| FR-017 | CMP-001 (SCR-04), CMP-013 | TBL-005, TBL-006, TBL-007, TBL-010 | API-013 | `reports.e2e-spec.ts` FR-017.1–6 (text extracted from the PDF with `pdfjs-dist`) |
+| FR-017 | CMP-001 (SCR-04), CMP-013, CMP-020 (plan, v1.1) | TBL-005, TBL-006, TBL-007, TBL-010, TBL-011 (v1.1) | API-013 | `reports.e2e-spec.ts` FR-017.1–6 (text extracted from the PDF with `pdfjs-dist`) |
 | FR-018 | CMP-001 (SCR-04), CMP-010, CMP-012, CMP-009, CMP-017 | TBL-005, TBL-008 | API-011 (`failureCode`) | `worker.e2e-spec.ts` FR-018.1–5 with `AI_MOCK_FAILURE`; web FR-018.6 |
 | FR-019 | CMP-014, CMP-009 | TBL-005, TBL-008 | API-011 (`failureCode`) | `sweep.spec.ts` FR-019.1–2 (fake clock) |
-| FR-020 | CMP-001 (SCR-06), CMP-014, CMP-017 | TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-008, TBL-009, TBL-010 | API-015, API-001 | `privacy.e2e-spec.ts` FR-020.1–6 (row counts per table = 0 after) |
-| FR-021 | CMP-014 | TBL-004, TBL-005, TBL-008, TBL-009 (+ cascades) | — (scheduled job, no user action; effect visible through API-005/API-010 returning fewer items) | `purge.spec.ts` FR-021.1–4 (fake clock) |
+| FR-020 | CMP-001 (SCR-06), CMP-014, CMP-017, CMP-020 (v1.1) | TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-008, TBL-009, TBL-010; TBL-011, TBL-012 kept (v1.1) | API-015, API-001 | `privacy.e2e-spec.ts` FR-020.1–7 (row counts per resume/analysis table = 0 after; AC 7: subscription cancelled at cycle end, billing rows still present, plan still `pro` until `paid_until`) |
+| FR-021 | CMP-014 | TBL-004, TBL-005, TBL-008, TBL-009 (+ cascades); TBL-011, TBL-012, TBL-013 (v1.1) | — (scheduled job, no user action; effect visible through API-005/API-010 returning fewer items) | `purge.spec.ts` FR-021.1–5 (fake clock) |
 | FR-022 | CMP-001 (SCR-07), CMP-003, CMP-015 | TBL-001, TBL-002, TBL-009 | API-016, API-017, API-018, API-019 | `admin-job-roles.e2e-spec.ts` FR-022.1–7 |
 | FR-023 | CMP-001 (SCR-06), CMP-014 | TBL-003, TBL-004, TBL-005 | API-014 | `privacy.e2e-spec.ts` FR-023.1; web FR-023.2 |
-| FR-024 | CMP-001 (SCR-01) | TBL-005, TBL-008 | API-001, API-010 | web `dashboard.spec.ts` FR-024.1–2 |
+| FR-024 | CMP-001 (SCR-01) | TBL-005, TBL-008, TBL-011 (v1.1) | API-001, API-010 | web `dashboard.spec.ts` FR-024.1–2 (Free and Pro variants) |
+| FR-025 | CMP-001 (SCR-08), CMP-020 | TBL-011, TBL-012 | API-023, API-024, API-028 (test) | `billing.e2e-spec.ts` FR-025.2–7 with `RAZORPAY_MODE=mock`; web `subscription.spec.ts` FR-025.1, 8; manual test on `staging` with Razorpay test-mode card and UPI |
+| FR-026 | CMP-021, CMP-010 (scheduler for reconciliation) | TBL-011, TBL-012, TBL-013 | API-027 | `webhooks.e2e-spec.ts` FR-026.1–6 with §3.7 Razorpay fixtures; `reconcile.spec.ts` FR-026.7 |
+| FR-027 | CMP-020, CMP-003 | TBL-011 | API-001, API-025 (and every gated API: API-009, API-011, API-013, API-022) | `entitlement.spec.ts` FR-027.1–5 (fake clock around `paid_until`) |
+| FR-028 | CMP-001 (SCR-08), CMP-020 | TBL-011 | API-026 | `billing.e2e-spec.ts` FR-028.2–7; web FR-028.1 |
+| FR-029 | CMP-001 (SCR-05, SCR-09), CMP-022, CMP-020 | TBL-005, TBL-006, TBL-007, TBL-011 | API-022 | `compare.spec.ts` (deltas); `analyses.e2e-spec.ts` FR-029.2–6; web `compare.spec.ts` FR-029.1, 3, 5 |
+| FR-030 | CMP-001 (SCR-08), CMP-020 | TBL-011, TBL-012 | API-025 | `billing.e2e-spec.ts` FR-030.1; web FR-030.2 |
 | NFR-001 | CMP-002, CMP-016, CMP-017 | all (indexes §5.3) | API-001 – API-003, API-005 – API-012, API-014 – API-019 | k6 `perf/api.js` |
 | NFR-002 | CMP-005, CMP-006, CMP-007 | TBL-004 | API-004 | k6 with `resume-5mb.pdf` |
 | NFR-003 | CMP-013 | TBL-005, TBL-006, TBL-007, TBL-010 | API-013 | k6 |
@@ -2675,21 +2681,24 @@ Test files are under `apps/api/test/` (`*.e2e-spec.ts`), `apps/api/src/**` (`*.s
 | NFR-018 | CMP-001 | — (UI only) | API-001, API-010 (data for SCR-01) | Lighthouse CI |
 | NFR-019 | CMP-012 | TBL-005 (`ai_input_tokens`, `ai_output_tokens`) | — (cost metric) | Monthly bill ÷ analyses; `ro_ai_tokens_total` |
 | NFR-020 | all | — (applies to code) | — (applies to code) | Jest coverage gate, `scripts/check-ids.ts` |
+| NFR-021 | CMP-021 | TBL-013 | API-027 | k6 with signed fixtures; 5xx alert |
+| NFR-022 | CMP-020, CMP-021 | TBL-011 | API-024, API-027 | `ro_billing_activation_seconds`; reconciliation report |
+| NFR-023 | CMP-001, CMP-020, CMP-021 | TBL-011, TBL-012, TBL-013 (no card/UPI columns by design) | API-023 – API-027 | Schema review; `check-log-pii.ts`; SAQ-A self-assessment |
 
 ### 7.2 Reverse check (every design element has a requirement)
 
 | Element | Used by |
 |---|---|
-| CMP-001 | FR-001 – FR-003, FR-006, FR-007, FR-009, FR-013 – FR-018, FR-020, FR-022 – FR-024, NFR-016 – NFR-018 |
+| CMP-001 | FR-001 – FR-003, FR-006, FR-007, FR-009, FR-013 – FR-018, FR-020, FR-022 – FR-025, FR-028 – FR-030, NFR-016 – NFR-018, NFR-023 |
 | CMP-002 | FR-001, NFR-001, NFR-005, NFR-007, NFR-008, NFR-010 |
-| CMP-003 | FR-001, FR-022, NFR-008 |
+| CMP-003 | FR-001, FR-022, FR-027, NFR-008 |
 | CMP-004 | FR-002 |
 | CMP-005 | FR-003 – FR-006, NFR-002, NFR-008 |
 | CMP-006 | FR-003, FR-004, NFR-002 |
 | CMP-007 | FR-005, NFR-002 |
 | CMP-008 | FR-008, FR-013 – FR-016 |
 | CMP-009 | FR-008, FR-009, FR-018, FR-019 |
-| CMP-010 | FR-010, FR-012, FR-018, NFR-004, NFR-006, NFR-007, NFR-013 |
+| CMP-010 | FR-010, FR-012, FR-018, NFR-004, NFR-006, NFR-007, NFR-013, FR-026 (runs `reconcile-subscriptions`) |
 | CMP-011 | FR-010, FR-011, NFR-004 |
 | CMP-012 | FR-005, FR-010, FR-012, FR-018, NFR-004, NFR-006, NFR-011, NFR-019 |
 | CMP-013 | FR-013, FR-017, NFR-003 |
@@ -2699,6 +2708,9 @@ Test files are under `apps/api/test/` (`*.e2e-spec.ts`), `apps/api/src/**` (`*.s
 | CMP-017 | FR-008, FR-018, FR-020, NFR-001, NFR-005, NFR-007, NFR-011 |
 | CMP-018 | NFR-005, NFR-010, NFR-015 |
 | CMP-019 | FR-001 (local/test only) |
+| CMP-020 | FR-009, FR-013, FR-017, FR-020, FR-024, FR-025, FR-027 – FR-030, NFR-022, NFR-023 |
+| CMP-021 | FR-026, NFR-021 – NFR-023 |
+| CMP-022 | FR-029 |
 | TBL-001 | FR-007, FR-008, FR-022 |
 | TBL-002 | FR-010, FR-011, FR-022 |
 | TBL-003 | FR-002, FR-020, FR-023 |
@@ -2709,7 +2721,10 @@ Test files are under `apps/api/test/` (`*.e2e-spec.ts`), `apps/api/src/**` (`*.s
 | TBL-008 | FR-008, FR-009, FR-016, FR-018 – FR-021, FR-024 |
 | TBL-009 | FR-002, FR-020 – FR-022 |
 | TBL-010 | FR-012, FR-013, FR-016, FR-017, FR-020 |
-| API-001 | FR-001, FR-002, FR-009, FR-020, FR-024 |
+| TBL-011 | FR-009, FR-013, FR-017, FR-020, FR-021, FR-024 – FR-030, NFR-022, NFR-023 |
+| TBL-012 | FR-020, FR-021, FR-025, FR-026, FR-030, NFR-023 |
+| TBL-013 | FR-021, FR-026, NFR-021, NFR-023 |
+| API-001 | FR-001, FR-002, FR-009, FR-020, FR-024, FR-027 |
 | API-002, API-003 | FR-002 |
 | API-004 | FR-002 – FR-005 |
 | API-005 – API-007 | FR-006 |
@@ -2723,6 +2738,12 @@ Test files are under `apps/api/test/` (`*.e2e-spec.ts`), `apps/api/src/**` (`*.s
 | API-015 | FR-020 |
 | API-016 – API-019 | FR-022 |
 | API-020, API-021 | NFR-005, NFR-015 |
+| API-022 | FR-029 |
+| API-023, API-024 | FR-025, FR-026, NFR-022 |
+| API-025 | FR-027, FR-030 |
+| API-026 | FR-028 |
+| API-027 | FR-026, NFR-021 |
+| API-028 | FR-025 (local/test only) |
 
 Every `ERR-` code is referenced by at least one FR or CR (§6.3 "When it happens" column).
 
@@ -2739,3 +2760,4 @@ Every `ERR-` code is referenced by at least one FR or CR (§6.3 "When it happens
 | v0.5 | 2026-10-20 | Vaishali Naruka | Section 6: common API rules, shared objects, API-001 – API-021, error list ERR-001 – ERR-024. Upload check order changed so duplicate and resume-limit checks come after extraction (FR-003 AC 9, §4.3.1); `duplicate` added to `details[].issue` (§1.4); zip-limit error named in CR-023 | First draft; the duplicate check needs the extracted text, so the old order could not be implemented | API-001 – API-021, ERR-001 – ERR-024, FR-003, CR-023 |
 | v0.6 | 2026-10-20 | Vaishali Naruka | Section 7: forward traceability for FR-001 – FR-024 and NFR-001 – NFR-020, reverse check for every CMP, TBL and API | First draft | all FR, NFR |
 | v1.0 | 2026-10-20 | Vaishali Naruka | Fixes from a simulated build test (44 findings). Main changes: encrypted DOCX detected as OLE in the type check (CR-023, §3.5.1, new fixture); fixture `resume-frontend-good.pdf` and FR-010 AC 6 corrected to D1 = 86; FR-005 AC 3 counts; locked-suggestion shape unified (FR-013, API-011); platform URLs read at runtime, no `NEXT_PUBLIC_*` (§4.6); per-environment cookie name `AUTH_COOKIE_NAME` (CR-001); expired resumes ignored by duplicate and count checks, uploads serialised by advisory lock (FR-003 AC 6/8/10, FR-021 AC 4); every transition to `failed` sets `completed_at` (FR-008, FR-019, §4.3.7); rationale rule 7 and 1,000-char candidate limit (§3.5.5); readiness no longer depends on Redis, JWKS fetched at boot (API-021, §4.4); extraction in worker threads (FR-004); API-009 requires consent (FR-002, ERR-005); breaker rules clarified (§4.7.4); quota defined by the counter (FR-009 AC 1); cursor precision (TBL-005); D1 empty-set rule; `details` always present and validator mapping (§1.4, CR-022); throttler keys and test overrides (CR-024, CFG-16/17); in-region Bedrock model only; HSTS; mock token overrides and canary token; two DB roles; level labels; worker health/metrics; Noto fonts in PDF; notice mentions backups; new constants CFG-33 – CFG-46; example values corrected | The build test showed places where a builder would guess or where the spec contradicted itself; three would have failed deterministically | CR-001, CR-015, CR-019, CR-022 – CR-025, CR-036, CR-038, FR-002 – FR-005, FR-008 – FR-010, FR-013, FR-017 – FR-019, FR-021, NFR-005, NFR-006, API-009, API-011, API-021, ERR-005, TBL-004, TBL-005, CFG-16, CFG-17, CFG-33 – CFG-46 |
+| v1.1 | 2026-10-22 | Vaishali Naruka | **Round 2 — Resume Pro paid plan.** **Added:** FR-025 Subscribe (₹299/month, Razorpay Subscriptions + Checkout), FR-026 Payment events and renewals (signed webhooks, idempotency, out-of-order rule, daily reconciliation), FR-027 Pro entitlement (`paid_until > now()`), FR-028 Cancel (at cycle end, Pro kept until the paid month ends), FR-029 Compare two analyses (Pro), FR-030 View subscription; NFR-021 – NFR-023; CR-042 (no card/UPI data, SAQ-A), CR-043 (signature checks); A-12 – A-17; CFG-47 – CFG-52; glossary terms; payment notice §3.5.8 and state rules §3.5.9; SCR-08 `/subscription`, SCR-09 `/history/compare`; CMP-020 Billing, CMP-021 Webhook handler, CMP-022 Comparison; flows §4.3.8 – §4.3.12; Razorpay integration, stack reason, env variables, metrics, alerts, `reconcile-subscriptions` job; TBL-011 `subscriptions`, TBL-012 `payments`, TBL-013 `webhook_events` with indexes and delete rules; API-022 – API-028; ERR-025 – ERR-030; Razorpay webhook fixtures; traceability rows. **Changed:** CR-004 (JWT `plan` claim no longer used), CR-007, CR-009 (plan from TBL-011 on every request), CR-021, CR-024 (webhook exemptions), CR-025 (CSP allows Razorpay Checkout), CR-028; FR-009 (Pro unlimited; quota still counted; AC 2, 4, 5 rewritten; AC 7 added); FR-013 AC 3, FR-017 AC 6 (plan source, "Resume Pro" wording); FR-020 AC 7 (billing records kept 8 years, live subscription cancelled at cycle end before erasure); FR-021 AC 5 (billing purge and pseudonymisation); FR-024 (Pro dashboard text, upgrade link → SCR-08); NFR-019 (cost bound with unlimited Pro); A-03, A-11; §3.5.6 quota check; SCR-01, SCR-04, SCR-05, layout header; API-001 (`plan` from FR-027, new `proUntil`, `quota.limit`/`remaining` null for Pro); API-015 (cancel first, new 503); §5.4 erase rules; §2.2 `billing/` folder. **Deprecated:** CFG-06 `PRO_MONTHLY_ANALYSES`, env variables `PRO_MONTHLY_ANALYSES` and `PLATFORM_UPGRADE_URL`. No ID was renumbered or reused. Free-user behaviour is unchanged except the upgrade link target. | Requirement change issued 2026-10-22 (round 2): SurfingBear adds a paid Resume Pro plan — ₹299/month via Razorpay, unlimited analyses, all suggestions, analysis history with score comparison, cancel any time with access until the end of the paid month, Free users unchanged | CR-004, CR-007, CR-009, CR-021, CR-024, CR-025, CR-028, CR-042, CR-043, FR-009, FR-013, FR-017, FR-020, FR-021, FR-024 – FR-030, NFR-019, NFR-021 – NFR-023, CFG-06, CFG-47 – CFG-52, SCR-01, SCR-04, SCR-05, SCR-08, SCR-09, CMP-020 – CMP-022, TBL-011 – TBL-013, API-001, API-015, API-022 – API-028, ERR-025 – ERR-030 |
