@@ -221,6 +221,7 @@ resume-optimizer/
 │   │   │   ├── worker/              # CMP-010 processor, CMP-011 scoring/, CMP-012 ai/
 │   │   │   ├── reports/             # CMP-013 PDF
 │   │   │   ├── privacy/             # CMP-014 erasure + retention purge, data summary
+│   │   │   ├── billing/             # v1.1: CMP-020 subscriptions + entitlement, webhooks/ CMP-021, razorpay/ client + mock
 │   │   │   ├── health/
 │   │   │   └── prisma/              # PrismaService
 │   │   ├── prisma/
@@ -660,6 +661,7 @@ flowchart LR
     OBS[CloudWatch + AMP<br/>CMP-018]
   end
   PLAT[SurfingBear platform<br/>login + JWKS]
+  RZP[Razorpay<br/>Subscriptions API + Checkout<br/>v1.1]
 
   WEB_UI -->|HTTPS, cookie sb_access| ALB
   ALB -->|/api/*| API
@@ -674,6 +676,10 @@ flowchart LR
   WK -.logs/metrics.-> OBS
   WEB -.logs.-> OBS
   WEB_UI -->|401 → redirect| PLAT
+  WEB_UI -->|Checkout frame: card / UPI| RZP
+  API -->|create / fetch / cancel subscription, HTTPS Basic auth| RZP
+  RZP -->|signed webhooks → /api/v1/webhooks/razorpay| ALB
+  WK -->|daily reconciliation| RZP
 ```
 
 The browser only talks to `resume.surfingbear.com`. The ALB routes by path, so web and API share one origin (no CORS, CR-020). The Next.js server renders pages only; it never calls the API on behalf of the user and never sees resume data (all data calls are made from the browser to `/api/v1`).
@@ -701,6 +707,9 @@ The browser only talks to `resume.surfingbear.com`. The ALB routes by path, so w
 | CMP-017 | Redis | BullMQ queues, rate-limit counters, AI breaker state, JWKS is **not** stored here (in-memory) | Amazon ElastiCache Redis 7, 1 primary + 1 replica, `noeviction` policy |
 | CMP-018 | Observability | Logs (CloudWatch Logs), metrics (Prometheus format at `/api/metrics` on an internal port, scraped by Amazon Managed Prometheus), traces (OpenTelemetry → AWS X-Ray), alerts | `nestjs-pino`, `prom-client`, `@opentelemetry/sdk-node` |
 | CMP-019 | Mock platform | Local/test only: issues JWTs and serves a JWKS (§4.8) | Small Node 22 HTTP server in `tools/mock-platform`, `jose` |
+| CMP-020 | Billing (v1.1) | Create, verify and cancel subscriptions (FR-025, FR-028), subscription view (FR-030), `EntitlementService.getPlan(userId)` used by every gated feature (FR-027), Razorpay client wrapper with timeout `CFG-48`, `RAZORPAY_MODE=mock` fake client | NestJS module `billing/`, `razorpay` npm SDK, TBL-011, TBL-012 |
+| CMP-021 | Razorpay webhook handler (v1.1) | Verify signature on the raw body, dedupe by event ID, apply §3.5.9 rules in one DB transaction (FR-026); also the `reconcile-subscriptions` job logic, shared with the worker | NestJS controller in `billing/webhooks/`, TBL-011 – TBL-013 |
+| CMP-022 | Analysis comparison (v1.1) | Load two completed analyses with children, compute deltas and missing-skill changes (FR-029); pure function + Pro check | `analyses/compare/` in the analyses module |
 
 ### 4.3 Main flows
 
@@ -890,6 +899,145 @@ stateDiagram-v2
 
 Only these transitions are allowed. Every transition to `completed` or `failed` sets `completed_at = now()` (required by `ck_analyses_final_time`). Every update uses `WHERE status = <expected from-state>`; 0 updated rows means another actor won and the current actor stops.
 
+#### 4.3.8 Subscribe to Resume Pro (FR-025, v1.1)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser (SCR-08)
+  participant A as ro-api (CMP-020)
+  participant DB as PostgreSQL
+  participant RZ as Razorpay
+  B->>A: POST /api/v1/subscriptions
+  A->>DB: user Pro? live subscription? (advisory lock on user)
+  alt already Pro or authenticated/active/pending
+    A-->>B: 409 ALREADY_SUBSCRIBED
+  else created < 24 h
+    A-->>B: 200 existing { razorpaySubscriptionId, keyId }
+  end
+  A->>RZ: POST /v1/subscriptions { plan_id, total_count 120, quantity 1, customer_notify 1, notes.userId } (10 s)
+  alt Razorpay error / timeout
+    A-->>B: 503 PAYMENT_PROVIDER_UNAVAILABLE
+  end
+  RZ-->>A: { id: sub_..., status: created }
+  A->>DB: INSERT subscriptions (status created)
+  A-->>B: 201 { subscriptionId, razorpaySubscriptionId, keyId }
+  B->>RZ: Checkout (card / UPI AutoPay mandate + first charge)
+  alt user closes Checkout
+    B->>B: "Payment not completed" (nothing sent to RO)
+  end
+  RZ-->>B: handler { razorpay_payment_id, razorpay_subscription_id, razorpay_signature }
+  B->>A: POST /api/v1/subscriptions/{id}/verify
+  A->>A: HMAC check (CR-043)
+  alt signature invalid
+    A-->>B: 400 PAYMENT_VERIFICATION_FAILED
+  end
+  A->>RZ: GET /v1/subscriptions/{sub_id}
+  A->>DB: BEGIN; UPDATE status, periods, paid_until = GREATEST(...); INSERT payment ON CONFLICT DO NOTHING; COMMIT
+  A-->>B: 200 { plan: pro, proUntil }
+```
+
+#### 4.3.9 Renewal and other webhook events (FR-026, v1.1)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant RZ as Razorpay
+  participant A as ro-api (CMP-021)
+  participant DB as PostgreSQL
+  RZ->>A: POST /api/v1/webhooks/razorpay (X-Razorpay-Signature, X-Razorpay-Event-Id)
+  A->>A: HMAC over raw body (CR-043)
+  alt invalid
+    A-->>RZ: 400 WEBHOOK_SIGNATURE_INVALID
+  end
+  A->>DB: BEGIN; INSERT webhook_events (event_id) ON CONFLICT DO NOTHING
+  alt already processed
+    A->>DB: COMMIT
+    A-->>RZ: 200 (no change)
+  end
+  A->>DB: SELECT subscription FOR UPDATE by razorpay_subscription_id
+  alt unknown subscription or unhandled event type
+    A->>DB: outcome = ignored; COMMIT
+    A-->>RZ: 200
+  end
+  A->>DB: apply §3.5.9 (e.g. charged → paid_until = GREATEST(paid_until, current_end), INSERT payment)
+  A->>DB: outcome = processed; COMMIT
+  A-->>RZ: 200
+  Note over A,DB: If the transaction fails → 500; Razorpay retries the webhook, and the event ID is not yet stored, so it is applied on retry.
+```
+
+#### 4.3.10 Cancel Resume Pro (FR-028, v1.1)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser (SCR-08)
+  participant A as ro-api (CMP-020)
+  participant RZ as Razorpay
+  participant DB as PostgreSQL
+  B->>A: POST /api/v1/subscriptions/current/cancel
+  A->>DB: latest subscription in authenticated/active/pending
+  alt none
+    A-->>B: 409 NO_ACTIVE_SUBSCRIPTION
+  else already cancel_at_period_end
+    A-->>B: 200 (unchanged)
+  end
+  A->>RZ: POST /v1/subscriptions/{id}/cancel { cancel_at_cycle_end: 1 }
+  alt Razorpay error / timeout
+    A-->>B: 503 PAYMENT_PROVIDER_UNAVAILABLE
+  end
+  A->>DB: UPDATE cancel_at_period_end = true, cancel_requested_at = now()
+  A-->>B: 200 { paidUntil, cancelAtPeriodEnd: true }
+  Note over RZ,A: at cycle end Razorpay sends subscription.cancelled → status cancelled; plan becomes free when now() ≥ paid_until
+```
+
+#### 4.3.11 Compare two analyses (FR-029, v1.1)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser (SCR-09)
+  participant A as ro-api (CMP-022)
+  participant DB as PostgreSQL
+  B->>A: GET /api/v1/analysis-comparisons?baseId=..&targetId=..
+  A->>DB: EntitlementService.getPlan(userId)
+  alt free
+    A-->>B: 403 PRO_REQUIRED
+  end
+  A->>DB: load both analyses + dimension scores + missing skills (owner check)
+  alt not found / not completed
+    A-->>B: 404 NOT_FOUND / 409 ANALYSIS_NOT_READY
+  end
+  A->>A: deltas + resolved / added / stillMissing
+  A-->>B: 200 comparison
+```
+
+#### 4.3.12 Subscription state machine (v1.1)
+
+```mermaid
+stateDiagram-v2
+  [*] --> created: API-023
+  created --> authenticated: subscription.authenticated
+  created --> active: API-024 / subscription.activated / charged
+  created --> expired: unused for CFG-52 (24 h)
+  authenticated --> active: subscription.activated / charged
+  active --> active: subscription.charged (renewal, paid_until extended)
+  active --> pending: renewal charge failed
+  pending --> active: subscription.charged (retry succeeded)
+  pending --> halted: retries exhausted
+  halted --> active: subscription.charged
+  active --> cancelled: subscription.cancelled (at cycle end after FR-028)
+  pending --> cancelled: subscription.cancelled
+  halted --> cancelled: subscription.cancelled
+  created --> cancelled: FR-028 AC 7
+  active --> completed: all 120 cycles billed
+  cancelled --> [*]
+  completed --> [*]
+  expired --> [*]
+```
+
+Entitlement is **not** read from this state: Pro ⇔ `paid_until > now()` (FR-027).
+
 ### 4.4 External integrations
 
 | System | Purpose | Protocol / auth | Failure handling |
@@ -899,6 +1047,7 @@ Only these transitions are allowed. Every transition to `completed` or `failed` 
 | AWS Bedrock (Claude) | D4 score + rewrite suggestions | `ConverseCommand` over HTTPS, SigV4 with the ECS task IAM role (`bedrock:InvokeModel` on the one model ARN only), region `ap-south-1` | Timeout `CFG-12`, 3 attempts (FR-018), circuit breaker (§4.7.4), daily cap `CFG-27`. Analyses fail cleanly with quota released. Rest of RO keeps working (NFR-006). |
 | PostgreSQL (RDS) | All data | TLS, password auth (Secrets Manager), Prisma pool `connection_limit=10` per task | API: Prisma errors of connection type → `503 SERVICE_UNAVAILABLE`; `/health/ready` fails → ALB stops routing. Worker: job throws, BullMQ retries the job up to 3 times with exponential backoff 5 s (job-level), then the sweep fails it. |
 | Redis (ElastiCache) | Queues, rate limits, breaker | TLS, AUTH token | API: if Redis is down, rate limiting **fails open** (requests are allowed, a `warn` log is written); `POST /analyses` returns `503` because the job cannot be queued (FR-008 AC 6). Worker: BullMQ reconnects automatically. |
+| Razorpay (v1.1) | Resume Pro subscriptions: create, fetch, cancel; Checkout; webhooks | REST over HTTPS to `https://api.razorpay.com/v1`, HTTP Basic auth `RAZORPAY_KEY_ID:RAZORPAY_KEY_SECRET` via the `razorpay` SDK, timeout `CFG-48` (10 s), no automatic retry on create/cancel (not idempotent); webhooks signed with `RAZORPAY_WEBHOOK_SECRET` (CR-043). Webhook URL configured in the Razorpay Dashboard per environment with the 7 events of §3.5.9 | Create/cancel fail → `503 PAYMENT_PROVIDER_UNAVAILABLE`, nothing changed, user retries. Fetch in API-024 fails → the signature was valid, so RO still marks the payment received: `paid_until = now() + 1 month`, status `active`, and the reconciliation job (FR-026 AC 7) corrects it. Webhook not delivered → Razorpay retries; reconciliation fixes it within 24 h. Analyses and history keep working during a Razorpay outage; only subscribe/cancel fail. |
 
 ### 4.5 Tech stack and reasons
 
@@ -918,6 +1067,7 @@ Only these transitions are allowed. Every transition to `completed` or `failed` 
 | PDF extraction | `pdfjs-dist` | Maintained by Mozilla, gives text positions (`hasEOL`) and operator lists for image counts (D3). | `pdf-parse` (unmaintained wrapper over old pdf.js). |
 | DOCX extraction | `mammoth` + `yauzl` | `mammoth` gives clean raw text; `yauzl` lets us enforce zip-bomb limits before parsing. | `docx4js` (less used). |
 | PDF output | `pdfkit` | Streams a PDF directly with no browser; small image; fast (NFR-003). Report layout is simple text + bars. | Headless Chromium (large image, slow cold start), `@react-pdf/renderer` (heavier for this layout). |
+| Payments (v1.1) | Razorpay Subscriptions + Standard Checkout | Required by the change. Razorpay Subscriptions handle recurring card and UPI AutoPay mandates under RBI e-mandate rules and retry failed renewals, so RO never schedules charges. Checkout is a Razorpay-hosted frame, so card/UPI data never touches RO (PCI SAQ-A, CR-042). Webhooks + one daily reconciliation give correct state even if a webhook is lost. | Building on Razorpay Orders with our own monthly scheduler (RO would own retries and mandates); Payment Links (no recurring). |
 | Hosting | AWS ECS Fargate, ALB, RDS, ElastiCache, `ap-south-1` | Mumbai region for residency; Fargate needs no server patching; ALB path routing gives the single origin. | EKS (too much ops for 3 services). |
 | IaC / CI | Terraform 1.9, GitHub Actions | Same infra in 3 accounts (CR-035); repo is on GitHub. | CDK. |
 
@@ -939,7 +1089,12 @@ Validated at start-up with the entrypoint's `zod` schema (`apiEnv` for `main.ts`
 | `AUTH_AUDIENCE` | api | yes | `resume-optimizer` | |
 | `WEB_ORIGIN` | api | yes | `https://resume.surfingbear.com` | CR-021 |
 | `PLATFORM_LOGIN_URL` | web | yes | `https://surfingbear.com/login` | Read **at runtime** by the root layout (server component) and passed to client components through a `PublicConfigProvider` React context. No `NEXT_PUBLIC_*` variables exist, so one web image works in every environment (CR-037) |
-| `PLATFORM_UPGRADE_URL` | web | yes | `https://surfingbear.com/pricing` | Same as `PLATFORM_LOGIN_URL` |
+| `PLATFORM_UPGRADE_URL` | — | **Deprecated in v1.1** | — | Upgrade links now go to SCR-08 `/subscription` |
+| `RAZORPAY_MODE` | api, worker | yes | `live` \| `mock` | `mock` only allowed when `APP_ENV` is `local` or `test` (start-up check); `dev`/`staging` use `live` with Razorpay **test-mode** keys, `prod` with live keys |
+| `RAZORPAY_KEY_ID` | api | yes in `live` | `rzp_test_...` / `rzp_live_...` | Sent to the browser in API-023 (public) |
+| `RAZORPAY_KEY_SECRET` | api, worker | yes in `live` | secret | CR-042, CR-043 |
+| `RAZORPAY_WEBHOOK_SECRET` | api | yes in `live` | secret | CR-043; `test`: `test_webhook_secret` |
+| `RAZORPAY_PLAN_ID` | api | yes in `live` | `plan_...` | A-13 |
 | `RESUME_TEXT_KEY` | api, worker | yes | 32 random bytes, base64 | AES-256-GCM key (TBL-004) |
 | `RESUME_TEXT_KEY_ID` | api, worker | yes | `k1` | Stored with each row (`enc_key_id`) |
 | `RESUME_TEXT_KEY_PREVIOUS` | api, worker | no | base64 key | Only during a key rotation: rows whose `enc_key_id` equals `RESUME_TEXT_KEY_PREVIOUS_ID` are decrypted with it; new rows always use `RESUME_TEXT_KEY`. Old rows expire within 30 days, so no re-encryption job is needed |
@@ -1116,6 +1271,11 @@ A4 portrait, margins 48 pt, fonts Noto Sans and Noto Sans Devanagari embedded fr
 | `ro_ai_breaker_open` | gauge (0/1) | — |
 | `ro_queue_waiting_jobs` | gauge | `queue` |
 | `ro_purge_deleted_rows_total` | counter | `table` |
+| `ro_billing_webhook_total` (v1.1) | counter | `event`, `outcome` (`processed`, `ignored`, `duplicate`, `bad_signature`) |
+| `ro_billing_activation_seconds` (v1.1) | histogram | — (API-023 call → Pro granted) |
+| `ro_billing_reconcile_fixed_total` (v1.1) | counter | `field` (`status`, `paid_until`) |
+| `ro_billing_amount_mismatch_total` (v1.1) | counter | — |
+| `ro_razorpay_call_duration_seconds` (v1.1) | histogram | `op` (`create`, `fetch`, `cancel`), `outcome` |
 
 **Alerts** (to Slack `#ro-alerts`, prod and staging):
 
@@ -1129,6 +1289,11 @@ A4 portrait, margins 48 pt, fonts Noto Sans and Noto Sans Devanagari embedded fr
 | Queue backlog | `ro_queue_waiting_jobs{queue="analysis"} > 100` for 5 min |
 | Purge did not run | no `purge-retention` success log in the last 26 h |
 | AI config error | any AI call with outcome `config` |
+| Webhook failures (v1.1) | any 5xx from API-027, or > 5 `bad_signature` in 10 min |
+| Reconciliation drift (v1.1) | `ro_billing_reconcile_fixed_total` increases by > 5 in one run, or the job did not succeed in the last 26 h |
+| Amount mismatch (v1.1) | `ro_billing_amount_mismatch_total` increases |
+| Razorpay down (v1.1) | > 20 % of Razorpay calls fail over 10 min |
+| Heavy Pro usage (v1.1) | any user > 100 analyses in one IST day (NFR-019) |
 
 **Traces:** OpenTelemetry auto-instrumentation for HTTP, Prisma and ioredis; the API injects the trace context into the BullMQ job data so the worker span links to the request span. Span attributes MUST NOT contain resume text (CR-011).
 
@@ -1139,6 +1304,7 @@ A4 portrait, margins 48 pt, fonts Noto Sans and Noto Sans Devanagari embedded fr
 | `analysis` | `run-analysis` | API-009 | `jobId = analysisId` (dedupe), `attempts: 3`, `backoff: { type: "exponential", delay: 5000 }`, `removeOnComplete: { age: 86400 }`, `removeOnFail: { age: 604800 }` | `{ analysisId: string, requestId: string, traceContext: object }` — no personal data |
 | `maintenance` | `sweep-stuck` | worker start-up (`upsertJobScheduler`) | every 60,000 ms | `{}` |
 | `maintenance` | `purge-retention` | worker start-up | cron `0 2 * * *`, `tz: "Asia/Kolkata"` | `{}` |
+| `maintenance` | `reconcile-subscriptions` (v1.1) | worker start-up | cron `0 3 * * *`, `tz: "Asia/Kolkata"` | `{}` — fetches each live subscription, or one with `paid_until > now() − 2 days`, from Razorpay (max 5 requests/s) and applies §3.5.9; also expires `created` rows older than `CFG-52` (FR-025 AC 4) |
 
 `run-analysis` processor steps (each step's failure behaviour in brackets):
 
