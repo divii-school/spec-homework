@@ -1,28 +1,11 @@
-# <System name> — Specification
+# SurfingBear Resume Optimizer — Specification
 
 | Field | Value |
 |---|---|
-| Author | <your name> |
-| Version | v1.0 |
-| Last updated | YYYY-MM-DD |
-| Status | Draft / Review / Final |
-
-> **How to use this template**
-> - Keep the section order and numbering. Do not delete a section; if it does not apply, write `N/A` and the reason.
-> - Replace every `<...>` placeholder. Lines starting with `> Example:` show the expected level of detail; delete them when you are done.
-> - IDs are permanent. Never renumber or reuse an ID. If something is removed, mark it **Deprecated** and keep the row.
->
-> **ID rules**
->
-> | Prefix | Used for | Example |
-> |---|---|---|
-> | `CR-` | Company-wide common requirement | CR-001 |
-> | `FR-` | Functional requirement | FR-001 |
-> | `NFR-` | Non-functional requirement | NFR-001 |
-> | `CMP-` | Architecture component | CMP-001 |
-> | `TBL-` | Database table | TBL-001 |
-> | `API-` | API endpoint | API-001 |
-> | `ERR-` | Error code | ERR-001 |
+| Author | Sovan Kumar Bera |
+| Version | v1.1 |
+| Last updated | 2026-10-22 |
+| Status | Final |
 
 ---
 
@@ -32,47 +15,161 @@ Rules every Divii / Hanriver project must follow. Each rule has an ID and must b
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-001 | Authentication | <rule> | <check> |
+| CR-001 | Authentication | This module does not manage sign-up or login. It receives a signed JWT issued by the main SurfingBear platform. The JWT is passed as a Bearer token in the `Authorization` header. The module validates the token signature using the platform's RS256 public key (fetched from `PLATFORM_JWKS_URL` at startup and cached for 24 h). A valid token contains `sub` (user UUID), `email`, `name`, and `roles[]`. An invalid or expired token returns `401`. | Automated test: send request with expired / tampered / missing token → 401. Code review: no login or registration endpoint exists. |
+| CR-002 | Token handling | Access tokens have a 15-minute TTL. The module does not refresh tokens; the platform handles refresh. Every authenticated endpoint reads the user from the token; no endpoint accepts a user ID in the request body as a substitute for the token. | Code review + integration test. |
+| CR-003 | Roles and permissions | Two roles exist: `user` (default) and `admin`. The role is read from `roles[]` in the JWT. See permission matrix below. | Role-based guard on every endpoint; automated tests for each forbidden combination. |
+| CR-004 | Logging | Logs are structured JSON, one object per line. Required fields: `timestamp` (ISO-8601 UTC), `level` (debug / info / warn / error), `requestId` (UUID, set via `X-Request-Id` header or auto-generated), `userId` (from JWT, or `anonymous`), `method`, `path`, `statusCode`, `durationMs`, `message`. Personal data (email, phone, resume content, file bytes) is **never** logged. File names are logged only as a hash (`SHA-256(filename)`). | Code review + log sample review + grep for PII patterns in CI. |
+| CR-005 | Error handling | Every API error response uses exactly this shape: `{ "statusCode": <number>, "error": "<ERR_CODE>", "message": "<human-readable>", "requestId": "<uuid>" }`. Internal errors (5xx) never leak stack traces or internal paths; they return `"message": "Internal server error"`. 4xx errors return a specific message. | Automated test: trigger each error code and assert shape. |
+| CR-006 | Security — secrets | All secrets (`DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `PLATFORM_JWKS_URL`, `WEBHOOK_SECRET`) are stored in environment variables, never in code or config files committed to git. `.env` is in `.gitignore`. | CI check: no secrets in code. |
+| CR-007 | Security — CORS | CORS allows only origins listed in `ALLOWED_ORIGINS` env var (comma-separated). Credentials: `true`. Allowed methods: `GET, POST, PUT, PATCH, DELETE, OPTIONS`. Allowed headers: `Authorization, Content-Type, X-Request-Id`. Max-age: `86400`. | Automated test: request from unlisted origin → no CORS headers. |
+| CR-008 | Security — input validation | Every request body, query parameter and path parameter is validated with `class-validator` decorators before the handler runs. Validation pipe is global with `whitelist: true` (strips unknown fields) and `forbidNonWhitelisted: true` (rejects unknown fields with 400). File uploads are validated for MIME type and size before being read. | Code review: every DTO has decorators. CI: test with extra / missing fields. |
+| CR-009 | Security — rate limiting | Global rate limit: 100 requests per minute per user (keyed by `userId` from JWT). Unauthenticated requests: 20 per minute per IP. AI analysis endpoint (`POST /analyses`): 10 per minute per user (because each call costs money). Limits enforced via `@nestjs/throttler` backed by Redis. Exceeded → `429 Too Many Requests`. | Load test in staging. |
+| CR-010 | Security — data at rest | All resume files in S3 are encrypted with AES-256 (SSE-S3). The PostgreSQL database uses volume-level encryption (AWS RDS encryption). Redis is configured with `requirepass` and TLS in staging/prod. | Infrastructure review + AWS config audit. |
+| CR-011 | Security — data in transit | All traffic uses HTTPS (TLS 1.2+). Internal service-to-service calls (API ↔ S3, API ↔ OpenAI, API ↔ Redis) use TLS. HTTP requests are redirected to HTTPS via the load balancer. | SSL Labs scan ≥ A rating. |
+| CR-012 | Privacy — DPDP Act | Resumes contain personal data (name, email, phone, address, work history). Under India's DPDP Act 2023: (a) resumes are processed only for the stated purpose (analysis); (b) users can request deletion of their data at any time via `DELETE /resumes/:id`; (c) deleted data is hard-deleted from S3 and the database within 48 hours; (d) data retention: free users' resumes are auto-deleted 90 days after upload; Pro users' resumes are retained while the subscription is active and deleted 90 days after subscription ends; (e) no resume data is shared with third parties except the AI provider (OpenAI) for analysis; (f) the AI analysis prompt instructs the model not to store or learn from the data. | Annual DPDP compliance audit + automated retention job test. |
+| CR-013 | i18n | All API responses are in English. All dates are stored as ISO-8601 UTC in the database and returned as ISO-8601 UTC in API responses. The frontend converts to the user's local timezone. Currency amounts are stored as integers in paise (1 ₹ = 100 paise) to avoid floating-point errors. Currency display format: `₹X.XX` (INR, 2 decimal places). | Code review: no hardcoded timezone offsets in backend. |
+| CR-014 | Environments | Four environments: `local` (developer laptop, Docker Compose, mock OpenAI), `dev` (shared, real AWS, OpenAI sandbox key, seeded test data), `staging` (mirrors prod infra, production OpenAI key with low limits, used for QA and build test), `prod` (production). Env-specific config: `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `S3_BUCKET`, `ALLOWED_ORIGINS`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`. | Deploy pipeline enforces env-specific secrets via AWS Parameter Store. |
+| CR-015 | Deployment | CI/CD via GitHub Actions. Pipeline: lint → test → build → deploy. Deployment to dev: auto on push to `develop`. Deployment to staging: auto on push to `release/*`. Deployment to prod: manual approval after staging QA passes. Rollback: re-deploy the previous Docker image tag. Zero-downtime deploys via rolling update (ECS Fargate, minimum healthy 50%). Database migrations run before deploy via `typeorm migration:run` in a one-off task. | Deployment runbook + pipeline config. |
 
-> Example: `CR-004 | Logging | Logs are JSON, one object per line, with fields timestamp, level, requestId, userId, message. Personal data (email, phone, file contents) is never logged. | Code review + log sample review`
-
-Cover at least these areas:
-
-### 1.1 Authentication
 ### 1.2 Roles and permissions
-Include a role × permission table.
-### 1.3 Logging
-### 1.4 Error handling
-Define the **one** standard error response format used by every API.
-### 1.5 Security
-Secrets, CORS, input validation, rate limiting, data retention.
-### 1.6 Internationalization (i18n)
-### 1.7 Environments
-local / dev / staging / prod — what differs between them.
-### 1.8 Deployment
-CI/CD, release process, rollback.
+
+| Action | `user` | `admin` |
+|---|---|---|
+| Upload resume | ✅ | ✅ |
+| Start analysis | ✅ (within tier limits) | ✅ (unlimited) |
+| View own analyses | ✅ | ✅ |
+| View all users' analyses | ❌ | ✅ |
+| Download own analysis PDF | ✅ | ✅ |
+| Delete own resume | ✅ | ✅ |
+| Delete any resume | ❌ | ✅ |
+| Manage subscriptions (own) | ✅ | ✅ |
+| View subscription metrics | ❌ | ✅ |
+| View system health | ❌ | ✅ |
 
 ---
 
 ## 2. Coding conventions
 
 ### 2.1 Naming
+
 | Item | Convention | Example |
 |---|---|---|
-| Classes | <...> | <...> |
-| Variables / functions | <...> | <...> |
-| DB tables / columns | <...> | <...> |
-| API paths | <...> | <...> |
+| Classes | PascalCase | `AnalysisService`, `ResumeController` |
+| Interfaces | PascalCase, prefixed with `I` only for service interfaces | `IAnalysisResult`, `ResumeDto` |
+| Variables / functions | camelCase | `uploadResume`, `analysisScore` |
+| Constants | UPPER_SNAKE_CASE | `MAX_FILE_SIZE_BYTES`, `FREE_TIER_MONTHLY_LIMIT` |
+| DB tables | snake_case, plural | `resumes`, `analyses`, `rewrite_suggestions` |
+| DB columns | snake_case | `created_at`, `user_id`, `overall_score` |
+| API paths | kebab-case, plural nouns | `/resumes`, `/analyses`, `/subscriptions` |
+| Enum values (DB) | snake_case | `pending`, `completed`, `failed` |
+| Enum values (TS) | PascalCase | `AnalysisStatus.Completed` |
+| DTOs | PascalCase + suffix | `CreateAnalysisDto`, `ResumeResponseDto` |
+| Entity | PascalCase + `Entity` suffix | `ResumeEntity`, `AnalysisEntity` |
+| Migration | timestamp + description | `1729555200000-CreateResumesTable` |
 
 ### 2.2 Folder / module structure
-Show the folder tree for backend and frontend.
+
+```
+src/
+├── main.ts                          # Bootstrap, global pipes, guards
+├── app.module.ts                    # Root module
+├── common/
+│   ├── decorators/                  # @CurrentUser, @Roles
+│   ├── filters/                     # GlobalExceptionFilter
+│   ├── guards/                      # JwtAuthGuard, RolesGuard, ThrottlerGuard
+│   ├── interceptors/                # LoggingInterceptor, TransformInterceptor
+│   ├── pipes/                       # ParseUuidPipe
+│   ├── dto/                         # PaginationQueryDto, PaginatedResponseDto
+│   └── constants.ts                 # MAX_FILE_SIZE_BYTES, etc.
+├── config/
+│   └── configuration.ts             # ConfigModule factory
+├── auth/
+│   ├── auth.module.ts
+│   ├── jwt.strategy.ts              # Validates platform JWT
+│   └── jwt-auth.guard.ts
+├── resumes/
+│   ├── resumes.module.ts
+│   ├── resumes.controller.ts
+│   ├── resumes.service.ts
+│   ├── dto/
+│   │   ├── upload-resume.dto.ts
+│   │   └── resume-response.dto.ts
+│   ├── entities/
+│   │   └── resume.entity.ts
+│   └── resumes.repository.ts
+├── analyses/
+│   ├── analyses.module.ts
+│   ├── analyses.controller.ts
+│   ├── analyses.service.ts
+│   ├── dto/
+│   │   ├── create-analysis.dto.ts
+│   │   ├── analysis-response.dto.ts
+│   │   └── analysis-list-query.dto.ts
+│   ├── entities/
+│   │   ├── analysis.entity.ts
+│   │   ├── dimension-score.entity.ts
+│   │   └── rewrite-suggestion.entity.ts
+│   └── analyses.repository.ts
+├── ai/
+│   ├── ai.module.ts
+│   ├── ai.service.ts                # OpenAI GPT-4o integration
+│   └── prompts/
+│       └── resume-analysis.prompt.ts
+├── storage/
+│   ├── storage.module.ts
+│   └── storage.service.ts           # S3 upload/download/delete
+├── pdf/
+│   ├── pdf.module.ts
+│   ├── pdf.service.ts               # Puppeteer HTML→PDF
+│   └── templates/
+│       └── analysis-report.hbs      # Handlebars template
+├── subscriptions/                   # Round 2
+│   ├── subscriptions.module.ts
+│   ├── subscriptions.controller.ts
+│   ├── subscriptions.service.ts
+│   ├── dto/
+│   │   ├── create-subscription.dto.ts
+│   │   └── subscription-response.dto.ts
+│   ├── entities/
+│   │   ├── subscription.entity.ts
+│   │   └── payment.entity.ts
+│   └── razorpay/
+│       ├── razorpay.service.ts
+│       └── razorpay-webhook.controller.ts
+├── scheduler/
+│   ├── scheduler.module.ts
+│   └── retention.service.ts         # Cron: delete expired resumes
+└── health/
+    ├── health.module.ts
+    └── health.controller.ts
+```
+
+Frontend (Next.js) is a separate repository and out of scope for this backend spec. The backend exposes a REST API; the frontend consumes it.
 
 ### 2.3 Branching and commits
-> Example: branches `feature/FR-001-short-name`, `fix/ERR-003-timeout`; commit format `<type>(<scope>): <message>`.
+
+- Main branches: `main` (production), `develop` (integration), `release/vX.Y.Z` (release candidate).
+- Feature branches: `feature/FR-001-upload-resume` (one feature per branch).
+- Fix branches: `fix/ERR-003-timeout-handling`.
+- Commit format: `<type>(<scope>): <message>` where type is `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `ci`. Scope is the module name (e.g. `resumes`, `analyses`, `ai`). Message is imperative mood, lowercase, max 72 characters.
+- Examples: `feat(resumes): add upload endpoint with S3 integration`, `fix(ai): handle OpenAI timeout with retry`.
 
 ### 2.4 Code review rules
+
+- Every PR requires at least 1 approval before merge.
+- PR must pass CI (lint + test + build).
+- PR description must reference the FR/NFR IDs it implements.
+- Squash merge to `develop`; merge commit to `main`.
+
 ### 2.5 Lint and format
-Tools, config files, and when they run.
+
+| Tool | Config file | When it runs |
+|---|---|---|
+| ESLint | `.eslintrc.js` — extends `@typescript-eslint/recommended`, `prettier` | Pre-commit hook (Husky) + CI |
+| Prettier | `.prettierrc` — `printWidth: 100`, `singleQuote: true`, `trailingComma: 'all'`, `semi: true`, `tabWidth: 2` | Pre-commit hook (Husky) + CI |
+| Husky | `.husky/pre-commit` — runs `lint-staged` | Every commit |
+| lint-staged | `package.json` — `"*.ts": ["eslint --fix", "prettier --write"]` | Pre-commit |
+| TypeScript | `tsconfig.json` — `strict: true`, `noImplicitAny: true`, `strictNullChecks: true` | Build + CI |
 
 ---
 
@@ -82,20 +179,56 @@ Tools, config files, and when they run.
 
 | ID | Title | Description | Priority | Acceptance criteria |
 |---|---|---|---|---|
-| FR-001 | <title> | <what the system does, who does it> | Must / Should / Could | 1. … 2. … |
-
-> Example: `FR-003 | Reset password | A registered user can request a password reset link by email. | Must | 1. The link expires after 30 minutes. 2. The link works only once. 3. Requesting a reset for an unknown email returns the same response as a known one (no account enumeration).`
+| FR-001 | Upload resume | A logged-in user uploads a resume file. The system accepts PDF and DOCX formats only, with a maximum size of 5 MB. The file is stored in S3 and a record is created in the database. | Must | 1. Only `.pdf` and `.docx` MIME types are accepted; any other type returns `ERR_INVALID_FILE_TYPE` (400). 2. Files > 5 MB return `ERR_FILE_TOO_LARGE` (400). 3. Files with 0 bytes return `ERR_EMPTY_FILE` (400). 4. After upload, the response contains `resumeId` (UUID), `fileName`, `fileSize`, `mimeType`, `uploadedAt`. 5. The file is stored in S3 at key `resumes/{userId}/{resumeId}/{originalFileName}`. 6. A malicious file (e.g. `.exe` renamed to `.pdf`) is rejected by checking the file's magic bytes, not just the extension. |
+| FR-002 | Select target job role | When starting an analysis, the user selects a target job role from a predefined list (e.g. "Software Engineer", "Data Analyst", "Product Manager", "DevOps Engineer", "UI/UX Designer", "Project Manager", "Business Analyst", "QA Engineer", "System Administrator", "Marketing Manager"). Admins can add roles via `POST /job-roles`. | Must | 1. The list is returned by `GET /job-roles`. 2. Selecting a role not in the list returns `ERR_INVALID_JOB_ROLE` (400). 3. The selected role is stored with the analysis. |
+| FR-003 | Select experience level | When starting an analysis, the user selects an experience level: `entry` (0–2 years), `mid` (3–5 years), `senior` (6–10 years), `lead` (10+ years). | Must | 1. Only the four values are accepted; anything else returns `ERR_INVALID_EXPERIENCE_LEVEL` (400). 2. The level is stored with the analysis. |
+| FR-004 | AI resume analysis | The system sends the resume text, job role, and experience level to OpenAI GPT-4o. The AI returns a structured analysis: an overall score (0–100), per-dimension scores, a list of missing skills, and rewrite suggestions for weak lines. | Must | 1. The analysis completes within 60 seconds (p95). 2. The overall score is an integer 0–100. 3. Seven dimensions are scored, each with its own weight: Contact Info (10), Professional Summary (15), Work Experience (20), Skills Match (20), Education (10), Formatting & ATS Readability (15), Keywords & Industry Terms (10). 4. The weighted sum of dimension scores equals the overall score. 5. If the AI call fails (timeout, rate limit, server error), the analysis status is set to `failed` and the user can retry without consuming another analysis credit. 6. The resume text is extracted from the file using `pdf-parse` (PDF) or `mammoth` (DOCX) before sending to the AI. |
+| FR-005 | Missing skills list | The analysis result includes a list of skills that are expected for the target role and experience level but are missing from the resume. Each skill has a name and a brief explanation of why it matters for the role. | Must | 1. At least 0 and at most 20 missing skills are returned. 2. Each skill has `name` (string, 1–100 chars) and `reason` (string, 1–300 chars). 3. Skills are ordered by relevance (most important first, as ranked by the AI). |
+| FR-006 | Rewrite suggestions | The analysis result includes rewrite suggestions for weak lines in the resume. Each suggestion has the original line, the suggested rewrite, the dimension it improves, and the expected score impact. | Must | 1. Each suggestion has `originalText`, `suggestedText`, `dimension` (one of the 7 dimension keys), `impact` (`low` / `medium` / `high`). 2. Free users see only the top 3 suggestions (ordered by impact descending). Pro users see all (max 15). 3. The response includes `totalSuggestions` count even for free users, so they know how many they are missing. |
+| FR-007 | Free tier usage limits | Free users can run a maximum of 3 analyses per calendar month (UTC). The count resets on the 1st of each month at 00:00 UTC. If the limit is reached, `POST /analyses` returns `ERR_MONTHLY_LIMIT_REACHED` (403). | Must | 1. After 3 successful analyses in a month, the 4th attempt returns 403 with `ERR_MONTHLY_LIMIT_REACHED`. 2. Failed analyses (status `failed`) do not count toward the limit. 3. `GET /analyses/usage` returns `{ "used": <n>, "limit": 3, "resetsAt": "<ISO-8601>" }`. 4. Pro users are exempt from this limit (see FR-011). |
+| FR-008 | Download analysis as PDF | A user can download any of their own completed analyses as a PDF. The PDF contains: overall score, dimension scores as a radar chart, missing skills, rewrite suggestions (all for Pro, top 3 for free), and a timestamp. | Must | 1. `GET /analyses/:id/pdf` returns `Content-Type: application/pdf`. 2. The PDF file size is < 2 MB. 3. If the analysis status is not `completed`, the endpoint returns `ERR_ANALYSIS_NOT_READY` (400). 4. The PDF includes the SurfingBear logo, the user's name, and the analysis date. |
+| FR-009 | View analysis history | A user can view a list of their past analyses, paginated, sorted by creation date descending. Each list item shows: overall score, job role, experience level, status, and created date. | Should | 1. `GET /analyses` returns a paginated list. 2. Default page size: 10, max: 50. 3. Filterable by `status` (pending, processing, completed, failed) and `jobRoleId`. 4. Each item includes `id`, `resumeId`, `jobRole`, `experienceLevel`, `overallScore`, `status`, `createdAt`. |
+| FR-010 | Delete resume and associated data | A user can delete their own resume. Deleting a resume also deletes the S3 file and all associated analyses, dimension scores, and rewrite suggestions. This supports the DPDP Act right to erasure. | Must | 1. `DELETE /resumes/:id` returns 204. 2. The S3 file is deleted within 48 hours (async via queue). 3. All rows referencing the resume in `analyses`, `dimension_scores`, `rewrite_suggestions` are cascade-deleted. 4. Attempting to access a deleted resume returns 404. |
+| FR-011 | Resume Pro subscription | A user can subscribe to Resume Pro for ₹299/month via Razorpay. Pro benefits: unlimited analyses, all rewrite suggestions visible, analysis history with score comparison. The subscription auto-renews monthly. Users can cancel anytime; Pro access continues until the end of the paid period. Free users are unchanged. | Must | 1. `POST /subscriptions` creates a Razorpay subscription and returns the `subscriptionId` and `paymentLink`. 2. After successful payment (webhook), the user's `tier` changes from `free` to `pro`. 3. Pro users bypass the 3/month analysis limit. 4. Pro users see all rewrite suggestions (not just top 3). 5. Cancellation via `POST /subscriptions/:id/cancel` sets `cancelAtPeriodEnd: true`; Pro access remains until `currentPeriodEnd`. 6. After `currentPeriodEnd`, tier reverts to `free`. |
+| FR-012 | Razorpay payment integration | The system integrates with Razorpay Subscriptions API. Payment lifecycle: create subscription → user pays on Razorpay checkout → webhook confirms payment → activate Pro. Razorpay webhooks are verified using the `WEBHOOK_SECRET`. | Must | 1. Webhook signature is verified using HMAC-SHA256 with `WEBHOOK_SECRET`; invalid signatures return 400. 2. Webhook events handled: `subscription.activated`, `subscription.charged`, `subscription.cancelled`, `subscription.halted`, `payment.failed`. 3. Each webhook is idempotent (duplicate delivery does not create duplicate records). 4. Payment records are stored with Razorpay `paymentId`, `amount` (in paise), `status`, `method`. |
+| FR-013 | Subscription management | A user can view their subscription status, payment history, and cancel their subscription. | Should | 1. `GET /subscriptions/me` returns current subscription or `null`. 2. `GET /subscriptions/me/payments` returns payment history, paginated. 3. `POST /subscriptions/:id/cancel` cancels at period end. 4. Re-subscribing after cancellation creates a new subscription. |
+| FR-014 | Score comparison | Pro users can compare scores across their analysis history. The comparison shows dimension scores between any two selected analyses side by side. | Should | 1. `GET /analyses/compare?ids=<id1>,<id2>` returns both analyses' dimension scores side by side. 2. Only completed analyses can be compared. 3. Maximum 2 analyses per comparison request. 4. Only the owner of both analyses can compare them. |
+| FR-015 | List job roles | Any authenticated user can fetch the list of available job roles. | Must | 1. `GET /job-roles` returns `[{ "id": "<uuid>", "name": "<string>", "slug": "<string>" }]`. 2. Results are cached in Redis for 1 hour. |
+| FR-016 | Admin: add job role | An admin can add a new job role. | Could | 1. `POST /job-roles` with `{ "name": "..." }` creates a new role. Slug is auto-generated from name. 2. Duplicate names return `ERR_DUPLICATE_JOB_ROLE` (409). |
+| FR-017 | Retry failed analysis | A user can retry a failed analysis without uploading the resume again and without consuming an additional analysis credit. | Should | 1. `POST /analyses/:id/retry` re-queues the analysis. 2. Only analyses with status `failed` can be retried. 3. Retrying a non-failed analysis returns `ERR_ANALYSIS_NOT_FAILED` (400). |
 
 ### 3.2 Non-functional requirements
 
 | ID | Category | Requirement | Measurable target | How it is verified |
 |---|---|---|---|---|
-| NFR-001 | Performance | <...> | <number + unit> | <test / tool> |
-
-Cover at least: performance, security, availability, privacy, scalability, observability.
+| NFR-001 | Performance — analysis latency | AI resume analysis completes within acceptable time. | p50 < 15 s, p95 < 30 s, p99 < 60 s (measured from API request received to response sent). | Load test with 50 concurrent analyses in staging; measure via APM (Datadog). |
+| NFR-002 | Performance — API latency | Non-analysis endpoints respond quickly. | p95 < 200 ms for CRUD endpoints. p95 < 500 ms for PDF generation. | Load test + APM. |
+| NFR-003 | Availability | The service is available for users. | 99.5% uptime per month (allows ~3.6 h downtime/month). Measured by health check endpoint `/health`. | Uptime monitoring (UptimeRobot or Datadog Synthetics), 1-minute interval. |
+| NFR-004 | Scalability | The service handles concurrent users. | 500 concurrent users, 50 concurrent analyses. Achieved via horizontal scaling (ECS auto-scaling: min 2, max 8 tasks, target CPU 60%). | Load test with k6 in staging. |
+| NFR-005 | Security — data protection | Personal data in resumes is protected. | Encryption at rest (AES-256) and in transit (TLS 1.2+). No PII in logs. Resume text is not stored in the database; only the S3 key is stored. | Security audit + pen test annually. |
+| NFR-006 | Privacy — data retention | User data is not retained longer than necessary. | Free users: resumes auto-deleted 90 days after upload. Pro users: resumes auto-deleted 90 days after subscription ends. Deletion job runs daily at 02:00 UTC. | Automated test: create resume with past date, run job, verify deletion. |
+| NFR-007 | Observability | The team can monitor and debug the system. | Structured JSON logs (see CR-004). Health endpoint at `/health` returns `{ "status": "ok", "db": "ok", "redis": "ok", "s3": "ok" }`. Request traces via `X-Request-Id` header propagated to all internal calls and logs. | Dashboard in Datadog/CloudWatch. |
+| NFR-008 | Reliability — AI failure | The system degrades gracefully when OpenAI is down. | If OpenAI returns 5xx or times out (60 s), the system retries once after 5 s. If the retry fails, the analysis status is set to `failed` and the user is notified. No data is lost. The rest of the system (uploads, history, PDF download of past analyses) continues to work. | Chaos test: block OpenAI endpoint, verify graceful degradation. |
+| NFR-009 | Testability | The codebase is testable. | Unit test coverage ≥ 80% (lines). Integration tests for all API endpoints. E2E tests for critical flows (upload → analyze → download PDF). Mocked OpenAI in tests. | CI pipeline: `jest --coverage` fails if < 80%. |
 
 ### 3.3 Assumptions and out of scope
-List what you assumed and what this spec deliberately does **not** cover.
+
+**Assumptions:**
+1. The main SurfingBear platform provides user authentication; this module trusts the platform's JWT.
+2. Users have already accepted the platform's Terms of Service and Privacy Policy, which cover resume data processing.
+3. The OpenAI API is available with an SLA sufficient for our 99.5% uptime target.
+4. The frontend (Next.js) is built and maintained by the frontend team; this spec covers the backend API only.
+5. Razorpay test mode is available for dev/staging; live mode for prod.
+
+**Out of scope:**
+1. User registration and login (handled by the platform).
+2. Social login (Google, Kakao).
+3. Mobile app (web only; the API is mobile-friendly but no native app).
+4. Multi-language UI (English only for v1).
+5. Real-time notifications (polling or page refresh is acceptable).
+6. Resume editing within the platform (users edit externally and re-upload).
+7. Bulk upload of multiple resumes at once.
+8. Admin dashboard UI (admin uses API directly or a separate admin tool).
 
 ---
 
@@ -105,36 +238,155 @@ List what you assumed and what this spec deliberately does **not** cover.
 
 ```mermaid
 flowchart LR
-  Client --> API
-  API --> DB[(Database)]
+    Client["Next.js Frontend"]
+    LB["Load Balancer (ALB)"]
+    API["NestJS API (ECS Fargate)"]
+    DB[(PostgreSQL RDS)]
+    Cache[(Redis ElastiCache)]
+    S3["AWS S3 (Resumes)"]
+    OpenAI["OpenAI GPT-4o API"]
+    Razorpay["Razorpay API"]
+    Puppeteer["Puppeteer PDF Service"]
+
+    Client -->|HTTPS| LB
+    LB --> API
+    API --> DB
+    API --> Cache
+    API --> S3
+    API --> OpenAI
+    API --> Razorpay
+    API --> Puppeteer
 ```
 
 ### 4.2 Components
 
 | ID | Component | Responsibility | Technology |
 |---|---|---|---|
-| CMP-001 | <name> | <what it does> | <tech> |
+| CMP-001 | API Server | Handles HTTP requests, authentication, validation, routing, and orchestration of all business logic. | NestJS 10.x (TypeScript 5.x) on Node.js 20 LTS. Chosen because: (a) NestJS is the team's primary backend framework, (b) decorators + DI map cleanly to the module structure, (c) built-in support for guards, pipes, interceptors matches our cross-cutting concerns. |
+| CMP-002 | PostgreSQL Database | Persistent storage for all structured data: resumes (metadata), analyses, dimension scores, rewrite suggestions, subscriptions, payments, job roles. | PostgreSQL 16 on AWS RDS. Chosen because: (a) required by the brief, (b) JSONB support for flexible AI response storage, (c) strong transaction support for payment recording. |
+| CMP-003 | Redis Cache | Caches job role list, user analysis usage counts, rate limit counters, and Razorpay subscription status. | Redis 7.x on AWS ElastiCache. Chosen because: (a) required by the brief, (b) atomic counters for rate limiting and usage tracking, (c) sub-millisecond reads for frequently accessed data. |
+| CMP-004 | S3 File Storage | Stores uploaded resume files. Files are encrypted at rest. Presigned URLs are generated for secure upload and download without proxying through the API. | AWS S3 with SSE-S3 encryption. Chosen because: (a) durable (99.999999999%), (b) presigned URLs reduce API server load, (c) lifecycle policies automate retention-based deletion. |
+| CMP-005 | AI Analysis Service | Extracts text from resumes, constructs prompts, calls OpenAI GPT-4o, and parses the structured response. | OpenAI GPT-4o API via `openai` npm package (v4.x). Chosen because: (a) GPT-4o balances quality and cost for text analysis, (b) structured JSON output mode reduces parsing errors, (c) extensive documentation and npm SDK. |
+| CMP-006 | PDF Generator | Renders analysis results into a styled HTML template and converts to PDF. | Puppeteer 22.x with Handlebars 4.x templates. Chosen because: (a) pixel-perfect PDF output matching the web design, (b) supports charts via inline SVG, (c) headless Chrome is well-maintained. |
+| CMP-007 | Razorpay Integration | Manages subscription creation, webhook processing, and payment recording. | Razorpay Node.js SDK (`razorpay` npm). Chosen because: (a) specified in the requirement, (b) native subscription support, (c) INR support with no forex. |
+| CMP-008 | Scheduler | Runs daily cron job at 02:00 UTC to delete expired resumes and their S3 files per retention policy. | `@nestjs/schedule` (cron). Chosen because: (a) built into NestJS, (b) simple for single-instance cron (with leader election via Redis lock for multi-instance). |
+| CMP-009 | Load Balancer | Terminates TLS, routes to healthy API instances, handles CORS preflight at the infra level. | AWS ALB. Chosen because: (a) native ECS integration, (b) built-in health checks, (c) TLS termination. |
 
 ### 4.3 Main flows
-One sequence diagram per main flow.
+
+#### Flow 1: Upload resume
 
 ```mermaid
 sequenceDiagram
-  participant U as User
-  participant A as API
-  U->>A: request
-  A-->>U: response
+    participant U as User (Browser)
+    participant A as API Server
+    participant S3 as AWS S3
+    participant DB as PostgreSQL
+
+    U->>A: POST /resumes (multipart, file + metadata)
+    A->>A: Validate JWT, file type, file size, magic bytes
+    alt Validation fails
+        A-->>U: 400 ERR_INVALID_FILE_TYPE / ERR_FILE_TOO_LARGE / ERR_EMPTY_FILE
+    end
+    A->>S3: PutObject (resumes/{userId}/{resumeId}/{fileName})
+    S3-->>A: 200 OK (ETag)
+    A->>DB: INSERT INTO resumes (id, user_id, file_name, s3_key, ...)
+    DB-->>A: Resume record
+    A-->>U: 201 { id, fileName, fileSize, mimeType, uploadedAt }
+```
+
+#### Flow 2: Start analysis
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as API Server
+    participant R as Redis
+    participant DB as PostgreSQL
+    participant S3 as AWS S3
+    participant AI as OpenAI GPT-4o
+
+    U->>A: POST /analyses { resumeId, jobRoleId, experienceLevel }
+    A->>A: Validate JWT, input
+    A->>R: GET usage:{userId}:{month} (check monthly count)
+    alt Free user and limit reached
+        A-->>U: 403 ERR_MONTHLY_LIMIT_REACHED
+    end
+    A->>DB: INSERT INTO analyses (status=processing)
+    A->>S3: GetObject (resume file)
+    S3-->>A: File bytes
+    A->>A: Extract text (pdf-parse / mammoth)
+    alt Text extraction fails
+        A->>DB: UPDATE analyses SET status=failed
+        A-->>U: 422 ERR_TEXT_EXTRACTION_FAILED
+    end
+    A->>AI: Chat completion (resume text + role + level)
+    alt AI timeout (60s) or error
+        A->>A: Retry once after 5s
+        alt Retry fails
+            A->>DB: UPDATE analyses SET status=failed
+            A-->>U: 502 ERR_AI_SERVICE_UNAVAILABLE
+        end
+    end
+    AI-->>A: Structured JSON (scores, skills, suggestions)
+    A->>A: Validate AI response shape
+    A->>DB: INSERT dimension_scores, rewrite_suggestions
+    A->>DB: UPDATE analyses SET status=completed, overall_score=X
+    A->>R: INCR usage:{userId}:{month}
+    A-->>U: 200 { analysis object with scores and suggestions }
+```
+
+#### Flow 3: Razorpay subscription (Round 2)
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as API Server
+    participant RP as Razorpay API
+    participant DB as PostgreSQL
+    participant R as Redis
+
+    U->>A: POST /subscriptions
+    A->>RP: Create subscription (plan_id, customer)
+    RP-->>A: { subscriptionId, short_url }
+    A->>DB: INSERT INTO subscriptions (status=created)
+    A-->>U: 200 { subscriptionId, paymentLink }
+    Note over U,RP: User completes payment on Razorpay Checkout
+    RP->>A: POST /webhooks/razorpay (subscription.activated)
+    A->>A: Verify HMAC-SHA256 signature
+    A->>DB: UPDATE subscriptions SET status=active
+    A->>DB: INSERT INTO payments
+    A->>R: SET user_tier:{userId} = pro (TTL = period end)
+    A-->>RP: 200 OK
 ```
 
 ### 4.4 External integrations
 
 | System | Purpose | Protocol / auth | Failure handling |
 |---|---|---|---|
+| OpenAI GPT-4o | Resume analysis (scoring, skills, suggestions) | HTTPS REST. Auth: `Authorization: Bearer <OPENAI_API_KEY>`. Model: `gpt-4o`. Response format: `json_object`. Max tokens: 4096. Temperature: 0.2 (low variance for consistent scoring). | Timeout: 60 s. Retry: 1 retry after 5 s on 5xx or timeout. On final failure: set analysis status to `failed`, return `ERR_AI_SERVICE_UNAVAILABLE` (502). Rate limit (429): no retry, set status to `failed`, return 502. |
+| AWS S3 | Resume file storage | HTTPS. Auth: IAM role (ECS task role). Bucket: `surfingbear-resumes-{env}`. | Timeout: 30 s. On failure: return 502. Files are immutable (never overwritten). Lifecycle policy deletes objects tagged `retention-expiry` after 90 days. |
+| Razorpay | Subscription and payment processing | HTTPS REST. Auth: Basic auth (`RAZORPAY_KEY_ID:RAZORPAY_KEY_SECRET`). Webhook: HMAC-SHA256 signature verification using `WEBHOOK_SECRET`. | Timeout: 30 s. Webhook delivery: Razorpay retries for 24 h. Idempotent processing: store `razorpay_event_id`, skip duplicates. On Razorpay downtime: subscription creation fails with `ERR_PAYMENT_SERVICE_UNAVAILABLE` (502). Existing active subscriptions continue (status cached in Redis). |
 
 ### 4.5 Tech stack and reasons
 
 | Layer | Choice | Why this choice |
 |---|---|---|
+| Runtime | Node.js 20 LTS | Long-term support until 2026-10; non-blocking I/O suits our I/O-heavy workload (S3, OpenAI, DB). |
+| Framework | NestJS 10.x | Team's standard framework; decorator-based DI, built-in guards/pipes/interceptors handle our cross-cutting concerns (auth, validation, logging, rate limiting) cleanly. |
+| Language | TypeScript 5.x (strict mode) | Type safety catches mismatches between DTOs, entities, and AI response parsing at compile time rather than runtime. |
+| Database | PostgreSQL 16 | Required by brief. JSONB for flexible AI response storage. Supports `uuid_generate_v4()` for primary keys. Strong ACID for payment records. |
+| Cache | Redis 7.x | Required by brief. Atomic `INCR` for usage counting, `SET EX` for rate limiting, fast reads for job role cache. |
+| File storage | AWS S3 | Durable (11 nines), presigned URLs for direct browser upload/download, lifecycle policies for automated retention. Cost-effective for file storage. |
+| AI provider | OpenAI GPT-4o | Best balance of quality and cost for structured text analysis. JSON output mode reduces parsing errors. Well-documented Node.js SDK. |
+| PDF generation | Puppeteer 22.x + Handlebars | Renders styled HTML (with charts) to pixel-perfect PDF. Handlebars templates keep presentation logic separate from business logic. |
+| Payment | Razorpay | Required by Round 2. Native INR subscription support. Indian payment methods (UPI, cards, netbanking). Webhook-based lifecycle. |
+| ORM | TypeORM 0.3.x | NestJS-native integration via `@nestjs/typeorm`. Decorator-based entity definition. Migration support. |
+| Validation | class-validator + class-transformer | NestJS-native. Decorators on DTO classes auto-validate request bodies, query params, and path params via global `ValidationPipe`. |
+| Testing | Jest 29.x + Supertest | NestJS default. `jest` for unit tests, `supertest` for integration/E2E tests. |
+| Containerization | Docker | Consistent environment across local/dev/staging/prod. Multi-stage build: build stage (compile TS) → prod stage (Node.js + dist). |
+| Orchestration | AWS ECS Fargate | Serverless containers. Auto-scaling based on CPU. No server management. |
+| CI/CD | GitHub Actions | Team standard. Workflow: lint → test → build → push Docker image → deploy to ECS. |
 
 ---
 
@@ -144,68 +396,947 @@ sequenceDiagram
 
 ```mermaid
 erDiagram
-  USER ||--o{ ORDER : places
+    RESUMES ||--o{ ANALYSES : "has"
+    ANALYSES ||--o{ DIMENSION_SCORES : "has"
+    ANALYSES ||--o{ REWRITE_SUGGESTIONS : "has"
+    JOB_ROLES ||--o{ ANALYSES : "referenced by"
+    SUBSCRIPTIONS ||--o{ PAYMENTS : "has"
+
+    RESUMES {
+        uuid id PK
+        uuid user_id
+        string file_name
+        string s3_key
+        string mime_type
+        int file_size_bytes
+        timestamp created_at
+        timestamp expires_at
+    }
+
+    ANALYSES {
+        uuid id PK
+        uuid resume_id FK
+        uuid user_id
+        uuid job_role_id FK
+        string experience_level
+        string status
+        int overall_score
+        jsonb missing_skills
+        string error_message
+        timestamp created_at
+        timestamp completed_at
+    }
+
+    DIMENSION_SCORES {
+        uuid id PK
+        uuid analysis_id FK
+        string dimension_key
+        string dimension_label
+        int weight
+        int score
+        string feedback
+    }
+
+    REWRITE_SUGGESTIONS {
+        uuid id PK
+        uuid analysis_id FK
+        string original_text
+        string suggested_text
+        string dimension_key
+        string impact
+        int sort_order
+    }
+
+    JOB_ROLES {
+        uuid id PK
+        string name
+        string slug
+        timestamp created_at
+    }
+
+    SUBSCRIPTIONS {
+        uuid id PK
+        uuid user_id
+        string razorpay_subscription_id
+        string razorpay_plan_id
+        string status
+        timestamp current_period_start
+        timestamp current_period_end
+        boolean cancel_at_period_end
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    PAYMENTS {
+        uuid id PK
+        uuid subscription_id FK
+        string razorpay_payment_id
+        string razorpay_event_id
+        int amount_paise
+        string currency
+        string status
+        string method
+        timestamp paid_at
+        timestamp created_at
+    }
 ```
 
 ### 5.2 Tables
-One block per table.
 
-#### TBL-001 `<table_name>`
-Purpose: <one line>
+#### TBL-001 `resumes`
+Purpose: Stores metadata about uploaded resume files. The actual file is in S3.
 
 | Column | Type | Null | Key | Default | Constraint / note |
 |---|---|---|---|---|---|
-| id | uuid | NO | PK | gen_random_uuid() | |
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| user_id | uuid | NO | IDX | — | User from JWT. Not an FK (user table is in the platform DB). Indexed for "my resumes" queries. |
+| file_name | varchar(255) | NO | — | — | Original file name as uploaded. Max 255 chars. |
+| s3_key | varchar(512) | NO | UQ | — | Full S3 object key. Unique to prevent duplicates. Format: `resumes/{userId}/{resumeId}/{fileName}`. |
+| mime_type | varchar(100) | NO | — | — | `application/pdf` or `application/vnd.openxmlformats-officedocument.wordprocessingml.document`. CHECK constraint limits to these two values. |
+| file_size_bytes | integer | NO | — | — | CHECK: `file_size_bytes > 0 AND file_size_bytes <= 5242880` (5 MB). |
+| created_at | timestamptz | NO | IDX | `now()` | |
+| expires_at | timestamptz | YES | IDX | — | Set to `created_at + 90 days` for free users. `NULL` for Pro users (set to `subscription_end + 90 days` when subscription ends). Indexed for retention job query. |
+
+#### TBL-002 `analyses`
+Purpose: One row per resume analysis run. Links a resume to its analysis results.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| resume_id | uuid | NO | FK → resumes.id | — | ON DELETE CASCADE. |
+| user_id | uuid | NO | IDX | — | Denormalized from resume for faster queries. Indexed for "my analyses" list. |
+| job_role_id | uuid | NO | FK → job_roles.id | — | ON DELETE RESTRICT (cannot delete a role that has analyses). |
+| experience_level | varchar(10) | NO | — | — | CHECK: `experience_level IN ('entry', 'mid', 'senior', 'lead')`. |
+| status | varchar(20) | NO | IDX | `'pending'` | CHECK: `status IN ('pending', 'processing', 'completed', 'failed')`. Indexed for filtering. |
+| overall_score | smallint | YES | — | NULL | Range 0–100. NULL until analysis completes. CHECK: `overall_score >= 0 AND overall_score <= 100`. |
+| missing_skills | jsonb | YES | — | NULL | Array of `{ "name": "...", "reason": "..." }`. NULL until analysis completes. Stored as JSONB for flexible querying. |
+| error_message | text | YES | — | NULL | Populated only when status = `failed`. Contains a safe error description (no internal details). |
+| created_at | timestamptz | NO | IDX | `now()` | Indexed for sorting by date. |
+| completed_at | timestamptz | YES | — | NULL | Set when status transitions to `completed` or `failed`. |
+
+#### TBL-003 `dimension_scores`
+Purpose: Per-dimension breakdown of an analysis score. Always 7 rows per completed analysis.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| analysis_id | uuid | NO | FK → analyses.id | — | ON DELETE CASCADE. Indexed together with `dimension_key` as unique. |
+| dimension_key | varchar(30) | NO | — | — | CHECK: `dimension_key IN ('contact_info', 'summary', 'experience', 'skills_match', 'education', 'formatting', 'keywords')`. |
+| dimension_label | varchar(50) | NO | — | — | Human-readable: "Contact Information", "Professional Summary", etc. |
+| weight | smallint | NO | — | — | The point weight for this dimension. CHECK: `weight > 0 AND weight <= 100`. Values: 10, 15, 20, 20, 10, 15, 10. |
+| score | smallint | NO | — | — | Score for this dimension, 0 to `weight`. CHECK: `score >= 0 AND score <= weight`. |
+| feedback | text | NO | — | — | 1–3 sentence explanation from the AI about this dimension's score. |
+
+Unique constraint: `(analysis_id, dimension_key)`.
+
+#### TBL-004 `rewrite_suggestions`
+Purpose: AI-generated rewrite suggestions for weak resume lines.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| analysis_id | uuid | NO | FK → analyses.id | — | ON DELETE CASCADE. |
+| original_text | text | NO | — | — | The original line from the resume. Max 1000 chars enforced in application. |
+| suggested_text | text | NO | — | — | The suggested rewrite. Max 1000 chars enforced in application. |
+| dimension_key | varchar(30) | NO | — | — | Which dimension this suggestion improves. Same CHECK as `dimension_scores.dimension_key`. |
+| impact | varchar(10) | NO | — | — | CHECK: `impact IN ('low', 'medium', 'high')`. |
+| sort_order | smallint | NO | — | 0 | Lower = higher priority. Used to determine which suggestions free users see (top 3 by sort_order). |
+
+#### TBL-005 `job_roles`
+Purpose: Predefined list of target job roles for analysis.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| name | varchar(100) | NO | UQ | — | Human-readable name. Unique. |
+| slug | varchar(100) | NO | UQ | — | URL-safe slug, auto-generated from name (lowercase, hyphens). Unique. |
+| created_at | timestamptz | NO | — | `now()` | |
+
+Seed data (10 roles):
+
+| name | slug |
+|---|---|
+| Software Engineer | software-engineer |
+| Data Analyst | data-analyst |
+| Product Manager | product-manager |
+| DevOps Engineer | devops-engineer |
+| UI/UX Designer | ui-ux-designer |
+| Project Manager | project-manager |
+| Business Analyst | business-analyst |
+| QA Engineer | qa-engineer |
+| System Administrator | system-administrator |
+| Marketing Manager | marketing-manager |
+
+#### TBL-006 `subscriptions`
+Purpose: Tracks Resume Pro subscriptions linked to Razorpay. One active subscription per user at a time.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| user_id | uuid | NO | IDX | — | Indexed. Partial unique index: `CREATE UNIQUE INDEX uq_subscriptions_user_active ON subscriptions(user_id) WHERE status IN ('created', 'active')` — ensures at most one active/created subscription per user. |
+| razorpay_subscription_id | varchar(50) | NO | UQ | — | Razorpay's subscription ID (e.g., `sub_xxxxx`). Unique. |
+| razorpay_plan_id | varchar(50) | NO | — | — | Razorpay plan ID (e.g., `plan_xxxxx`). The Pro plan: ₹299/month. |
+| status | varchar(20) | NO | IDX | `'created'` | CHECK: `status IN ('created', 'active', 'cancelled', 'halted', 'expired')`. `created` = awaiting first payment. `active` = paid and active. `cancelled` = user cancelled, access until period end. `halted` = payment failed. `expired` = past period end after cancel/halt. |
+| current_period_start | timestamptz | YES | — | NULL | Start of the current billing period. Set on activation. |
+| current_period_end | timestamptz | YES | IDX | NULL | End of the current billing period. Indexed for expiry checks. |
+| cancel_at_period_end | boolean | NO | — | `false` | `true` if user has cancelled but period hasn't ended yet. |
+| created_at | timestamptz | NO | — | `now()` | |
+| updated_at | timestamptz | NO | — | `now()` | Updated on every status change. |
+
+#### TBL-007 `payments`
+Purpose: Records every payment event from Razorpay. Immutable audit log.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| subscription_id | uuid | NO | FK → subscriptions.id | — | ON DELETE RESTRICT (never delete subscriptions that have payments). |
+| razorpay_payment_id | varchar(50) | NO | UQ | — | Razorpay's payment ID (e.g., `pay_xxxxx`). Unique. |
+| razorpay_event_id | varchar(100) | YES | UQ | — | Razorpay webhook event ID. Unique (nullable for manual entries). Used for idempotency. |
+| amount_paise | integer | NO | — | — | Amount in paise (29900 = ₹299.00). CHECK: `amount_paise > 0`. |
+| currency | varchar(3) | NO | — | `'INR'` | ISO 4217. Always `INR` for now. |
+| status | varchar(20) | NO | — | — | CHECK: `status IN ('captured', 'failed', 'refunded')`. |
+| method | varchar(30) | YES | — | NULL | Payment method: `card`, `upi`, `netbanking`, `wallet`, etc. From Razorpay. |
+| paid_at | timestamptz | YES | — | NULL | Timestamp of successful capture. NULL if failed. |
+| created_at | timestamptz | NO | — | `now()` | |
 
 ### 5.3 Indexes
 
 | Table | Index | Columns | Why |
 |---|---|---|---|
+| resumes | `idx_resumes_user_id` | `user_id` | Filter resumes by user for "my resumes" list. |
+| resumes | `idx_resumes_expires_at` | `expires_at` | Retention cron job queries `WHERE expires_at < now()`. |
+| resumes | `idx_resumes_created_at` | `created_at` | Sort by upload date. |
+| analyses | `idx_analyses_user_id_created_at` | `user_id, created_at DESC` | "My analyses" list sorted by date. Compound index covers both filter and sort. |
+| analyses | `idx_analyses_resume_id` | `resume_id` | FK lookup and cascade delete. |
+| analyses | `idx_analyses_status` | `status` | Filter by status. |
+| dimension_scores | `idx_dimension_scores_analysis_id` | `analysis_id` | Join to fetch scores for an analysis. |
+| rewrite_suggestions | `idx_rewrite_suggestions_analysis_id` | `analysis_id` | Join to fetch suggestions for an analysis. |
+| subscriptions | `idx_subscriptions_user_id` | `user_id` | Look up user's subscription. |
+| subscriptions | `idx_subscriptions_current_period_end` | `current_period_end` | Expiry check cron. |
+| subscriptions | `idx_subscriptions_razorpay_sub_id` | `razorpay_subscription_id` | Webhook lookup by Razorpay ID. |
+| payments | `idx_payments_subscription_id` | `subscription_id` | Payment history for a subscription. |
 
 ### 5.4 Relationships and delete rules
 
 | From | To | Cardinality | On delete |
 |---|---|---|---|
+| analyses.resume_id | resumes.id | Many-to-one | CASCADE — deleting a resume deletes all its analyses. |
+| analyses.job_role_id | job_roles.id | Many-to-one | RESTRICT — cannot delete a job role that has analyses. |
+| dimension_scores.analysis_id | analyses.id | Many-to-one | CASCADE — deleting an analysis deletes its scores. |
+| rewrite_suggestions.analysis_id | analyses.id | Many-to-one | CASCADE — deleting an analysis deletes its suggestions. |
+| payments.subscription_id | subscriptions.id | Many-to-one | RESTRICT — cannot delete a subscription that has payments. |
 
 ---
 
 ## 6. API design
 
 ### 6.1 Common rules
-- Base path:
-- Auth header / cookie:
-- Pagination format:
-- Date / time format and timezone:
-- Standard error format (must match section 1.4):
+
+- **Base path:** `/api/v1`
+- **Auth header:** `Authorization: Bearer <JWT>` on every endpoint except `/health` and `/webhooks/razorpay`.
+- **Pagination format:** Query params `page` (1-based, default 1) and `limit` (default 10, max 50). Response wrapper: `{ "data": [...], "meta": { "page": 1, "limit": 10, "total": 42, "totalPages": 5 } }`.
+- **Date/time format:** ISO-8601 UTC (`2026-10-22T14:30:00.000Z`). All timestamps are UTC.
+- **Standard error format** (matches CR-005): `{ "statusCode": <number>, "error": "<ERR_CODE>", "message": "<human-readable>", "requestId": "<uuid>" }`.
+- **Content-Type:** `application/json` for all responses except file downloads (PDF, resume). File uploads use `multipart/form-data`.
+- **Request IDs:** Every request gets a UUID in the `X-Request-Id` response header (echoed from request header if provided, otherwise auto-generated).
 
 ### 6.2 Endpoints
-One block per endpoint.
 
-#### API-001 `<METHOD> <path>`
-- **Purpose:**
-- **Auth / role:**
-- **Implements:** FR-xxx
+#### API-001 `POST /api/v1/resumes`
+- **Purpose:** Upload a resume file.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-001
 
-**Request**
+**Request** (`multipart/form-data`)
 
-| Field | In (path/query/body) | Type | Required | Validation |
+| Field | In | Type | Required | Validation |
 |---|---|---|---|---|
+| file | body (multipart) | File | Yes | MIME: `application/pdf` or `application/vnd.openxmlformats-officedocument.wordprocessingml.document`. Max 5 MB. Min 1 byte. Magic bytes checked. |
 
-**Response 200**
+**Response 201**
 
 ```json
-{}
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "fileName": "sovan_resume_2026.pdf",
+  "fileSize": 245760,
+  "mimeType": "application/pdf",
+  "uploadedAt": "2026-10-22T10:30:00.000Z"
+}
 ```
 
 **Errors**
 
 | HTTP | Error code | When |
 |---|---|---|
+| 400 | ERR_INVALID_FILE_TYPE | MIME type is not PDF or DOCX, or magic bytes mismatch. |
+| 400 | ERR_FILE_TOO_LARGE | File exceeds 5 MB. |
+| 400 | ERR_EMPTY_FILE | File is 0 bytes. |
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 429 | ERR_RATE_LIMITED | Too many requests. |
+
+---
+
+#### API-002 `GET /api/v1/resumes`
+- **Purpose:** List the current user's resumes.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-009 (partial — supports analysis history flow)
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| page | query | integer | No | Min 1. Default 1. |
+| limit | query | integer | No | Min 1, max 50. Default 10. |
+
+**Response 200**
+
+```json
+{
+  "data": [
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "fileName": "sovan_resume_2026.pdf",
+      "fileSize": 245760,
+      "mimeType": "application/pdf",
+      "uploadedAt": "2026-10-22T10:30:00.000Z",
+      "analysisCount": 2
+    }
+  ],
+  "meta": { "page": 1, "limit": 10, "total": 3, "totalPages": 1 }
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+
+---
+
+#### API-003 `GET /api/v1/resumes/:id`
+- **Purpose:** Get a single resume's metadata with download URL.
+- **Auth / role:** `user` (own only), `admin` (any)
+- **Implements:** FR-001
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| id | path | uuid | Yes | Valid UUID. |
+
+**Response 200**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "fileName": "sovan_resume_2026.pdf",
+  "fileSize": 245760,
+  "mimeType": "application/pdf",
+  "uploadedAt": "2026-10-22T10:30:00.000Z",
+  "downloadUrl": "https://surfingbear-resumes-prod.s3.ap-south-1.amazonaws.com/resumes/...?X-Amz-Signature=..."
+}
+```
+
+The `downloadUrl` is a presigned S3 URL valid for 15 minutes.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 403 | ERR_FORBIDDEN | User does not own this resume and is not admin. |
+| 404 | ERR_RESUME_NOT_FOUND | Resume ID does not exist or has been deleted. |
+
+---
+
+#### API-004 `DELETE /api/v1/resumes/:id`
+- **Purpose:** Delete a resume and all associated analyses, scores, and suggestions. S3 file deleted async.
+- **Auth / role:** `user` (own only), `admin` (any)
+- **Implements:** FR-010
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| id | path | uuid | Yes | Valid UUID. |
+
+**Response 204** (No content)
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 403 | ERR_FORBIDDEN | User does not own this resume and is not admin. |
+| 404 | ERR_RESUME_NOT_FOUND | Resume ID does not exist. |
+
+---
+
+#### API-005 `POST /api/v1/analyses`
+- **Purpose:** Start an AI analysis on an uploaded resume.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-002, FR-003, FR-004, FR-005, FR-006, FR-007
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| resumeId | body | uuid | Yes | Must reference an existing resume owned by the user. |
+| jobRoleId | body | uuid | Yes | Must reference an existing job role. |
+| experienceLevel | body | string | Yes | One of: `entry`, `mid`, `senior`, `lead`. |
+
+```json
+{
+  "resumeId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "jobRoleId": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+  "experienceLevel": "mid"
+}
+```
+
+**Response 200** (synchronous — analysis runs inline, returns when complete)
+
+```json
+{
+  "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+  "resumeId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "jobRole": { "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901", "name": "Software Engineer" },
+  "experienceLevel": "mid",
+  "status": "completed",
+  "overallScore": 72,
+  "dimensions": [
+    { "key": "contact_info", "label": "Contact Information", "weight": 10, "score": 8, "feedback": "All contact details present. Consider adding a LinkedIn URL." },
+    { "key": "summary", "label": "Professional Summary", "weight": 15, "score": 10, "feedback": "Summary is clear and mentions years of experience. Could be more targeted to the specific role." },
+    { "key": "experience", "label": "Work Experience", "weight": 20, "score": 14, "feedback": "Good use of action verbs. Missing quantifiable achievements in 2 of 4 positions." },
+    { "key": "skills_match", "label": "Skills Match", "weight": 20, "score": 15, "feedback": "Covers 75% of expected skills. Missing: system design, cloud architecture." },
+    { "key": "education", "label": "Education", "weight": 10, "score": 9, "feedback": "Degree and institution clearly listed. GPA included." },
+    { "key": "formatting", "label": "Formatting & ATS Readability", "weight": 15, "score": 10, "feedback": "Clean layout. ATS-friendly format. Section headers are clear. Some inconsistent date formats." },
+    { "key": "keywords", "label": "Keywords & Industry Terms", "weight": 10, "score": 6, "feedback": "Missing key terms: microservices, CI/CD, agile methodology." }
+  ],
+  "missingSkills": [
+    { "name": "System Design", "reason": "Senior SE roles expect system design experience for architecture discussions." },
+    { "name": "Cloud Architecture (AWS/GCP)", "reason": "Most mid-level SE positions require cloud platform experience." },
+    { "name": "CI/CD Pipelines", "reason": "DevOps integration is expected for mid-level developers." }
+  ],
+  "suggestions": [
+    { "originalText": "Worked on backend services", "suggestedText": "Designed and implemented 5 RESTful microservices handling 10K RPM, reducing API latency by 40%", "dimension": "experience", "impact": "high" },
+    { "originalText": "Used Python and JavaScript", "suggestedText": "Built data pipelines in Python (pandas, NumPy) and interactive dashboards in React/TypeScript", "dimension": "skills_match", "impact": "high" },
+    { "originalText": "Team player with good communication", "suggestedText": "Led cross-functional team of 6 engineers, conducting weekly design reviews and mentoring 2 junior developers", "dimension": "summary", "impact": "medium" }
+  ],
+  "totalSuggestions": 8,
+  "createdAt": "2026-10-22T10:35:00.000Z",
+  "completedAt": "2026-10-22T10:35:18.000Z"
+}
+```
+
+Note: Free users see only the top 3 suggestions (by impact). `totalSuggestions` shows the total available. Pro users see all (up to 15).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | ERR_INVALID_EXPERIENCE_LEVEL | `experienceLevel` is not one of the four valid values. |
+| 400 | ERR_INVALID_JOB_ROLE | `jobRoleId` does not match any existing job role. |
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 403 | ERR_MONTHLY_LIMIT_REACHED | Free user has used all 3 analyses this month. |
+| 404 | ERR_RESUME_NOT_FOUND | `resumeId` does not exist or is not owned by the user. |
+| 422 | ERR_TEXT_EXTRACTION_FAILED | Could not extract text from the resume file (corrupt or unreadable). |
+| 429 | ERR_RATE_LIMITED | Per-endpoint rate limit exceeded (10/min). |
+| 502 | ERR_AI_SERVICE_UNAVAILABLE | OpenAI API failed after retry. |
+
+---
+
+#### API-006 `GET /api/v1/analyses`
+- **Purpose:** List the current user's analyses, paginated, sorted by date descending.
+- **Auth / role:** `user` (own), `admin` (all)
+- **Implements:** FR-009
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| page | query | integer | No | Min 1. Default 1. |
+| limit | query | integer | No | Min 1, max 50. Default 10. |
+| status | query | string | No | One of: `pending`, `processing`, `completed`, `failed`. |
+| jobRoleId | query | uuid | No | Valid UUID. |
+
+**Response 200**
+
+```json
+{
+  "data": [
+    {
+      "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+      "resumeId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "jobRole": { "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901", "name": "Software Engineer" },
+      "experienceLevel": "mid",
+      "overallScore": 72,
+      "status": "completed",
+      "createdAt": "2026-10-22T10:35:00.000Z"
+    }
+  ],
+  "meta": { "page": 1, "limit": 10, "total": 5, "totalPages": 1 }
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+
+---
+
+#### API-007 `GET /api/v1/analyses/:id`
+- **Purpose:** Get full analysis details including dimension scores and suggestions.
+- **Auth / role:** `user` (own), `admin` (any)
+- **Implements:** FR-004, FR-005, FR-006
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| id | path | uuid | Yes | Valid UUID. |
+
+**Response 200**
+
+Same shape as the `POST /api/v1/analyses` response above.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 403 | ERR_FORBIDDEN | User does not own this analysis and is not admin. |
+| 404 | ERR_ANALYSIS_NOT_FOUND | Analysis ID does not exist. |
+
+---
+
+#### API-008 `GET /api/v1/analyses/:id/pdf`
+- **Purpose:** Download the analysis result as a PDF.
+- **Auth / role:** `user` (own), `admin` (any)
+- **Implements:** FR-008
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| id | path | uuid | Yes | Valid UUID. |
+
+**Response 200**
+
+- `Content-Type: application/pdf`
+- `Content-Disposition: attachment; filename="analysis-{id}.pdf"`
+- Body: PDF binary data.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | ERR_ANALYSIS_NOT_READY | Analysis status is not `completed`. |
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 403 | ERR_FORBIDDEN | User does not own this analysis and is not admin. |
+| 404 | ERR_ANALYSIS_NOT_FOUND | Analysis ID does not exist. |
+
+---
+
+#### API-009 `GET /api/v1/analyses/usage`
+- **Purpose:** Get the current user's analysis usage for the current month.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-007
+
+**Request:** No parameters.
+
+**Response 200**
+
+```json
+{
+  "used": 2,
+  "limit": 3,
+  "tier": "free",
+  "resetsAt": "2026-11-01T00:00:00.000Z"
+}
+```
+
+For Pro users: `"limit": null` (unlimited), `"tier": "pro"`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+
+---
+
+#### API-010 `POST /api/v1/analyses/:id/retry`
+- **Purpose:** Retry a failed analysis.
+- **Auth / role:** `user` (own), `admin` (any)
+- **Implements:** FR-017
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| id | path | uuid | Yes | Valid UUID. |
+
+**Response 200**
+
+Same shape as `POST /api/v1/analyses` response (re-runs the analysis).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | ERR_ANALYSIS_NOT_FAILED | Analysis status is not `failed`. |
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 403 | ERR_FORBIDDEN | User does not own this analysis and is not admin. |
+| 404 | ERR_ANALYSIS_NOT_FOUND | Analysis ID does not exist. |
+| 502 | ERR_AI_SERVICE_UNAVAILABLE | OpenAI API failed after retry. |
+
+---
+
+#### API-011 `GET /api/v1/analyses/compare`
+- **Purpose:** Compare dimension scores of two completed analyses side by side.
+- **Auth / role:** `user` (own), `admin` (any)
+- **Implements:** FR-014
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| ids | query | string | Yes | Comma-separated, exactly 2 UUIDs. Both must be completed analyses owned by the user. |
+
+**Response 200**
+
+```json
+{
+  "analyses": [
+    {
+      "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+      "overallScore": 72,
+      "jobRole": "Software Engineer",
+      "experienceLevel": "mid",
+      "createdAt": "2026-10-22T10:35:00.000Z",
+      "dimensions": [
+        { "key": "contact_info", "label": "Contact Information", "weight": 10, "score": 8 },
+        { "key": "summary", "label": "Professional Summary", "weight": 15, "score": 10 },
+        { "key": "experience", "label": "Work Experience", "weight": 20, "score": 14 },
+        { "key": "skills_match", "label": "Skills Match", "weight": 20, "score": 15 },
+        { "key": "education", "label": "Education", "weight": 10, "score": 9 },
+        { "key": "formatting", "label": "Formatting & ATS Readability", "weight": 15, "score": 10 },
+        { "key": "keywords", "label": "Keywords & Industry Terms", "weight": 10, "score": 6 }
+      ]
+    },
+    {
+      "id": "d4e5f6a7-b890-1234-defa-234567890123",
+      "overallScore": 85,
+      "jobRole": "Software Engineer",
+      "experienceLevel": "mid",
+      "createdAt": "2026-10-25T09:15:00.000Z",
+      "dimensions": [
+        { "key": "contact_info", "label": "Contact Information", "weight": 10, "score": 10 },
+        { "key": "summary", "label": "Professional Summary", "weight": 15, "score": 13 },
+        { "key": "experience", "label": "Work Experience", "weight": 20, "score": 18 },
+        { "key": "skills_match", "label": "Skills Match", "weight": 20, "score": 17 },
+        { "key": "education", "label": "Education", "weight": 10, "score": 9 },
+        { "key": "formatting", "label": "Formatting & ATS Readability", "weight": 15, "score": 12 },
+        { "key": "keywords", "label": "Keywords & Industry Terms", "weight": 10, "score": 6 }
+      ]
+    }
+  ]
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | ERR_INVALID_COMPARISON | Not exactly 2 IDs, or an analysis is not `completed`. |
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 403 | ERR_FORBIDDEN | User does not own one or both analyses. |
+| 404 | ERR_ANALYSIS_NOT_FOUND | One or both analysis IDs do not exist. |
+
+---
+
+#### API-012 `GET /api/v1/job-roles`
+- **Purpose:** List all available job roles.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-015
+
+**Request:** No parameters.
+
+**Response 200**
+
+```json
+[
+  { "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901", "name": "Software Engineer", "slug": "software-engineer" },
+  { "id": "e5f6a7b8-9012-3456-efab-cdef12345678", "name": "Data Analyst", "slug": "data-analyst" }
+]
+```
+
+Cached in Redis for 1 hour (key: `job_roles:list`).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+
+---
+
+#### API-013 `POST /api/v1/job-roles`
+- **Purpose:** Add a new job role.
+- **Auth / role:** `admin` only
+- **Implements:** FR-016
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| name | body | string | Yes | 1–100 characters. Trimmed. |
+
+```json
+{ "name": "Machine Learning Engineer" }
+```
+
+**Response 201**
+
+```json
+{ "id": "f6a7b890-1234-5678-abcd-ef1234567890", "name": "Machine Learning Engineer", "slug": "machine-learning-engineer" }
+```
+
+Invalidates Redis cache key `job_roles:list`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | ERR_VALIDATION | Name is empty or > 100 chars. |
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 403 | ERR_FORBIDDEN | User is not admin. |
+| 409 | ERR_DUPLICATE_JOB_ROLE | A role with this name already exists. |
+
+---
+
+#### API-014 `POST /api/v1/subscriptions`
+- **Purpose:** Create a Resume Pro subscription via Razorpay.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-011, FR-012
+
+**Request:** No body. The plan is fixed (₹299/month).
+
+**Response 200**
+
+```json
+{
+  "subscriptionId": "a7b89012-3456-7890-abcd-ef1234567890",
+  "razorpaySubscriptionId": "sub_LgJMHBz0YPwGcq",
+  "paymentLink": "https://rzp.io/i/xyz123",
+  "status": "created"
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 409 | ERR_SUBSCRIPTION_ALREADY_ACTIVE | User already has an active subscription. |
+| 502 | ERR_PAYMENT_SERVICE_UNAVAILABLE | Razorpay API failed. |
+
+---
+
+#### API-015 `GET /api/v1/subscriptions/me`
+- **Purpose:** Get the current user's active subscription, or null.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-013
+
+**Request:** No parameters.
+
+**Response 200**
+
+```json
+{
+  "id": "a7b89012-3456-7890-abcd-ef1234567890",
+  "status": "active",
+  "plan": { "name": "Resume Pro", "amountPaise": 29900, "interval": "monthly" },
+  "currentPeriodStart": "2026-10-22T00:00:00.000Z",
+  "currentPeriodEnd": "2026-11-22T00:00:00.000Z",
+  "cancelAtPeriodEnd": false,
+  "createdAt": "2026-10-22T10:40:00.000Z"
+}
+```
+
+Returns `null` (with 200 status) if no active subscription.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+
+---
+
+#### API-016 `POST /api/v1/subscriptions/:id/cancel`
+- **Purpose:** Cancel subscription at the end of the current billing period.
+- **Auth / role:** `user` (own only)
+- **Implements:** FR-013
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| id | path | uuid | Yes | Valid UUID. Must be an active subscription owned by the user. |
+
+**Response 200**
+
+```json
+{
+  "id": "a7b89012-3456-7890-abcd-ef1234567890",
+  "status": "active",
+  "cancelAtPeriodEnd": true,
+  "currentPeriodEnd": "2026-11-22T00:00:00.000Z",
+  "message": "Your Pro access will continue until 2026-11-22. After that, your account will revert to the free tier."
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | ERR_SUBSCRIPTION_NOT_ACTIVE | Subscription is not in `active` status. |
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 403 | ERR_FORBIDDEN | User does not own this subscription. |
+| 404 | ERR_SUBSCRIPTION_NOT_FOUND | Subscription ID does not exist. |
+
+---
+
+#### API-017 `GET /api/v1/subscriptions/me/payments`
+- **Purpose:** List payment history for the current user's subscription.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-013
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| page | query | integer | No | Min 1. Default 1. |
+| limit | query | integer | No | Min 1, max 50. Default 10. |
+
+**Response 200**
+
+```json
+{
+  "data": [
+    {
+      "id": "b890abcd-1234-5678-ef01-234567890abc",
+      "amount": "₹299.00",
+      "amountPaise": 29900,
+      "currency": "INR",
+      "status": "captured",
+      "method": "upi",
+      "paidAt": "2026-10-22T10:42:00.000Z"
+    }
+  ],
+  "meta": { "page": 1, "limit": 10, "total": 1, "totalPages": 1 }
+}
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+
+---
+
+#### API-018 `POST /api/v1/webhooks/razorpay`
+- **Purpose:** Receive Razorpay webhook events. No JWT auth; uses HMAC signature verification.
+- **Auth / role:** None (webhook). Verified via `X-Razorpay-Signature` header.
+- **Implements:** FR-012
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| X-Razorpay-Signature | header | string | Yes | HMAC-SHA256 of the request body using `WEBHOOK_SECRET`. |
+| (body) | body | JSON | Yes | Razorpay webhook event payload. |
+
+**Response 200**
+
+```json
+{ "status": "ok" }
+```
+
+Handled events:
+- `subscription.activated` → Set subscription status to `active`, create payment record.
+- `subscription.charged` → Create payment record, extend `current_period_end`.
+- `subscription.cancelled` → Set subscription status to `cancelled`.
+- `subscription.halted` → Set subscription status to `halted` (payment failure).
+- `payment.failed` → Create payment record with status `failed`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | ERR_INVALID_WEBHOOK_SIGNATURE | HMAC verification failed. |
+
+---
+
+#### API-019 `GET /api/v1/health`
+- **Purpose:** Health check. No auth required.
+- **Auth / role:** None
+- **Implements:** NFR-003, NFR-007
+
+**Request:** No parameters.
+
+**Response 200**
+
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-10-22T10:45:00.000Z",
+  "services": {
+    "database": "ok",
+    "redis": "ok",
+    "s3": "ok"
+  }
+}
+```
+
+If any service is down: `"status": "degraded"`, the failed service shows `"error"`.
+
+---
 
 ### 6.3 Error code list
 
 | ID | Code | HTTP | Message | When it happens |
 |---|---|---|---|---|
+| ERR-001 | ERR_UNAUTHORIZED | 401 | Authentication required. | Missing, expired, or invalid JWT. |
+| ERR-002 | ERR_FORBIDDEN | 403 | You do not have permission to perform this action. | User lacks the required role or does not own the resource. |
+| ERR-003 | ERR_INVALID_FILE_TYPE | 400 | Only PDF and DOCX files are accepted. | Upload: wrong MIME type or magic bytes. |
+| ERR-004 | ERR_FILE_TOO_LARGE | 400 | File exceeds the 5 MB limit. | Upload: file > 5,242,880 bytes. |
+| ERR-005 | ERR_EMPTY_FILE | 400 | File is empty. | Upload: 0-byte file. |
+| ERR-006 | ERR_RESUME_NOT_FOUND | 404 | Resume not found. | Resume ID does not exist or was deleted. |
+| ERR-007 | ERR_ANALYSIS_NOT_FOUND | 404 | Analysis not found. | Analysis ID does not exist. |
+| ERR-008 | ERR_INVALID_JOB_ROLE | 400 | Invalid job role. | `jobRoleId` does not match any existing role. |
+| ERR-009 | ERR_INVALID_EXPERIENCE_LEVEL | 400 | Experience level must be one of: entry, mid, senior, lead. | Invalid `experienceLevel` value. |
+| ERR-010 | ERR_MONTHLY_LIMIT_REACHED | 403 | You have reached your monthly analysis limit (3). Upgrade to Pro for unlimited analyses. | Free user used all 3 analyses this calendar month. |
+| ERR-011 | ERR_TEXT_EXTRACTION_FAILED | 422 | Could not extract text from the resume. The file may be corrupted or image-only. | `pdf-parse` or `mammoth` could not read the file. |
+| ERR-012 | ERR_AI_SERVICE_UNAVAILABLE | 502 | The analysis service is temporarily unavailable. Please try again later. | OpenAI API returned 5xx or timed out after retry. |
+| ERR-013 | ERR_ANALYSIS_NOT_READY | 400 | Analysis is not yet completed. | PDF download requested for non-completed analysis. |
+| ERR-014 | ERR_ANALYSIS_NOT_FAILED | 400 | Only failed analyses can be retried. | Retry requested for non-failed analysis. |
+| ERR-015 | ERR_RATE_LIMITED | 429 | Too many requests. Please try again later. | Rate limit exceeded. |
+| ERR-016 | ERR_VALIDATION | 400 | Validation failed: {details}. | Request body/query/path validation failed. |
+| ERR-017 | ERR_DUPLICATE_JOB_ROLE | 409 | A job role with this name already exists. | Admin tried to create a duplicate job role. |
+| ERR-018 | ERR_SUBSCRIPTION_ALREADY_ACTIVE | 409 | You already have an active subscription. | User tried to subscribe while already subscribed. |
+| ERR-019 | ERR_SUBSCRIPTION_NOT_FOUND | 404 | Subscription not found. | Subscription ID does not exist. |
+| ERR-020 | ERR_SUBSCRIPTION_NOT_ACTIVE | 400 | Subscription is not active. | Cancel requested for non-active subscription. |
+| ERR-021 | ERR_PAYMENT_SERVICE_UNAVAILABLE | 502 | Payment service is temporarily unavailable. | Razorpay API failed. |
+| ERR-022 | ERR_INVALID_WEBHOOK_SIGNATURE | 400 | Invalid webhook signature. | Razorpay webhook HMAC verification failed. |
+| ERR-023 | ERR_INVALID_COMPARISON | 400 | Provide exactly 2 completed analysis IDs to compare. | Compare endpoint: wrong number of IDs or non-completed analysis. |
+| ERR-024 | ERR_INTERNAL | 500 | Internal server error. | Unexpected error. No internal details leaked. |
 
 ---
 
@@ -215,7 +1346,32 @@ Every FR and NFR must appear here at least once. No empty cells — write `—` 
 
 | Requirement | Component(s) | Table(s) | API(s) | Verified by |
 |---|---|---|---|---|
-| FR-001 | CMP-00x | TBL-00x | API-00x | <test / acceptance criterion> |
+| FR-001 Upload resume | CMP-001, CMP-004 | TBL-001 resumes | API-001, API-002, API-003 | AC: file type check, size check, magic bytes, S3 upload, DB record. Integration test. |
+| FR-002 Select target job role | CMP-001 | TBL-005 job_roles, TBL-002 analyses | API-005, API-012 | AC: invalid role → 400. Valid role stored in analysis. |
+| FR-003 Select experience level | CMP-001 | TBL-002 analyses | API-005 | AC: invalid level → 400. Valid level stored. |
+| FR-004 AI resume analysis | CMP-001, CMP-005 | TBL-002 analyses, TBL-003 dimension_scores | API-005, API-007 | AC: 7 dimensions scored, weighted sum = overall, p95 < 30s. Load test. |
+| FR-005 Missing skills list | CMP-005 | TBL-002 analyses (missing_skills JSONB) | API-005, API-007 | AC: 0–20 skills, each with name + reason. |
+| FR-006 Rewrite suggestions | CMP-005 | TBL-004 rewrite_suggestions | API-005, API-007 | AC: free = top 3, pro = all. totalSuggestions shown. |
+| FR-007 Free tier usage limits | CMP-001, CMP-003 | TBL-002 analyses (counted) | API-005, API-009 | AC: 4th analysis in month → 403. Failed not counted. Reset on 1st. |
+| FR-008 Download analysis PDF | CMP-001, CMP-006 | TBL-002, TBL-003, TBL-004 (read) | API-008 | AC: PDF returned, < 2 MB, includes score + chart + suggestions. Non-completed → 400. |
+| FR-009 View analysis history | CMP-001 | TBL-002 analyses | API-006 | AC: paginated, sorted by date desc, filterable by status and role. |
+| FR-010 Delete resume | CMP-001, CMP-004 | TBL-001 resumes (cascade to TBL-002, TBL-003, TBL-004) | API-004 | AC: 204 returned. S3 deleted within 48h. Associated analyses cascade-deleted. 404 after. |
+| FR-011 Resume Pro subscription | CMP-001, CMP-007 | TBL-006 subscriptions | API-014, API-015, API-016 | AC: subscription created, Pro bypasses limit, all suggestions visible, cancel at period end. |
+| FR-012 Razorpay integration | CMP-007 | TBL-006 subscriptions, TBL-007 payments | API-014, API-018 | AC: webhook signature verified, events idempotent, payment records created. |
+| FR-013 Subscription management | CMP-001, CMP-007 | TBL-006, TBL-007 | API-015, API-016, API-017 | AC: view status, cancel, payment history. Re-subscribe after cancel. |
+| FR-014 Score comparison | CMP-001 | TBL-002, TBL-003 | API-011 | AC: 2 completed analyses compared side by side. Only owner can compare. |
+| FR-015 List job roles | CMP-001, CMP-003 | TBL-005 job_roles | API-012 | AC: list returned, cached 1h in Redis. |
+| FR-016 Admin add job role | CMP-001 | TBL-005 job_roles | API-013 | AC: admin creates role, slug auto-generated, duplicate → 409, cache invalidated. |
+| FR-017 Retry failed analysis | CMP-001, CMP-005 | TBL-002, TBL-003, TBL-004 | API-010 | AC: only failed can retry, no extra credit consumed. Non-failed → 400. |
+| NFR-001 Analysis latency | CMP-005 | — (runtime metric) | API-005 | APM: p95 < 30s in staging load test. |
+| NFR-002 API latency | CMP-001 | — (runtime metric) | All CRUD APIs | APM: p95 < 200ms for CRUD, < 500ms for PDF. |
+| NFR-003 Availability | CMP-009, CMP-001 | — (infra) | API-019 | Uptime monitor: 99.5% monthly on /health. |
+| NFR-004 Scalability | CMP-001, CMP-009 | — (infra) | — (ECS auto-scaling) | k6 load test: 500 concurrent users, 50 concurrent analyses. |
+| NFR-005 Data protection | CMP-004, CMP-001 | All tables | — (encryption, no PII in logs) | Security audit: S3 SSE-S3, RDS encryption, TLS, no PII in logs. |
+| NFR-006 Data retention | CMP-008, CMP-004 | TBL-001 resumes (expires_at) | — (cron job) | Test: create expired resume → run job → verify deleted. |
+| NFR-007 Observability | CMP-001 | — (runtime) | API-019 | Dashboard: structured logs, health endpoint, X-Request-Id tracing. |
+| NFR-008 AI failure handling | CMP-005 | TBL-002 analyses (status=failed) | API-005, API-010 | Chaos test: block OpenAI → analysis fails gracefully → retry works. |
+| NFR-009 Testability | CMP-001 | — (CI) | — (jest) | CI: coverage ≥ 80%. All endpoints have integration tests. |
 
 ---
 
@@ -223,4 +1379,5 @@ Every FR and NFR must appear here at least once. No empty cells — write `—` 
 
 | Version | Date | Author | What changed | Why | Affected IDs |
 |---|---|---|---|---|---|
-| v1.0 | YYYY-MM-DD | <name> | Initial version | — | — |
+| v1.0 | 2026-10-22 | Sovan Kumar Bera | Initial specification — all 8 sections covering the SurfingBear Resume Optimizer (free tier). | First submission for Architecture Spec Homework. | All IDs (FR-001–FR-010, FR-015–FR-017, NFR-001–NFR-009, CR-001–CR-015, CMP-001–CMP-006, CMP-008–CMP-009, TBL-001–TBL-005, API-001–API-013, API-019, ERR-001–ERR-017, ERR-024) |
+| v1.1 | 2026-10-22 | Sovan Kumar Bera | **Round 2: Added Resume Pro paid plan (₹299/month via Razorpay).** Changes: (1) Added FR-011 (subscription), FR-012 (Razorpay integration), FR-013 (subscription management), FR-014 (score comparison). (2) Updated FR-006 acceptance criteria to distinguish free (top 3) vs. Pro (all) suggestions; added `totalSuggestions` field. (3) Updated FR-007 to note Pro users are exempt from the 3/month limit. (4) Added TBL-006 `subscriptions` and TBL-007 `payments`. (5) Added CMP-007 (Razorpay Integration). (6) Added API-014 through API-018 (subscription, cancel, payments, webhook). (7) Added ERR-018 through ERR-023. (8) Updated CR-006 to include `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `WEBHOOK_SECRET`. (9) Updated CR-012 to extend retention policy for Pro users. (10) Updated CR-014 to include Razorpay env config. (11) Updated architecture diagram and tech stack table. (12) Added Flow 3 sequence diagram (Razorpay subscription). (13) Updated traceability matrix with new FRs. | Requirement change: SurfingBear adding a paid tier to monetize the resume analysis feature. | FR-006, FR-007, FR-011, FR-012, FR-013, FR-014, CR-006, CR-012, CR-014, CMP-007, TBL-006, TBL-007, API-014, API-015, API-016, API-017, API-018, ERR-018, ERR-019, ERR-020, ERR-021, ERR-022, ERR-023 |
