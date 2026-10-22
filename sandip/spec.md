@@ -220,8 +220,10 @@ resume-optimizer/
 │       │   └── resume-optimizer/
 │       │       ├── page.tsx                      # upload + role picker (SCR-001)
 │       │       ├── analyses/page.tsx             # history (SCR-003)
-│       │       └── analyses/[id]/page.tsx        # result (SCR-002)
-│       ├── src/sections/{upload, analysis, history, privacy}/
+│       │       ├── analyses/[id]/page.tsx        # result (SCR-002)
+│       │       ├── analyses/compare/page.tsx     # v1.2 comparison (SCR-003)
+│       │       └── plan/page.tsx                 # v1.2 Resume Pro plan & billing (SCR-005)
+│       ├── src/sections/{upload, analysis, history, privacy, billing}/   # billing: v1.2
 │       ├── src/components/           # shared UI
 │       ├── src/services/             # api-client.ts + one service per API module
 │       ├── src/hooks/, src/utils/, src/types/, src/locales/
@@ -955,7 +957,7 @@ sequenceDiagram
 | Managed PostgreSQL (CMP-004) | System of record | TLS, credentials from env; Prisma pool size 10 per process; statement timeout 15 s | Unavailable → 503 `ERR-031` for all requests; worker pauses; queue holds jobs. |
 | Managed Redis (CMP-005) | Queue, cache, rate limits, locks | TLS, password from env; `ioredis` with 2 s connect timeout | Unavailable → writes fail closed (503), reads continue from Postgres; queue consumers reconnect with backoff; no durable data lost (BR-004). |
 | Sentry / log sink / uptime (CMP-010) | Observability | HTTPS DSN; async transport | Never blocks requests; dropped events are logged locally. |
-| Razorpay (CMP-011, v1.2) | Sell and manage the Resume Pro subscription: create subscription, hosted Checkout, cancel at cycle end, fetch state; receive lifecycle webhooks | REST with `RAZORPAY_KEY_ID` + `RAZORPAY_KEY_SECRET` (api/worker only); Checkout.js in the browser with the public key id; webhooks signed with `RAZORPAY_WEBHOOK_SECRET` (HMAC-SHA256 over the raw body). Timeouts 10 s, 2 retries on network errors for idempotent reads only. **Data shared:** user id (as `notes.userId`), e-mail and phone prefilled into Checkout (processor listed in the consent notice, L-9). No card data reaches our systems. | Create/cancel failure → 503 `ERR-052`, nothing persisted; webhook outage → provider retries for 24 h plus our daily reconciliation (FR-033 AC-5); signature mismatch → 401 `ERR-053`; duplicate/out-of-order events → no-op (BR-019). Provider down does not affect existing Pro users (entitlement is local, BR-017). |
+| Razorpay (CMP-011, v1.2) | Sell and manage the Resume Pro subscription: create subscription, hosted Checkout, cancel at cycle end, fetch state; receive lifecycle webhooks | REST with `RAZORPAY_KEY_ID` + `RAZORPAY_KEY_SECRET` (api/worker only); Checkout.js in the browser with the public key id; webhooks signed with `RAZORPAY_WEBHOOK_SECRET` (HMAC-SHA256 over the raw body). Timeouts 10 s, 2 retries on network errors for idempotent reads only. **Data shared:** user id (as `notes.userId`); e-mail and phone are entered by the user directly in Razorpay's Checkout and are not stored by this module (processor listed in the consent notice, L-9). No card data reaches our systems. | Create/cancel failure → 503 `ERR-052`, nothing persisted; webhook outage → provider retries for 24 h plus our daily reconciliation (FR-033 AC-5); signature mismatch → 401 `ERR-053`; duplicate/out-of-order events → no-op (BR-019). Provider down does not affect existing Pro users (entitlement is local, BR-017). |
 
 ### 4.5 Tech stack and reasons
 
@@ -1680,13 +1682,13 @@ Hard deletion of remaining rows happens by the retention purge (FR-023), which i
 ### 6.1 Common rules
 
 - **Base path:** `https://<api-host>/api/v1/resume-optimizer` (local: `http://localhost:4000/api/v1/resume-optimizer`). Health endpoints live at the service root (`/health`, `/ready`).
-- **Auth header / cookie:** `Authorization: Bearer <platform JWT>` on every endpoint except `/health`, `/ready`. The guard verifies RS256 against the platform JWKS (CR-002) and exposes `principal = { userId: sub, plan, role }`. Admin endpoints additionally require `role = admin`. No API-key or anonymous access exists in v1.
+- **Auth header / cookie:** `Authorization: Bearer <platform JWT>` on every endpoint except `/health`, `/ready` and the Razorpay webhook (API-024, authenticated by its HMAC signature instead — v1.2). The guard verifies RS256 against the platform JWKS (CR-002) and exposes `principal = { userId: sub, role }`; `plan` is resolved per request by `EntitlementService` (FR-034, BR-017) and attached as `principal.plan ∈ { free, pro }`. Admin endpoints additionally require `role = admin`. No API-key or anonymous access exists.
 - **Content types:** requests `application/json` except API-005 (`multipart/form-data`); responses `application/json; charset=utf-8`. Success envelope: `{ "data": <object | array>, "meta"?: { … } }`.
 - **Pagination format:** offset pagination; query `page` (default 1, min 1) and `pageSize` (default 20, min 1, max 100); response `meta: { page, pageSize, total, totalPages }`. Sorting is fixed per endpoint (documented inline). Filters are query parameters; repeated params form arrays (`status=completed&status=failed`).
 - **Date / time format and timezone:** all instants are ISO-8601 UTC with `Z` (`2026-10-19T09:30:00.000Z`); the client renders in the viewer's timezone (CR-030). Period keys follow BR-003.
 - **IDs:** UUID v4 strings. Unknown or not-owned ids return 404 (CR-007).
 - **Headers:** request `X-Request-Id` optional (UUID v4; generated if absent); responses always carry `X-Request-Id` and `X-App-Version`; 429 responses carry `Retry-After` (seconds); non-terminal status responses carry `Retry-After: 2` as a polling hint.
-- **Rate limits (CR-024):** 120 req/min per user on all endpoints; API-005 additionally `RATE_LIMIT_UPLOAD` = 10/hour per user; API-008 additionally 30/hour per user. Enforced in Redis; fail closed for write endpoints when Redis is unavailable (503 `ERR-031`).
+- **Rate limits (CR-024):** 120 req/min per user on all endpoints; API-005 additionally `RATE_LIMIT_UPLOAD` = 10/hour per user; API-008 additionally 30/hour per user; API-022 additionally 5/hour per user (v1.2); API-024 is limited per source IP only (600/min) because it carries no user. Enforced in Redis; fail closed for write endpoints when Redis is unavailable (503 `ERR-031`).
 - **Idempotency:** `DELETE` endpoints and API-012/API-014 are idempotent (a repeat returns the current state); API-008 is not idempotent by design (each call is a new analysis) and is protected by the in-flight rule (ERR-021).
 - **Validation:** DTO validation with `whitelist` and `forbidNonWhitelisted` (CR-021); unknown body fields → 400 `ERR-001`.
 - **Standard error format (must match section 1.4, CR-014):**
@@ -1730,6 +1732,11 @@ Endpoint index:
 | API-018 | GET | `/admin/audit-logs` | admin | FR-024, FR-025 |
 | API-019 | GET | `/health` (service root) | public | FR-026 |
 | API-020 | GET | `/ready` (service root) | public | FR-026 |
+| API-021 | GET | `/me/subscription` (v1.2) | user | FR-037, FR-034 |
+| API-022 | POST | `/subscriptions/checkout` (v1.2) | user (free) | FR-031 |
+| API-023 | POST | `/subscriptions/cancel` (v1.2) | user (pro) | FR-033 |
+| API-024 | POST | `/webhooks/razorpay` (v1.2) | public, HMAC signature | FR-032 |
+| API-025 | GET | `/analyses/compare` (v1.2) | user (pro) | FR-035 |
 
 Common errors on every authenticated endpoint (not repeated below): 401 `ERR-002` (missing/invalid/expired token), 403 `ERR-003` (role not allowed), 429 `ERR-005`, 500 `ERR-030`, 503 `ERR-031`.
 
@@ -1789,12 +1796,16 @@ Headers: `Cache-Control: private, max-age=600`.
     "used": 1,
     "remaining": 2,
     "resetsAt": "2026-10-31T18:30:00.000Z",
+    "unlimited": false,
     "inFlightAnalysisId": null,
     "consentRequired": false,
-    "erasurePending": false
+    "erasurePending": false,
+    "subscription": null
   }
 }
 ```
+
+Pro example (v1.2): `"plan": "pro", "limit": null, "used": 7, "remaining": null, "unlimited": true, "subscription": { "status": "active", "currentPeriodEnd": "2026-11-21T10:15:00.000Z", "cancelAtPeriodEnd": false }`.
 
 **Errors:** common only.
 
@@ -1806,7 +1817,7 @@ Headers: `Cache-Control: private, max-age=600`.
 **Response 200**
 
 ```json
-{ "data": { "consentVersion": "2026-10", "accepted": false, "acceptedAt": null, "noticeKey": "consent.notice.2026-10" } }
+{ "data": { "consentVersion": "2026-10-r2", "accepted": false, "acceptedAt": null, "noticeKey": "consent.notice.2026-10-r2" } }
 ```
 
 (`noticeKey` is the i18n key of the notice text shipped with the web app; the API does not return legal copy.)
@@ -1826,7 +1837,7 @@ Headers: `Cache-Control: private, max-age=600`.
 **Response 201**
 
 ```json
-{ "data": { "consentVersion": "2026-10", "acceptedAt": "2026-10-19T09:30:00.000Z" } }
+{ "data": { "consentVersion": "2026-10-r2", "acceptedAt": "2026-10-19T09:30:00.000Z" } }
 ```
 
 A repeat for the same version returns 200 with the original `acceptedAt`.
@@ -1934,7 +1945,7 @@ While `status` is `uploaded`/`extracting` the response carries `Retry-After: 2`.
 | HTTP | Error code | When |
 |---|---|---|
 | 400 | VALIDATION_ERROR | bad uuid, bad level, unknown field |
-| 402 | QUOTA_EXCEEDED | period limit reached (details: limit, used, plan, resetsAt) |
+| 402 | QUOTA_EXCEEDED | free plan only: monthly limit reached (details: limit, used, plan, resetsAt); never returned for `pro` (v1.2) |
 | 403 | CONSENT_REQUIRED | no consent |
 | 404 | NOT_FOUND | resume not owned/unknown |
 | 409 | RESUME_NOT_READY | resume `uploaded`/`extracting` (`details.reason = "processing"`) or its text already purged (`details.reason = "text_expired"`) |
@@ -2022,7 +2033,7 @@ While `status` is `uploaded`/`extracting` the response carries `Retry-After: 2`.
 }
 ```
 
-`band` ∈ `needs_work` (0–49) · `fair` (50–74) · `strong` (75–89) · `excellent` (90–100). Premium responses have `visible = total` and no locked items.
+`band` ∈ `needs_work` (0–49) · `fair` (50–74) · `strong` (75–89) · `excellent` (90–100). Pro responses (`"plan": "pro"`) have `visible = total`, no locked items and `"upgradeAvailable": false`.
 
 **Errors**
 
@@ -2074,7 +2085,12 @@ While `status` is `uploaded`/`extracting` the response carries `Retry-After: 2`.
 - **Auth / role:** user (own).
 - **Implements:** FR-019
 
-**Request:** path `analysisId` only; empty body.
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| analysisId | path | uuid | Yes | owned, `completed` |
+| compareWith | query | uuid | No | (v1.2, Pro only) another owned completed analysis; adds the comparison section of FR-035 to the PDF; free user → 402 `ERR-054`; invalid pair → 422 `ERR-055` |
 
 **Response 202** (new) or **200** (existing)
 
@@ -2156,7 +2172,7 @@ For `generating`: `{ "status": "generating", "url": null, "expiresAt": null }` w
 **Response 200**
 
 ```json
-{ "data": { "userId": "…", "counters": [ { "periodType": "month", "periodKey": "2026-10", "plan": "free", "count": 3, "limit": 3 } ], "analyses": [ { "analysisId": "a91f…", "status": "failed", "failureCode": "AI_TIMEOUT", "refunded": true, "attempts": 3, "createdAt": "…" } ], "pendingErasure": null } }
+{ "data": { "userId": "…", "counters": [ { "periodType": "month", "periodKey": "2026-10", "plan": "free", "count": 3, "limit": 3 } ], "analyses": [ { "analysisId": "a91f…", "status": "failed", "failureCode": "AI_TIMEOUT", "refunded": true, "attempts": 3, "createdAt": "…" } ], "pendingErasure": null, "plan": "free", "subscription": null } }
 ```
 
 Writes audit `admin.viewed_usage`.
@@ -2228,9 +2244,152 @@ Writes audit `admin.viewed_usage`.
 **Response 200 (`/ready`)**: `{ "data": { "status": "ok", "checks": { "postgres": "ok", "redis": "ok", "storage": "ok" } } }`
 **Response 503 (`/ready`)**: standard error envelope with `code = SERVICE_UNAVAILABLE`, `details.checks = { "postgres": "ok", "redis": "timeout", "storage": "ok" }`.
 
+#### API-021 `GET /me/subscription` (v1.2)
+- **Purpose:** the user's Resume Pro subscription status, period and payment history.
+- **Auth / role:** user.
+- **Implements:** FR-037, FR-034
+
+**Request:** none.
+
+**Response 200 — subscribed** (`active`, `past_due` or `cancelled` still in period)
+
+```json
+{ "data": { "subscriptionId": "5b2c…", "status": "cancelled", "plan": "pro", "priceMinor": 29900, "currency": "INR", "currentPeriodStart": "2026-10-22T10:15:00.000Z", "currentPeriodEnd": "2026-11-22T10:15:00.000Z", "cancelAtPeriodEnd": true, "cancelledAt": "2026-10-30T08:00:00.000Z", "payments": [ { "paidAt": "2026-10-22T10:15:02.000Z", "amountMinor": 29900, "currency": "INR", "providerPaymentId": "pay_…", "status": "captured" } ] } }
+```
+
+**Response 200 — not subscribed** (never, `expired` or `abandoned`)
+
+```json
+{ "data": null, "meta": { "plan": "free", "lastSubscription": { "status": "expired", "currentPeriodEnd": "2026-09-22T10:15:00.000Z" } } }
+```
+
+**Errors:** common only.
+
+#### API-022 `POST /subscriptions/checkout` (v1.2)
+- **Purpose:** create a Razorpay subscription for the fixed Resume Pro plan and return what the hosted Checkout needs.
+- **Auth / role:** user with `plan = free` and no live subscription.
+- **Implements:** FR-031
+
+**Request:** empty body (the plan and price are fixed by configuration).
+
+**Response 201**
+
+```json
+{ "data": { "subscriptionId": "5b2c…", "providerSubscriptionId": "sub_…", "checkoutKeyId": "rzp_live_…", "amountMinor": 29900, "currency": "INR", "status": "created" } }
+```
+
+The web app opens Razorpay Checkout.js with `subscription_id = providerSubscriptionId` and `key = checkoutKeyId`; after Checkout closes it polls API-021 (SCR-005). The browser result is never used to grant Pro.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 409 | SUBSCRIPTION_ALREADY_ACTIVE | a `created`, `active`, `past_due` or in-period `cancelled` subscription exists |
+| 409 | DELETION_IN_PROGRESS | pending erasure |
+| 429 | RATE_LIMITED | > 5 checkouts/hour |
+| 503 | PAYMENT_PROVIDER_ERROR | Razorpay create failed or timed out (nothing persisted) |
+
+#### API-023 `POST /subscriptions/cancel` (v1.2)
+- **Purpose:** cancel at the end of the current paid period; access continues until then.
+- **Auth / role:** user with a live subscription.
+- **Implements:** FR-033
+
+**Request:** empty body.
+
+**Response 200**
+
+```json
+{ "data": { "subscriptionId": "5b2c…", "status": "cancelled", "cancelAtPeriodEnd": true, "currentPeriodEnd": "2026-11-22T10:15:00.000Z", "proUntil": "2026-11-22T10:15:00.000Z" } }
+```
+
+A repeat call returns 200 with the same state.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 409 | SUBSCRIPTION_NOT_ACTIVE | no `active`/`past_due`/`cancelled`-in-period subscription |
+| 503 | PAYMENT_PROVIDER_ERROR | Razorpay cancel failed (local state unchanged) |
+
+#### API-024 `POST /webhooks/razorpay` (v1.2)
+- **Purpose:** receive Razorpay subscription and payment events.
+- **Auth / role:** public; authenticated by `X-Razorpay-Signature` = HMAC-SHA256(raw body, `RAZORPAY_WEBHOOK_SECRET`), compared in constant time. The route is registered with raw-body access (NestJS `rawBody: true`); no JSON transformation happens before verification.
+- **Implements:** FR-032
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| X-Razorpay-Signature | header | hex string | Yes | HMAC matches raw body |
+| X-Razorpay-Event-Id | header | string | Yes | used as `provider_event_id` (fallback: `payload.event_id`) |
+| body | body (raw JSON) | Razorpay event object | Yes | ≤ 64 KB; `event` string present; `created_at` within `WEBHOOK_TOLERANCE_SEC` of now, otherwise stored as `ignored` |
+
+**Response 200** (always, once the signature is valid — including duplicates and unknown event types)
+
+```json
+{ "data": { "received": true, "eventId": "evt_…", "duplicate": false } }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | body not JSON, missing `event`, > 64 KB |
+| 401 | WEBHOOK_SIGNATURE_INVALID | signature missing or mismatched (body discarded, IP logged) |
+| 429 | RATE_LIMITED | per-IP limit |
+| 503 | SERVICE_UNAVAILABLE | event could not be stored (Razorpay will retry) |
+
+#### API-025 `GET /analyses/compare` (v1.2)
+- **Purpose:** compare two completed analyses of the same user (Pro).
+- **Auth / role:** user with `plan = pro`.
+- **Implements:** FR-035
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| a | query | uuid | Yes | baseline analysis; owned, `completed`, not deleted |
+| b | query | uuid | Yes | comparison analysis; owned, `completed`, not deleted, `b ≠ a` |
+
+**Response 200**
+
+```json
+{
+  "data": {
+    "baseline": { "analysisId": "a91f…", "createdAt": "2026-10-01T…", "role": { "id": "2b1e…", "title": "Backend Engineer" }, "experienceLevel": "mid", "overallScore": 68 },
+    "comparison": { "analysisId": "c7d2…", "createdAt": "2026-10-20T…", "role": { "id": "2b1e…", "title": "Backend Engineer" }, "experienceLevel": "mid", "overallScore": 81 },
+    "sameRole": true,
+    "warning": null,
+    "overallDelta": 13,
+    "dimensions": [
+      { "dimension": "keyword_match", "a": 62, "b": 80, "delta": 18 },
+      { "dimension": "experience_relevance", "a": 70, "b": 76, "delta": 6 },
+      { "dimension": "formatting_parseability", "a": 85, "b": 85, "delta": 0 },
+      { "dimension": "impact_quantification", "a": 55, "b": 78, "delta": 23 },
+      { "dimension": "section_completeness", "a": 80, "b": 90, "delta": 10 },
+      { "dimension": "clarity_language", "a": 72, "b": 80, "delta": 8 }
+    ],
+    "missingSkills": { "resolved": ["Docker", "CI/CD"], "newlyMissing": [], "unchanged": ["AWS", "Redis", "Unit testing", "Message queues"] },
+    "suggestionCount": { "a": 7, "b": 4 },
+    "disclaimer": "This score is an AI estimate of how well your resume matches common ATS criteria for the selected role. It is not a guarantee of how any employer's system will rate it."
+  }
+}
+```
+
+`warning` is the i18n key `compare.differentRole` when role or level differ (`sameRole = false`).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | missing or malformed `a`/`b` |
+| 402 | PLAN_REQUIRED | user is `free` (`details.feature = "compare"`) |
+| 404 | NOT_FOUND | either analysis unknown, deleted or not owned |
+| 422 | COMPARE_INVALID | `a = b` (`details.reason = "same_analysis"`) or either not `completed` (`"not_completed"`) |
+
 ### 6.3 Error code list
 
-Numbering is grouped by family: `ERR-00x` general, `ERR-01x` upload and file, `ERR-02x` state and quota, `ERR-03x` infrastructure, `ERR-04x` analysis failure codes (returned inside a 200 body as `failureCode`, never as an HTTP error).
+Numbering is grouped by family: `ERR-00x` general, `ERR-01x` upload and file, `ERR-02x` state and quota, `ERR-03x` infrastructure, `ERR-04x` analysis failure codes (returned inside a 200 body as `failureCode`, never as an HTTP error), `ERR-05x` billing and Pro features (v1.2).
 
 | ID | Code | HTTP | Message | When it happens |
 |---|---|---|---|---|
@@ -2250,7 +2409,7 @@ Numbering is grouped by family: `ERR-00x` general, `ERR-01x` upload and file, `E
 | ERR-017 | TEXT_TOO_SHORT | 422 | We could not find enough text. Scanned images are not supported; please upload a text-based PDF or DOCX. | extracted text < MIN_EXTRACTED_CHARS (also used as a resume failure code) |
 | ERR-018 | TEXT_TOO_LONG | 422 | The document contains too much text to analyse. | extracted text > MAX_EXTRACTED_CHARS |
 | ERR-019 | RESUME_NOT_READY | 409 | Your resume is not available for analysis. | resume `uploaded`/`extracting` (`details.reason = processing`, message "still being processed") or `extracted_text` purged after 30 days (`details.reason = text_expired`, message "please upload the resume again") |
-| ERR-020 | QUOTA_EXCEEDED | 402 | You have used all your analyses for this period. | counter ≥ limit; `details { limit, used, plan, resetsAt }` |
+| ERR-020 | QUOTA_EXCEEDED | 402 | You have used all your free analyses for this month. | free plan only: counter ≥ limit; `details { limit, used, plan, resetsAt }` (never for `pro`, v1.2) |
 | ERR-021 | ANALYSIS_IN_PROGRESS | 409 | An analysis is already running. Please wait for it to finish. | in-flight unique index hit; `details.analysisId` |
 | ERR-022 | ANALYSIS_NOT_COMPLETED | 409 | The report is available once the analysis has completed. | report requested for non-completed analysis |
 | ERR-023 | UNKNOWN_ROLE | 422 | Please choose a valid target role. | role missing or inactive |
@@ -2268,6 +2427,12 @@ Numbering is grouped by family: `ERR-00x` general, `ERR-01x` upload and file, `E
 | ERR-045 | AI_MALFORMED_RESPONSE | — (failure code) | The analysis result was invalid. Your quota was not used. | JSON/schema invalid twice, or < 1 valid dimension; refunded |
 | ERR-046 | AI_REFUSED | — (failure code) | The content could not be analysed. | provider refusal; not refunded |
 | ERR-047 | CANCELLED | — (failure code) | The analysis was cancelled because the resume was deleted. | user deleted resume/analysis or requested erasure; not refunded |
+| ERR-050 | SUBSCRIPTION_ALREADY_ACTIVE | 409 | You already have a Resume Pro subscription. | a live (`created`/`active`/`past_due`/in-period `cancelled`) subscription exists (FR-031 AC-2) |
+| ERR-051 | SUBSCRIPTION_NOT_ACTIVE | 409 | You have no active subscription to cancel. | FR-033 AC-2 |
+| ERR-052 | PAYMENT_PROVIDER_ERROR | 503 | Our payment partner is temporarily unavailable. Please try again; no charge was made. | Razorpay API error or timeout on create/cancel (CMP-011) |
+| ERR-053 | WEBHOOK_SIGNATURE_INVALID | 401 | Invalid signature. | HMAC mismatch on API-024 (FR-032 AC-1) |
+| ERR-054 | PLAN_REQUIRED | 402 | This feature is part of Resume Pro. | free user calls a Pro-only feature; `details.feature` (FR-035) |
+| ERR-055 | COMPARE_INVALID | 422 | Choose two different completed analyses to compare. | FR-035 AC-1; `details.reason ∈ { same_analysis, not_completed }` |
 
 ---
 ## 7. Traceability matrix
