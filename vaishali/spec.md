@@ -1346,6 +1346,31 @@ erDiagram
   resumes }o..|| PLATFORM_USER : "user_id"
   analyses }o..|| PLATFORM_USER : "user_id"
   usage_counters }o..|| PLATFORM_USER : "user_id"
+  subscriptions }o..o| PLATFORM_USER : "user_id (NULL after erasure + paid_until)"
+  subscriptions ||--o{ payments : "paid by (v1.1)"
+  subscriptions |o..o{ webhook_events : "razorpay_subscription_id (no FK)"
+
+  subscriptions {
+    uuid id PK
+    uuid user_id
+    text razorpay_subscription_id UK
+    text status
+    timestamptz paid_until
+    boolean cancel_at_period_end
+  }
+  payments {
+    uuid id PK
+    uuid subscription_id FK
+    text razorpay_payment_id UK
+    int amount_paise
+    timestamptz paid_at
+  }
+  webhook_events {
+    bigint id PK
+    text event_id UK
+    text event_type
+    text outcome
+  }
 
   job_roles {
     uuid id PK
@@ -1572,6 +1597,61 @@ Purpose: rewrite suggestions of a completed analysis, all of them, regardless of
 
 `original_text` and `rewrite_text` are not app-encrypted: they hold only redacted text (no contact data), are protected by RDS encryption at rest, and must be read on every result view and PDF. Trade-off accepted.
 
+#### TBL-011 `subscriptions` (v1.1)
+Purpose: one Razorpay subscription for Resume Pro and the entitlement it gives (FR-025 – FR-028, FR-030).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | Our ID, used in API paths |
+| user_id | uuid | YES | | — | Platform `sub`. Set to `NULL` by the purge after erasure once `paid_until` has passed (FR-021 AC 5) |
+| user_hash | char(64) | NO | | — | SHA-256 hex of `userId` (same as TBL-009), kept so billing records stay linkable to a complaint after `user_id` is removed |
+| razorpay_subscription_id | text | NO | UK | — | e.g. `sub_00000000000001`; `CHECK (razorpay_subscription_id ~ '^sub_[A-Za-z0-9]+$')` |
+| razorpay_plan_id | text | NO | | — | `RAZORPAY_PLAN_ID` at creation |
+| status | text | NO | | `'created'` | `CHECK (status IN ('created','authenticated','active','pending','halted','cancelled','completed','expired'))` — mirrors Razorpay (§3.5.9), plus local `expired` |
+| current_period_start | timestamptz | YES | | `NULL` | From Razorpay `current_start` |
+| current_period_end | timestamptz | YES | | `NULL` | From Razorpay `current_end` |
+| paid_until | timestamptz | YES | | `NULL` | End of the last **paid** cycle; Pro ⇔ `paid_until > now()` (FR-027). Only ever increased (`GREATEST`) |
+| cancel_at_period_end | boolean | NO | | `false` | `true` after FR-028 |
+| cancel_requested_at | timestamptz | YES | | `NULL` | |
+| cancelled_at | timestamptz | YES | | `NULL` | From `subscription.cancelled` |
+| erase_requested_at | timestamptz | YES | | `NULL` | Set by FR-020 AC 7 |
+| last_event_at | timestamptz | YES | | `NULL` | Latest applied Razorpay event time (FR-026 AC 5) |
+| created_at | timestamptz | NO | | `now()` | |
+| updated_at | timestamptz | NO | | `now()` | |
+
+Table-level checks:
+- `ck_subscriptions_cancel`: `NOT cancel_at_period_end OR cancel_requested_at IS NOT NULL`
+- `ck_subscriptions_user`: `user_id IS NOT NULL OR erase_requested_at IS NOT NULL`
+
+#### TBL-012 `payments` (v1.1)
+Purpose: one row per captured Resume Pro payment (first payment and each renewal). Legal record, kept `CFG-50` (8 years) (A-16). No card/UPI data (CR-042).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| subscription_id | uuid | NO | FK → `subscriptions.id` | — | `ON DELETE RESTRICT` (a subscription with payments is only removed after its payments, FR-021 AC 5) |
+| razorpay_payment_id | text | NO | UK | — | `CHECK (razorpay_payment_id ~ '^pay_[A-Za-z0-9]+$')`; unique so API-024 and the `charged` webhook cannot insert twice |
+| razorpay_invoice_id | text | YES | | `NULL` | From the payment entity, when present |
+| amount_paise | integer | NO | | — | `CHECK (amount_paise > 0)`; expected `CFG-47` (29,900) |
+| currency | char(3) | NO | | `'INR'` | `CHECK (currency ~ '^[A-Z]{3}$')` |
+| paid_at | timestamptz | NO | | — | Payment `created_at` (webhook) or `now()` (API-024) |
+| source | text | NO | | — | `CHECK (source IN ('checkout','webhook'))` — who inserted it first |
+| created_at | timestamptz | NO | | `now()` | |
+
+#### TBL-013 `webhook_events` (v1.1)
+Purpose: idempotency and audit of Razorpay webhooks (FR-026 AC 3). The body is **not** stored (it may contain the payer's email or phone).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | bigint | NO | PK | `GENERATED ALWAYS AS IDENTITY` | |
+| event_id | text | NO | UK | — | Header `X-Razorpay-Event-Id`; `CHECK (char_length(event_id) BETWEEN 1 AND 100)` |
+| event_type | text | NO | | — | e.g. `subscription.charged`; `CHECK (char_length(event_type) BETWEEN 1 AND 100)` |
+| razorpay_subscription_id | text | YES | | `NULL` | From the payload, if any (no FK: the subscription may be unknown) |
+| razorpay_payment_id | text | YES | | `NULL` | From the payload, if any |
+| event_created_at | timestamptz | NO | | — | Payload `created_at` |
+| outcome | text | NO | | — | `CHECK (outcome IN ('processed','ignored'))` |
+| received_at | timestamptz | NO | | `now()` | |
+
 ### 5.3 Indexes
 
 | Table | Index | Columns | Why (query it serves) |
@@ -1594,6 +1674,16 @@ Purpose: rewrite suggestions of a completed analysis, all of them, regardless of
 | analysis_suggestions | `ux_suggestions_analysis_rank` (unique) | `(analysis_id, rank)` | Load in rank order; FK cascade lookup |
 | analysis_suggestions | `ux_suggestions_analysis_line` (unique) | `(analysis_id, line_index)` | At most one suggestion per line (§3.5.5 rule 1) |
 | audit_events | `ix_audit_events_created_at` | `(created_at)` | Purge (FR-021) |
+| subscriptions | `ux_subscriptions_razorpay_id` (unique) | `razorpay_subscription_id` | Webhook lookup (FR-026) |
+| subscriptions | `ix_subscriptions_user_paid_until` | `(user_id, paid_until DESC)` | Entitlement check on every request (FR-027): `SELECT max(paid_until) WHERE user_id = $1` |
+| subscriptions | `ux_subscriptions_user_live` (unique, partial) | `(user_id) WHERE status IN ('created','authenticated','active','pending')` | At most one live subscription per user, also under concurrent API-023 calls (FR-025 AC 3, A-17) |
+| subscriptions | `ix_subscriptions_reconcile` (partial) | `(paid_until) WHERE status IN ('created','authenticated','active','pending','halted')` | Daily reconciliation selection (FR-026 AC 7) |
+| subscriptions | `ix_subscriptions_erase` (partial) | `(paid_until) WHERE erase_requested_at IS NOT NULL AND user_id IS NOT NULL` | Pseudonymisation in the purge (FR-021 AC 5) |
+| payments | `ux_payments_razorpay_id` (unique) | `razorpay_payment_id` | No double insert (FR-026 AC 4) |
+| payments | `ix_payments_subscription_paid_at` | `(subscription_id, paid_at DESC)` | Latest 12 payments for API-025; FK lookup |
+| payments | `ix_payments_paid_at` | `(paid_at)` | 8-year purge (FR-021 AC 5) |
+| webhook_events | `ux_webhook_events_event_id` (unique) | `event_id` | Idempotency (FR-026 AC 3) |
+| webhook_events | `ix_webhook_events_received_at` | `(received_at)` | 90-day purge (FR-021 AC 5) |
 
 ### 5.4 Relationships and delete rules
 
@@ -1606,8 +1696,11 @@ Purpose: rewrite suggestions of a completed analysis, all of them, regardless of
 | `analysis_missing_skills.analysis_id` | `analyses.id` | many → 1 | `CASCADE` |
 | `analysis_suggestions.analysis_id` | `analyses.id` | 0..10 → 1 | `CASCADE` |
 | `consents`, `resumes`, `analyses`, `usage_counters` `.user_id` | platform user (no table) | many → 1 | Deleted by the app in FR-020 (erase all) |
+| `payments.subscription_id` (v1.1) | `subscriptions.id` | many → 1 | `RESTRICT` — payments are legal records; deleted only by the 8-year purge, before their subscription |
+| `subscriptions.user_id` (v1.1) | platform user (no table) | many → 0..1 | Not deleted by FR-020; set to `NULL` after `paid_until` (FR-021 AC 5) |
+| `webhook_events.razorpay_subscription_id` (v1.1) | `subscriptions.razorpay_subscription_id` | many → 0..1 | No FK (events for unknown subscriptions are kept as `ignored`); purged after 90 days |
 
-**What "erase all my data" deletes** (FR-020, one transaction, in this order): `analyses WHERE user_id` (cascades to TBL-006, TBL-007, TBL-010) → `resumes WHERE user_id` → `consents WHERE user_id` → `usage_counters WHERE user_id`; then inserts one `audit_events` row. Nothing with the `user_id` remains afterwards. Remaining data: the `audit_events` rows with `user_hash`, deleted after `CFG-11` (365 days). RDS backups keep deleted rows until they expire (7 days, NFR-014); this is stated in the notice's retention rule set and accepted.
+**What "erase all my data" deletes** (FR-020, one transaction, in this order): `analyses WHERE user_id` (cascades to TBL-006, TBL-007, TBL-010) → `resumes WHERE user_id` → `consents WHERE user_id` → `usage_counters WHERE user_id`; then sets `erase_requested_at = now()` on the user's `subscriptions` (after cancelling a live one at cycle end, FR-020 AC 7); then inserts one `audit_events` row. No resume or analysis data with the `user_id` remains afterwards. Billing rows (`subscriptions`, `payments`) are kept as legal records (A-16); the subscription keeps `user_id` only until `paid_until` (so the paid Pro month still works) and is then pseudonymised by the purge. Remaining data: the `audit_events` rows with `user_hash`, deleted after `CFG-11` (365 days). RDS backups keep deleted rows until they expire (7 days, NFR-014); this is stated in the notice's retention rule set and accepted.
 
 ### 5.5 Seed data (job-role catalogue)
 
