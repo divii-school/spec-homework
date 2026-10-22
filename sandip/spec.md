@@ -362,7 +362,7 @@ Upload PDF/DOCX · choose role and experience level · AI score /100 on several 
 | A-03 | Text extraction is done server-side with open-source parsers, not by sending the file to the AI provider. | Keeps the raw file (full PII) out of the third-party processor; enables masking (BR-011) and size control. | Product / DPO |
 | A-04 | Scanned image-only PDFs are rejected (no OCR). | OCR adds a dependency and cost; ATS systems also fail on image-only resumes, so rejection with guidance is the honest result. | Product |
 | A-05 | Experience levels are a fixed enum of four values. | Enough for rubric selection; avoids free text. | Product |
-| A-06 | Free quota = 3 analyses per calendar month (`Asia/Kolkata`). | "Limited number per month" needs a number; 3 allows one iteration loop without giving away the premium value. | Product |
+| A-06 | Free quota = 3 analyses per calendar month (`Asia/Kolkata`). | "Limited number per month" needs a number; 3 allows one iteration loop without giving away the Resume Pro value. | Product |
 | A-07 | **Deprecated (v1.2)** — v1.0 assumed a premium fair-use cap of 20 analyses/day. Round 2 point 2 makes Pro unlimited; the only abuse guards are the API-008 rate limit and the in-flight rule. | Kept for history; do not reuse the ID. | — |
 | A-08 | One in-flight analysis per user. | Bounds cost and worker load; a user cannot meaningfully use two parallel results. | Product |
 | A-09 | Six scoring dimensions with weights 30/20/15/15/10/10. | Mirrors what commercial ATS checkers measure (keywords, experience fit, parseability, quantified impact, completeness, clarity); weights favour role fit. | Product |
@@ -2444,14 +2444,14 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | Requirement | Component(s) | Table(s) | API(s) | Verified by |
 |---|---|---|---|---|
 | FR-001 | CMP-001, CMP-002, CMP-004 | TBL-001, TBL-002 | API-001 | TC-001 |
-| FR-002 | CMP-001, CMP-002, CMP-004, CMP-005 | TBL-010, TBL-005, TBL-003, TBL-012 | API-002 | TC-002 |
+| FR-002 | CMP-001, CMP-002, CMP-004, CMP-005 | TBL-010, TBL-005, TBL-003, TBL-012, TBL-014 (v1.2) | API-002, API-021 | TC-002, TC-131 |
 | FR-003 | CMP-001, CMP-002, CMP-004 | TBL-003, TBL-013 | API-003, API-004, API-005, API-008 | TC-003, TC-004 |
 | FR-004 | CMP-001, CMP-002, CMP-005, CMP-006 | TBL-004, TBL-013 | API-005 | TC-010, TC-011 |
 | FR-005 | CMP-002 | TBL-004, TBL-013 | API-005 | TC-012, TC-013, TC-014 |
 | FR-006 | CMP-003, CMP-006 | TBL-004 | API-006 | TC-020, TC-021 |
 | FR-007 | CMP-002, CMP-003, CMP-006 | TBL-004 | API-005, API-007 | TC-015, TC-061 |
 | FR-008 | CMP-001, CMP-002, CMP-004, CMP-005 | TBL-005, TBL-004, TBL-001, TBL-013 | API-008 | TC-030 |
-| FR-009 | CMP-002, CMP-004, CMP-005 | TBL-010, TBL-005 | API-008, API-002 | TC-040, TC-041, TC-042, TC-043 |
+| FR-009 | CMP-002, CMP-004, CMP-005 | TBL-010, TBL-005, TBL-014 (v1.2) | API-008, API-002 | TC-040, TC-041, TC-042, TC-043, TC-131 |
 | FR-010 | CMP-002, CMP-003, CMP-005 | TBL-005 | API-008, API-009 | TC-031, TC-055 |
 | FR-011 | CMP-003, CMP-007 | TBL-006, TBL-005 | API-009 | TC-032, TC-033 |
 | FR-012 | CMP-003, CMP-007 | TBL-011, TBL-002 | — (worker-internal; observable via API-009) | TC-034, TC-035 |
@@ -2459,12 +2459,12 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | FR-014 | CMP-003 | TBL-006, TBL-007, TBL-008, TBL-005 | API-009 | TC-033, TC-035 |
 | FR-015 | CMP-003, CMP-002 | TBL-007, TBL-002 | API-009 | TC-033, TC-045 |
 | FR-016 | CMP-003, CMP-002 | TBL-008 | API-009 | TC-033, TC-045 |
-| FR-017 | CMP-002, CMP-001, CMP-009 | TBL-007, TBL-008 | API-009, API-013 | TC-045, TC-046 |
+| FR-017 | CMP-002, CMP-001, CMP-009 | TBL-007, TBL-008, TBL-014 (v1.2 entitlement) | API-009, API-013 | TC-045, TC-046, TC-125 |
 | FR-018 | CMP-001, CMP-002 | TBL-005, TBL-001 | API-010 | TC-047 |
 | FR-019 | CMP-002, CMP-003, CMP-009, CMP-006 | TBL-009 | API-012 | TC-070, TC-071 |
 | FR-020 | CMP-002, CMP-006 | TBL-009, TBL-013 | API-013 | TC-072, TC-073 |
 | FR-021 | CMP-002, CMP-006, CMP-005 | TBL-004, TBL-005, TBL-008, TBL-006, TBL-009, TBL-013 | API-007, API-011 | TC-060, TC-061 |
-| FR-022 | CMP-002, CMP-003, CMP-006 | TBL-012, TBL-004, TBL-005, TBL-006, TBL-008, TBL-009, TBL-003, TBL-013 | API-014, API-015, API-017 | TC-062, TC-063, TC-064 |
+| FR-022 | CMP-002, CMP-003, CMP-006, CMP-011 (v1.2) | TBL-012, TBL-004, TBL-005, TBL-006, TBL-008, TBL-009, TBL-003, TBL-013, TBL-014, TBL-015 | API-014, API-015, API-017 | TC-062, TC-063, TC-064, TC-130 |
 | FR-023 | CMP-003, CMP-006 | TBL-004, TBL-005, TBL-009, TBL-013 | — (scheduled job) | TC-065, TC-066 |
 | FR-024 | CMP-002, CMP-003 | TBL-013 | API-018 (read) | TC-080 |
 | FR-025 | CMP-002 | TBL-010, TBL-005, TBL-012, TBL-013 | API-016, API-017, API-018 | TC-081, TC-082 |
@@ -2491,6 +2491,16 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | NFR-016 | all code | — | — | TC-116 |
 | NFR-017 | CMP-007 (stub adapter) | — | — | TC-117 |
 | NFR-018 | CMP-003, CMP-005 | TBL-005 | API-009 | TC-055 |
+| FR-031 | CMP-001, CMP-002, CMP-004, CMP-011 | TBL-014, TBL-013 | API-022, API-021 | TC-122, TC-127, TC-129 |
+| FR-032 | CMP-002, CMP-003, CMP-005, CMP-011 | TBL-015, TBL-014, TBL-013 | API-024 | TC-122, TC-123, TC-124, TC-126 |
+| FR-033 | CMP-002, CMP-003, CMP-011 | TBL-014, TBL-013 | API-023 | TC-125, TC-126, TC-129, TC-132 |
+| FR-034 | CMP-002, CMP-004, CMP-005 | TBL-014 | API-002, API-009, API-016, API-021, API-025 | TC-122, TC-125 |
+| FR-035 | CMP-001, CMP-002, CMP-009 | TBL-005, TBL-006, TBL-007, TBL-008 | API-025, API-012 | TC-128, TC-133 |
+| FR-036 | CMP-002 | TBL-010, TBL-014 | API-002, API-008, API-009 | TC-120, TC-121 |
+| FR-037 | CMP-001, CMP-002 | TBL-014, TBL-015 | API-021, API-016 | TC-122, TC-125 |
+| NFR-019 | CMP-011, CMP-001, CMP-002 | TBL-015 | API-022, API-024 | TC-123, TC-116 (`gitleaks`) |
+| NFR-020 | CMP-002, CMP-003, CMP-005 | TBL-015 | API-024 | TC-124 |
+| NFR-021 | CMP-002, CMP-005 | TBL-014 | API-021 | TC-122, TC-125 |
 
 **Company-wide requirement → where satisfied**
 
@@ -2501,7 +2511,7 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | CR-006, CR-007, CR-008 | §1.2 table, `roles.guard.ts`, ownership checks in services (404 on foreign ids); TC-007, TC-008 |
 | CR-009, CR-010, CR-011, CR-012, CR-013 | `common/logging/*` with redaction, `request-id.interceptor.ts`, TBL-013, retention config; TC-080, TC-111 |
 | CR-014, CR-015, CR-016, CR-017, CR-018 | §6.1 envelope, §6.3 list, `http-exception.filter.ts`, §4.4 timeouts/retries, web error component; TC-009, TC-050–TC-054 |
-| CR-019 – CR-028 | TLS/HSTS config, `gitleaks` CI, DTO validation, CR-022 prompt data block (FR-012), Helmet/CSP, Redis rate limiter (FR-004, §6.1), PII flags §5.2 + purge FR-023, SSE-KMS + managed encryption, `pnpm audit`, processor table §4.4 + L-1/L-2; TC-010–TC-014, TC-035, TC-052, TC-110 |
+| CR-019 – CR-028 | TLS/HSTS config, `gitleaks` CI, DTO validation, CR-022 prompt data block (FR-012), Helmet/CSP, Redis rate limiter (FR-004, §6.1), PII flags §5.2 + purge FR-023, SSE-KMS + managed encryption, `pnpm audit`, processor table §4.4 + L-1/L-2 and, since v1.2, Razorpay (CR-028, L-9, NFR-019); TC-010–TC-014, TC-035, TC-052, TC-110, TC-123 |
 | CR-029, CR-030, CR-031 | `next-intl` catalogue, ISO-8601 fields (§6.1), FR-016 AC-4; TC-114 |
 | CR-032 – CR-035 | `config/env.schema.ts`, `.env.example`, separate resources per env, seed script; TC-116 |
 | CR-036 – CR-040 | `.github/workflows/ci.yml`, tag releases, `prisma migrate deploy` in pipeline, runbook, API-019/API-020 + Sentry/uptime; TC-090 |
@@ -2511,7 +2521,7 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | TC | Type | Verifies | Summary |
 |---|---|---|---|
 | TC-001 | API integration | FR-001 | only active roles, sorted; levels with bands; cache header |
-| TC-002 | API integration | FR-002 | free month / premium day counters; `resetsAt` at period boundary in `Asia/Kolkata` |
+| TC-002 | API integration | FR-002 | free month counter and `resetsAt` at the month boundary in `Asia/Kolkata`; Pro response has `limit = null`, `unlimited = true` and the subscription summary (v1.2; the v1.0 "premium day counter" case is removed with A-07) |
 | TC-003 | API integration | FR-003 | upload/start without consent → 403 `ERR-006`; consent row + audit on accept |
 | TC-004 | API integration | FR-003 | version bump requires re-acceptance; repeat accept returns 200 original time |
 | TC-005 | API integration | CR-002/003 | expired token, wrong `kid`, wrong issuer → 401; valid token → principal |
@@ -2537,11 +2547,11 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | TC-037 | worker integration (AI stub) | FR-013 | 429 with `retry-after` honoured; 5xx retried; 400 not retried → `AI_PROVIDER_ERROR` |
 | TC-038 | worker integration (AI stub) | FR-013 | malformed JSON then valid → success; malformed twice → `AI_MALFORMED_RESPONSE`; `refusal` → `AI_REFUSED` no refund |
 | TC-039 | worker integration | FR-013 | 5 failures in 60 s open the circuit; job re-queued with 30 s delay without consuming an attempt |
-| TC-040 | API integration | FR-009 | free user 4th analysis in month → 402 with details; premium 21st in day → 402 |
+| TC-040 | API integration | FR-009 | free user 4th analysis in month → 402 with details (the v1.0 "premium 21st in day → 402" case is removed; Pro unlimited is TC-131) |
 | TC-041 | API integration (concurrency) | FR-009, BR-004 | 20 parallel starts with 1 quota left → exactly 1 × 202, 19 × 402/409; counter = limit |
 | TC-042 | API integration | FR-009 | Redis flushed mid-period → DB still authoritative; Redis down → start works via DB path |
 | TC-043 | worker integration | BR-007 | refund on `AI_*`/`INTERNAL`; no refund on `TEXT_TOO_SHORT`, `AI_REFUSED`, `CANCELLED` |
-| TC-045 | API integration | FR-015–FR-017 | free token → 3 unlocked suggestions, 5 skills, rest `{locked:true}` with totals; premium token on same analysis → all unlocked |
+| TC-045 | API integration | FR-015–FR-017 | free user → 3 unlocked suggestions, 5 skills, rest `{locked:true}` with totals; same user with an active subscription row (v1.2 entitlement, not a token claim) → all unlocked on the next read |
 | TC-046 | worker integration | FR-017, FR-019 | free user's PDF contains partial lists and upgrade note |
 | TC-047 | API integration | FR-018 | pagination, filters, deleted excluded, `reportAvailable` |
 | TC-048 | unit + Playwright | FR-027 | disclaimer text in API, UI and PDF; forbidden phrases absent from locale file |
@@ -2579,6 +2589,20 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | TC-115 | runbook drill | NFR-015 | restore from snapshot + PITR verified |
 | TC-116 | CI | NFR-016, CR-032 | typecheck, lint, coverage gates; env schema fails fast on missing var |
 | TC-117 | CI | NFR-017 | pipeline tests run with network disabled using the stub adapter |
+| TC-120 | API integration (regression, v1.2) | FR-036 | the v1.0 free scenarios run unchanged: 3 analyses/month then 402, partial gating 3 suggestions / 5 skills, history list, PDF with upgrade note |
+| TC-121 | contract (regression, v1.2) | FR-036 | a free user's API-009 and API-002 responses equal the v1.1 golden fixtures except the added `subscription`/`unlimited` fields |
+| TC-122 | API + worker integration (payment stub) | FR-031, FR-032, FR-034, FR-037, NFR-021 | checkout → 201 and `created` row; stub `subscription.activated` webhook → `active`, plan `pro` within 60 s, API-021 shows the payment |
+| TC-123 | API integration | FR-032 AC-1, NFR-019 | missing or wrong `X-Razorpay-Signature` → 401 `ERR-053`, no `payment_events` row; payload with a `card` object is stored without it |
+| TC-124 | worker integration | FR-032, BR-019, NFR-020 | duplicate event id → 200 `duplicate: true`, no state change; event older than `last_event_at` → stored `ignored`; ack measured < 1 s with processing deferred |
+| TC-125 | API + job integration (clock injected) | FR-033, FR-034, FR-017 | cancel → `cancelled`, plan still `pro`; clock past `current_period_end` → expiry job sets `expired`, plan `free`, API-009 re-applies free gating |
+| TC-126 | worker integration | FR-032 AC-4, A-20 | `payment.failed` → `past_due` with Pro kept until period end; `subscription.charged` afterwards → `active` with new period; `subscription.halted` then expiry → `expired` |
+| TC-127 | API integration | FR-031 AC-2/AC-3, BR-018, IDX-23 | checkout with a live subscription → 409 `ERR-050`; `created` row older than 24 h → `abandoned`; after expiry a new checkout creates a second row |
+| TC-128 | API integration | FR-035 | Pro: deltas, resolved/newly missing skills, `sameRole` warning for different role; free → 402 `ERR-054`; `a = b` → 422; not completed → 422; foreign id → 404 |
+| TC-129 | chaos (payment stub down) | FR-031 AC-6, FR-033 AC-7, CMP-011 | checkout → 503 `ERR-052` with no row; cancel → 503 with local state unchanged; existing Pro user still Pro |
+| TC-130 | worker integration | FR-022 AC-7, §5.4 | erasure with an active subscription calls the provider cancel, sets the sentinel `user_id` and `erased_user_hash`, reduces `payment_events.payload`, keeps rows |
+| TC-131 | API integration | FR-009, BR-020 | Pro user starts 25 analyses in a day (rate limit raised in test) → all 202, counter increments, never 402 |
+| TC-132 | job integration | FR-033 AC-5 | provider stub reports `cancelled` while local row is `active` → reconcile applies the change and writes `subscription.reconciled` |
+| TC-133 | worker integration | FR-035 AC-6 | `POST …/report?compareWith=` for Pro adds the comparison section to the PDF; for free → 402 `ERR-054` |
 
 ### 7.3 Internal consistency rules (checked before every release of this document)
 
@@ -2589,6 +2613,7 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 5. Every status value used in §3, §4 and §6 appears in the matching `CHECK` constraint in §5.2.
 6. Every endpoint in the §6.2 index has a specification block and appears in at least one row of §7.1.
 7. Every table in §5.2 appears in at least one row of §7.1.
+8. (v1.2) The plan values are exactly `free` and `pro` wherever a plan is named (the word `premium` appears only inside Deprecated notes), and BR-017 is the only plan source cited by any requirement.
 
 ---
 
@@ -2601,3 +2626,4 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | v0.1 | 2026-10-19 | Sandip Kumar Mondal | Outline created from the standard template; sections 1–2 (company-wide requirements, coding conventions) written for a NestJS + Next.js + PostgreSQL + Redis project. | Round 1 start; brief and template received 2026-10-14. | CR-001–CR-040 |
 | v1.0 | 2026-10-19 | Sandip Kumar Mondal | First complete version: 30 FRs with acceptance criteria, 18 NFRs, 16 assumptions, 16 business rules, constants, out-of-scope and DPDP legal questions (§3); 10 components, 7 sequence diagrams with failure paths, integrations, stack reasons (§4); 13 tables, 21 indexes, delete rules (§5); 20 endpoints and 35 error codes (§6); traceability and 70 verification cases (§7). | Round 1 submission — buildable from this document alone. | FR-001–FR-030, NFR-001–NFR-018, A-01–A-16, BR-001–BR-016, CMP-001–CMP-010, TBL-001–TBL-013, API-001–API-020, ERR-001–ERR-047 |
 | v1.1 | 2026-10-19 | Sandip Kumar Mondal | Builder-readiness review additions: §4.6 environment variables and rate-limit algorithm, §4.7 queues and jobs, §4.8 web token handling (BFF), screens SCR-001–SCR-004 and draft consent notice, §4.9 AI provider contract (input/output schema, prompt skeleton, error mapping), §4.10 seed catalogue (24 roles, full skill rows for two roles). Consistency fixes: ERR-019 gains `details.reason` (`processing` / `text_expired`) for resumes whose text was purged; FR-002 reads the quota counter; A-01 states admin tokens cannot call user endpoints; SEQ-03 handles a purged file; Mermaid syntax corrected (no `;` in messages, `FK, UK`). | Reading the spec as the builder showed these would otherwise be guesses; all nine Mermaid blocks now parse with Mermaid 11.4. | FR-002, FR-008, FR-012, A-01, A-16, CMP-001, CMP-007, ERR-019, API-008, SEQ-03 |
+| v1.2 | 2026-10-22 | Sandip Kumar Mondal | **Round 2 — Resume Pro paid plan.** New: FR-031 (subscribe via Razorpay), FR-032 (webhook processing), FR-033 (cancel at period end, expiry), FR-034 (plan from the module's subscription record), FR-035 (Pro-only comparison of two analyses), FR-036 (free tier unchanged), FR-037 (subscription status); NFR-019–NFR-021; A-17–A-21; BR-017–BR-020; L-9; CMP-011; SEQ-08–SEQ-10; SCR-005; TBL-014 `subscriptions`, TBL-015 `payment_events`; IDX-22–IDX-28; API-021–API-025; ERR-050–ERR-055; TC-120–TC-133; constants `PRO_*`, `CHECKOUT_ABANDON_HOURS`, `WEBHOOK_TOLERANCE_SEC`, `PLAN_CACHE_TTL_SEC`. Changed: CR-002 and A-01 (plan claim no longer used), §1.2 role table, FR-002, FR-009, FR-017, FR-018 (note), FR-022 (billing records on erasure), BR-003, BR-015, OOS-1, `CONSENT_VERSION` → `2026-10-r2` with Razorpay named in the notice, `usage_counters.plan` values, §2.2 folder tree, §4.1/4.4/4.5/4.6/4.7/4.8, §5.4 delete rules, §6.1 auth and rate limits, API-002/008/009/012/016 examples, ERR-020 wording, TC-002/040/045, §7.3 rule 8. **Deprecated (rows kept):** A-07 (premium daily cap), constant `PREMIUM_DAILY_CAP`, the `day` quota period in BR-003, "plan purchase" in OOS-1. Plan value renamed `premium` → `pro` (A-21). | Coordinator's Round 2 requirement (2026-10-22): paid plan ₹299/month via Razorpay; Pro unlimited analyses and all suggestions; history and comparison; cancel anytime with access to period end; free unchanged. | FR-002, FR-009, FR-017, FR-018, FR-022, FR-031–FR-037, NFR-019–NFR-021, CR-002, CR-028, A-01, A-07, A-17–A-21, BR-003, BR-015, BR-017–BR-020, CMP-010, CMP-011, TBL-010, TBL-014, TBL-015, IDX-22–IDX-28, API-002, API-008, API-009, API-012, API-016, API-021–API-025, ERR-020, ERR-050–ERR-055, SEQ-08–SEQ-10, SCR-002, SCR-003, SCR-004, SCR-005, L-9, TC-002, TC-040, TC-045, TC-120–TC-133 |
