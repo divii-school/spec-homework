@@ -338,7 +338,7 @@ Priorities: **Must** = needed for launch; **Should** = launch unless it slips, t
 | FR-022 | No analysis stays stuck | An analysis must always reach a final state. | Must | 1. A sweeper (BullMQ repeatable job `sweep-stuck`, every 60 s) sets `status = failed`, `failure_code = PROCESSING_TIMEOUT` on analyses in `queued`/`processing` with `created_at < now() − K-44` (5 min), releasing their reservations in the same transaction. 2. Together with FR-005 AC 7, a late worker cannot overwrite the `failed` state. |
 | FR-023 | Subscribe to Resume Pro | *(New in v2.0.)* A free user buys the Resume Pro monthly subscription (₹299) through Razorpay Checkout. | Must | 1. W-04 shows the price "₹299 / month (incl. GST)" from API-018 `price` (`K-70` = 29,900 paise), the Pro benefits (unlimited analyses, all rewrite suggestions, analysis comparison) and a "Subscribe" button. 2. API-019 is allowed when the caller has **no live subscription without a scheduled cancellation** (live = status `created`, `authenticated`, `active`, `pending`, `halted`). Otherwise → `409 ALREADY_SUBSCRIBED`. So a Pro user who has cancelled may subscribe again before the paid month ends. 3. If the caller has a `created` subscription younger than `K-72` (30 min), API-019 returns that one again (no second Razorpay call). 4. Otherwise API-019 calls Razorpay `POST /v1/subscriptions` with `plan_id = K-71`, `total_count = K-76`, `quantity = 1`, `customer_notify = 1`, `expire_by = now + K-72` (epoch seconds), `notes = { "userId": <userId> }`. If the caller still has Pro access from a cancelled subscription (`proUntil` in the future, FR-027), it also sends `start_at = proUntil` (epoch seconds), so the first charge happens when the paid month ends and the user is never charged twice for the same days. 5. The new row is stored in TBL-010 with status `created`, and an `audit_events` row `subscription_started` is written. 6. Response: `razorpayKeyId`, `razorpaySubscriptionId`, `amountPaise`, `currency`, `startsAt` (null = charged now). 7. The web client opens Razorpay Checkout (`https://checkout.razorpay.com/v1/checkout.js`) with `key`, `subscription_id`, `name: "SurfingBear Resume Pro"`, `description: "Monthly subscription"`, `theme.color` from the design system, and a `handler` that sends the three returned values to API-020. Closing the modal (`modal.ondismiss`) does nothing; the `created` row expires (FR-025 AC 8). 8. Razorpay error, or no answer within `K-75` → `503 PAYMENT_PROVIDER_UNAVAILABLE`, and nothing is stored. 9. Card, UPI and bank details are entered only in Razorpay's Checkout and never reach SurfingBear servers (NFR-022). |
 | FR-024 | Confirm payment and activate Pro | *(New in v2.0.)* After Checkout succeeds, the system verifies the payment and turns Pro on at once. | Must | 1. API-020 receives `razorpayPaymentId`, `razorpaySubscriptionId` and `razorpaySignature`. The subscription must be the caller's (TBL-010 `user_id`), otherwise → `404 NOT_FOUND`. 2. Signature check: lowercase hex HMAC-SHA256 of `razorpayPaymentId + "|" + razorpaySubscriptionId` with key `RAZORPAY_KEY_SECRET`, compared with `crypto.timingSafeEqual`. A mismatch → `400 PAYMENT_SIGNATURE_INVALID`, logged at `warn`, nothing changed. 3. The system then fetches `GET /v1/subscriptions/{id}` and `GET /v1/payments/{paymentId}` from Razorpay and updates TBL-010 (`status`, `current_start`, `current_end`, `charge_at`). 4. If the payment has `status = "captured"`, `currency = "INR"` and `amount = K-70`, and the subscription has `current_start` and `current_end`, one TBL-011 row is inserted for that period. The insert is idempotent on `razorpay_payment_id` (FR-025 may have inserted it already). Any other amount is logged at `error` and not recorded (alarm `BillingAmountMismatch`). 5. For a subscription created with `start_at` in the future, Checkout makes only an authorization payment: no TBL-011 row is created and the tier is unchanged until the first charge (FR-025). 6. Response 200 = API-018 body. When AC 4 recorded a period, `tier` is already `pro` (NFR-021). The tier cache is cleared (FR-027 AC 4). 7. If the Razorpay fetch fails → `503 PAYMENT_PROVIDER_UNAVAILABLE`. The web client then shows "Payment received — activating Resume Pro…" and polls API-018 every 3 s for up to 2 min, since the webhook (FR-025) activates Pro independently. |
-| FR-025 | Renewals, failed payments and webhooks | *(New in v2.0.)* Razorpay charges every month on its own; this module learns about charges, failures and state changes from signed webhooks, and repairs any missed ones daily. | Must | 1. API-023 receives Razorpay webhooks. It verifies header `X-Razorpay-Signature` = lowercase hex HMAC-SHA256 of the **raw** request body with `RAZORPAY_WEBHOOK_SECRET` (constant-time compare). Invalid or missing → `400 WEBHOOK_SIGNATURE_INVALID`, nothing stored. 2. Idempotency: header `x-razorpay-event-id` is stored in TBL-012 (unique). A repeated event ID → `200` without processing. 3. Handled events: `subscription.authenticated`, `subscription.activated`, `subscription.charged`, `subscription.pending`, `subscription.halted`, `subscription.cancelled`, `subscription.completed`, `subscription.updated`. For each, TBL-010 is updated from `payload.subscription.entity` (`status`, `current_start`, `current_end`, `charge_at`, `ended_at`), but only if the event's `created_at` ≥ the row's `last_event_at`, so an older event that arrives late cannot overwrite newer state. Other event types are stored with outcome `ignored`. 4. `subscription.charged` also inserts the TBL-011 period from `payload.payment.entity` with the AC 4 checks of FR-024, idempotent on the payment ID, and clears the tier cache. Pro is thereby extended to the new `current_end`. 5. An event for a `razorpay_subscription_id` not in TBL-010 → `200`, outcome `ignored`, logged at `warn`. 6. Processing runs in one DB transaction inside the request. It answers `200` within 5 s (Razorpay's timeout). On an unexpected error it answers `500` with outcome `failed`, and Razorpay retries. 7. Failed renewal: Razorpay retries the charge on its own schedule and moves the subscription to `pending`, then `halted`. No new period is recorded, so Pro ends at `proUntil` plus the grace of FR-027 AC 2. On `subscription.halted` the system cancels the subscription in Razorpay at once (`POST /v1/subscriptions/{id}/cancel` with `cancel_at_cycle_end: 0`) so that no surprise charge happens later. It writes `audit_events` `subscription_cancelled_by_system`; the user can subscribe again (FR-023). 8. Reconciliation job `billing-reconcile` (daily at `K-77`, in the worker, CMP-021): (a) every TBL-010 row with a live status is re-fetched from Razorpay and updated as in AC 3; (b) for those rows, `GET /v1/invoices?subscription_id={id}` is read and every `paid` invoice whose `payment_id` is missing from TBL-011 is inserted (AC 4 checks); (c) rows still `created` after `K-72` are set to `expired`. Counts are logged, and any inserted period raises metric `ro_billing_reconciled_total` (alarm `BillingWebhookGap`). |
+| FR-025 | Renewals, failed payments and webhooks | *(New in v2.0.)* Razorpay charges every month on its own; this module learns about charges, failures and state changes from signed webhooks, and repairs any missed ones daily. | Must | 1. API-023 receives Razorpay webhooks. It verifies header `X-Razorpay-Signature` = lowercase hex HMAC-SHA256 of the **raw** request body with `RAZORPAY_WEBHOOK_SECRET` (constant-time compare). Invalid or missing → `400 WEBHOOK_SIGNATURE_INVALID`, nothing stored. 2. Idempotency: header `x-razorpay-event-id` is stored in TBL-012 (unique). A repeated event ID → `200` without processing. 3. Handled events: `subscription.authenticated`, `subscription.activated`, `subscription.charged`, `subscription.pending`, `subscription.halted`, `subscription.cancelled`, `subscription.completed`, `subscription.updated`. For each, TBL-010 is updated from `payload.subscription.entity` (`status`, `current_start`, `current_end`, `charge_at`, `ended_at`), but only if the event's `created_at` ≥ the row's `last_event_at`, so an older event that arrives late cannot overwrite newer state. Other event types are stored with outcome `ignored`. 4. `subscription.charged` also inserts the TBL-011 period from `payload.payment.entity` with the AC 4 checks of FR-024, idempotent on the payment ID, and clears the tier cache. Pro is thereby extended to the new `current_end`. 5. An event for a `razorpay_subscription_id` not in TBL-010 → `200`, outcome `ignored`, logged at `warn`. 6. Processing runs in one DB transaction inside the request. It answers `200` within 5 s (Razorpay's timeout). On an unexpected error it answers `500` with outcome `failed`, and Razorpay retries. 7. Failed renewal: Razorpay retries the charge on its own schedule and moves the subscription to `pending`, then `halted`. No new period is recorded, so Pro ends at `proUntil` plus the grace of FR-027 AC 2. On `subscription.halted` the system cancels the subscription in Razorpay at once (`POST /v1/subscriptions/{id}/cancel` with `cancel_at_cycle_end: 0`) so that no surprise charge happens later. It writes `audit_events` `subscription_cancelled_by_system`; the user can subscribe again (FR-023). 8. Reconciliation job `billing-reconcile` (daily at `K-77`, in the worker, CMP-021): (a) every TBL-010 row with a live status is re-fetched from Razorpay and updated as in AC 3; (b) for those rows, `GET /v1/invoices?subscription_id={id}` is read and every `paid` invoice whose `payment_id` is missing from TBL-011 is inserted (AC 4 checks); (c) rows still `created` after `K-72` are set to `expired`; (d) rows `halted` whose Razorpay cancel call of AC 7 failed are cancelled again. Counts are logged, and any inserted period raises metric `ro_billing_reconciled_total` (alarm `BillingWebhookGap`). |
 | FR-026 | Cancel Resume Pro | *(New in v2.0.)* A Pro user can cancel at any time; access continues until the end of the paid month and no further charges happen. | Must | 1. API-021 cancels the caller's live subscription through Razorpay `POST /v1/subscriptions/{id}/cancel` with `{ "cancel_at_cycle_end": 1 }`, then sets `cancel_at_cycle_end = true` and `cancel_requested_at = now()` and writes `audit_events` `subscription_cancel_requested`. 2. Pro access is unchanged until `proUntil` (end of the last paid period, FR-027), with no grace period after a cancellation. No refund is made for the rest of the month (A-14). 3. Calling API-021 when a cancellation is already scheduled → `200` with the same state (idempotent, no Razorpay call). 4. No live subscription (none, or only `created` / ended ones) → `409 NO_ACTIVE_SUBSCRIPTION`. 5. A Razorpay error → `503 PAYMENT_PROVIDER_UNAVAILABLE`, and nothing changes locally (the user can retry). 6. W-04 asks for confirmation with "Your Resume Pro access stays active until {proUntil, date in IST}. You will not be charged again." 7. When the cycle ends, Razorpay sends `subscription.cancelled` (FR-025 AC 3), the row gets `status = cancelled` and `ended_at`, and the user becomes `free` at `proUntil` without any job (the tier is computed from dates, FR-027). 8. Cancelling is possible on any day, including the first day of the subscription. |
 | FR-027 | Pro entitlement (tier) | *(New in v2.0.)* One rule decides whether a user is `free` or `pro`, on every request and in every component. | Must | 1. `proUntil` = the maximum `period_end` of the user's TBL-011 rows (`null` if none). 2. Tier is `pro` if `now < proUntil`, **or** if `now < proUntil + K-78` (2 h renewal grace) **and** the user's newest TBL-010 row has `status = 'active'` and `cancel_at_cycle_end = false` (a renewal charge is expected but its webhook has not arrived yet). Otherwise the tier is `free`. 3. The platform token's `plan` claim is ignored (CR-004). Admins have no automatic Pro. 4. Tier is resolved by `TierService.getTier(userId)`. It is cached in Redis key `ro:tier:<userId>` for `K-79` (60 s), and the key is deleted in the same code path as any write to TBL-010 / TBL-011 for that user. If Redis is down, the tier is read from the DB. 5. Places that use the tier: quota (FR-008, FR-028), rewrite visibility (FR-012, FR-018), comparison access (FR-029), API-002 and API-018. All of them call `TierService`; nothing else decides the tier. 6. Unit tests cover: no periods; inside a period; exactly at `period_end` (free unless the grace applies); grace with `active`; no grace when cancelled; no grace when `halted`. |
 | FR-028 | Unlimited analyses for Pro | *(New in v2.0.)* Pro users have no monthly analysis limit. | Must | 1. When the tier at creation is `pro`, API-005 skips the quota check and reservation of FR-008 AC 3. 2. Abuse limits still apply to Pro, unchanged: `K-12` (1 analysis in progress), `K-20` requests per minute, `K-21` analyses per hour (A-18). 3. On `completed` of a Pro analysis, `usage_counters.pro_used += 1` for the IST month (statistics and fair-use alert NFR-025; it never blocks). 4. `used` counts only free-tier analyses (FR-008 AC 7). 5. `analyses.plan_at_creation = 'pro'` is stored. If the user loses Pro while the analysis runs, it still completes and is not counted against the free limit. |
@@ -1214,6 +1214,9 @@ erDiagram
   usage_counters }o..o{ analyses : "user_id + quota_period (logical, no FK)"
   consents }o..o{ analyses : "user_id (logical, no FK)"
   audit_events }o..o{ analyses : "target_id (logical, no FK)"
+  subscriptions ||--o{ subscription_payments : "paid periods (v2.0)"
+  subscriptions }o..o{ analyses : "user_id → tier (logical, no FK, v2.0)"
+  payment_events }o..o{ subscriptions : "razorpay_subscription_id (logical, v2.0)"
 
   job_roles {
     uuid id PK
@@ -1274,6 +1277,30 @@ erDiagram
     char period PK
     int used
     int reserved
+    int pro_used
+  }
+  subscriptions {
+    uuid id PK
+    uuid user_id
+    varchar razorpay_subscription_id UK
+    varchar status
+    boolean cancel_at_cycle_end
+    timestamptz current_end
+  }
+  subscription_payments {
+    uuid id PK
+    uuid subscription_id FK
+    uuid user_id
+    varchar razorpay_payment_id UK
+    int amount_paise
+    timestamptz period_start
+    timestamptz period_end
+  }
+  payment_events {
+    bigint id PK
+    varchar razorpay_event_id UK
+    varchar event_type
+    varchar outcome
   }
   audit_events {
     bigint id PK
@@ -1339,7 +1366,7 @@ Purpose: one row per analysis request: inputs, status, extracted (redacted, encr
 | experience_level | varchar(10) | NO | | — | `CHECK (experience_level IN ('fresher','junior','mid','senior','lead'))` |
 | status | varchar(12) | NO | | `'queued'` | `CHECK (status IN ('queued','processing','completed','failed'))` |
 | failure_code | varchar(32) | YES | | `NULL` | `CHECK (failure_code IN ('AI_UNAVAILABLE','AI_BAD_RESPONSE','PROCESSING_TIMEOUT','INTERNAL_ERROR'))`; `CHECK ((status = 'failed') = (failure_code IS NOT NULL))` |
-| plan_at_creation | varchar(10) | NO | | — | `CHECK (plan_at_creation IN ('free','premium'))`; for reporting only, visibility uses the current plan (FR-012) |
+| plan_at_creation | varchar(10) | NO | | — | Tier at creation (FR-027). `CHECK (plan_at_creation IN ('free','pro'))` *(changed in v2.0: was `'free','premium'`; v1 was never deployed, so no data migration is needed)*. Decides whether the analysis counts against the free quota (FR-008, FR-028); visibility uses the **current** tier (FR-012) |
 | quota_period | char(7) | NO | | — | `YYYY-MM` IST month counted (FR-008); `CHECK (quota_period ~ '^[0-9]{4}-(0[1-9]|1[0-2])$')` |
 | file_name | varchar(255) | NO | | — | Original file name for the history list: base name only, control characters removed, truncated to 255. Personal data — never logged (CR-010) |
 | file_kind | varchar(4) | NO | | — | `CHECK (file_kind IN ('pdf','docx'))` |
@@ -1415,7 +1442,8 @@ Purpose: per-user per-month quota counts (FR-008, FR-020).
 | user_id | uuid | NO | PK | — | |
 | period | char(7) | NO | PK | — | `YYYY-MM` IST; same CHECK as `analyses.quota_period` |
 | used | integer | NO | | `0` | `CHECK (used >= 0)` |
-| reserved | integer | NO | | `0` | `CHECK (reserved >= 0)`; a negative result means a bug and makes the transaction fail loudly |
+| reserved | integer | NO | | `0` | `CHECK (reserved >= 0)`; a negative result means a bug and makes the transaction fail loudly. Free-tier analyses only |
+| pro_used | integer | NO | | `0` | *(New in v2.0.)* Completed Pro analyses in the period (FR-028 AC 3, NFR-025); `CHECK (pro_used >= 0)`; never used for limits |
 | created_at | timestamptz | NO | | `now()` | |
 | updated_at | timestamptz | NO | | `now()` | |
 
@@ -1428,12 +1456,67 @@ Purpose: record of data-subject and admin actions for DPDP accountability (FR-01
 |---|---|---|---|---|---|
 | id | bigint | NO | PK | `GENERATED ALWAYS AS IDENTITY` | |
 | actor_user_id | uuid | NO | | — | Who did it |
-| action | varchar(40) | NO | | — | `CHECK (action IN ('consent_given','analysis_deleted','data_erased','job_role_created','job_role_updated','job_role_terms_replaced'))` |
-| target_type | varchar(12) | YES | | — | `CHECK (target_type IN ('analysis','job_role','consent','user'))` |
+| action | varchar(40) | NO | | — | `CHECK (action IN ('consent_given','analysis_deleted','data_erased','job_role_created','job_role_updated','job_role_terms_replaced','subscription_started','subscription_cancel_requested','subscription_cancelled_by_system'))` (last three added in v2.0) |
+| target_type | varchar(12) | YES | | — | `CHECK (target_type IN ('analysis','job_role','consent','user','subscription'))` (`subscription` added in v2.0) |
 | target_id | uuid | YES | | — | No FK: the target may be deleted |
-| metadata | jsonb | NO | | `'{}'` | Allowed keys only: `deletedAnalyses` (int), `noticeVersion`, `slug`, `changedFields` (string array), `termCount` (int). Validated by zod before insert |
+| metadata | jsonb | NO | | `'{}'` | Allowed keys only: `deletedAnalyses` (int), `noticeVersion`, `slug`, `changedFields` (string array), `termCount` (int), and since v2.0 `razorpaySubscriptionId` (string). Validated by zod before insert |
 | request_id | varchar(64) | NO | | — | |
 | created_at | timestamptz | NO | | `now()` | |
+
+#### TBL-010 `subscriptions` — *new in v2.0*
+Purpose: one row per Razorpay subscription a user starts for Resume Pro (FR-023 – FR-026, FR-030). It mirrors Razorpay's state and holds no card or contact data.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| user_id | uuid | NO | | — | Platform user ID |
+| razorpay_subscription_id | varchar(32) | NO | UK | — | `sub_…`; `CHECK (razorpay_subscription_id ~ '^sub_[A-Za-z0-9]+$')` |
+| razorpay_plan_id | varchar(32) | NO | | — | `K-71` at creation (kept so a later price/plan change stays traceable) |
+| status | varchar(16) | NO | | `'created'` | Razorpay status; `CHECK (status IN ('created','authenticated','active','pending','halted','cancelled','completed','expired'))`. **Live** = `created`, `authenticated`, `active`, `pending`, `halted` |
+| cancel_at_cycle_end | boolean | NO | | `false` | `true` after FR-026 |
+| cancel_requested_at | timestamptz | YES | | — | `CHECK ((cancel_at_cycle_end = false) OR (cancel_requested_at IS NOT NULL))` |
+| start_at | timestamptz | YES | | — | Scheduled first charge when re-subscribing during a paid month (FR-023 AC 4); `NULL` = immediate |
+| current_start | timestamptz | YES | | — | From Razorpay `current_start` |
+| current_end | timestamptz | YES | | — | From Razorpay `current_end`; `CHECK (current_end IS NULL OR current_start IS NULL OR current_end > current_start)` |
+| charge_at | timestamptz | YES | | — | Next scheduled charge (Razorpay `charge_at`); shown as `nextChargeAt` |
+| ended_at | timestamptz | YES | | — | Set for `cancelled`, `completed`, `expired` |
+| last_event_at | timestamptz | YES | | — | `created_at` of the newest applied webhook event (out-of-order guard, FR-025 AC 3) |
+| created_at | timestamptz | NO | | `now()` | |
+| updated_at | timestamptz | NO | | `now()` | `@updatedAt` |
+
+#### TBL-011 `subscription_payments` — *new in v2.0*
+Purpose: one row per successfully charged month — the paid periods that decide Pro access (FR-027) and the payment history (FR-030).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| subscription_id | uuid | NO | FK → `subscriptions.id` | — | `ON DELETE RESTRICT` |
+| user_id | uuid | NO | | — | Copied from the subscription so the entitlement query needs no join |
+| razorpay_payment_id | varchar(32) | NO | UK | — | `pay_…`; idempotency key for FR-024 / FR-025 / reconciliation |
+| razorpay_invoice_id | varchar(32) | YES | | — | `inv_…` when known |
+| amount_paise | integer | NO | | — | `CHECK (amount_paise > 0)`; equals `K-70` when recorded (FR-024 AC 4) |
+| currency | char(3) | NO | | `'INR'` | `CHECK (currency = 'INR')` |
+| period_start | timestamptz | NO | | — | Subscription `current_start` of the charged cycle |
+| period_end | timestamptz | NO | | — | Subscription `current_end` of the charged cycle; `CHECK (period_end > period_start)` |
+| paid_at | timestamptz | NO | | — | Razorpay payment `created_at` |
+| created_at | timestamptz | NO | | `now()` | |
+
+Insert is always `INSERT … ON CONFLICT (razorpay_payment_id) DO NOTHING`.
+
+#### TBL-012 `payment_events` — *new in v2.0*
+Purpose: log of received Razorpay webhooks, for idempotency and debugging (FR-025). The raw body is **not** stored, because it contains the payer's email and phone (CR-010).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | bigint | NO | PK | `GENERATED ALWAYS AS IDENTITY` | |
+| razorpay_event_id | varchar(64) | NO | UK | — | Header `x-razorpay-event-id` |
+| event_type | varchar(40) | NO | | — | e.g. `subscription.charged` |
+| razorpay_subscription_id | varchar(32) | YES | | — | From payload |
+| razorpay_payment_id | varchar(32) | YES | | — | From payload, if any |
+| event_created_at | timestamptz | NO | | — | Payload `created_at` (epoch seconds → timestamptz) |
+| outcome | varchar(10) | NO | | — | `CHECK (outcome IN ('processed','ignored','failed'))` |
+| error_code | varchar(40) | YES | | — | Short internal reason when `failed`/`ignored` (e.g. `unknown_subscription`, `amount_mismatch`) |
+| received_at | timestamptz | NO | | `now()` | |
 
 ### 5.3 Indexes
 
@@ -1456,6 +1539,16 @@ Purpose: record of data-subject and admin actions for DPDP accountability (FR-01
 | usage_counters | `usage_counters_period_idx` | `period` | Retention delete after `K-35` |
 | audit_events | `audit_events_actor_user_id_created_at_idx` | `actor_user_id, created_at` | Grievance investigation by user (manual SQL by the Data Protection team) |
 | audit_events | `audit_events_created_at_idx` | `created_at` | Retention delete after `K-36` |
+| subscriptions | `subscriptions_razorpay_subscription_id_uniq` (unique) | `razorpay_subscription_id` | Webhook / verify lookup by Razorpay ID (FR-024, FR-025) — v2.0 |
+| subscriptions | `subscriptions_user_id_live_uniq` (unique, partial `WHERE status IN ('created','authenticated','active','pending','halted') AND cancel_at_cycle_end = false`) | `user_id` | At most one live, non-cancelling subscription per user; enforces FR-023 AC 2 under concurrent requests (a race → unique violation → `409 ALREADY_SUBSCRIBED`) — v2.0 |
+| subscriptions | `subscriptions_user_id_created_at_idx` | `user_id, created_at DESC` | Newest subscription for API-018 and FR-027 AC 2; live check in API-019/API-021 — v2.0 |
+| subscriptions | `subscriptions_live_status_idx` (partial `WHERE status IN ('created','authenticated','active','pending','halted')`) | `status` | Daily reconciliation scan (FR-025 AC 8) — v2.0 |
+| subscriptions | `subscriptions_ended_at_idx` (partial `WHERE ended_at IS NOT NULL`) | `ended_at` | Retention delete after `K-73` — v2.0 |
+| subscription_payments | `subscription_payments_razorpay_payment_id_uniq` (unique) | `razorpay_payment_id` | Idempotent inserts — v2.0 |
+| subscription_payments | `subscription_payments_user_id_period_end_idx` | `user_id, period_end DESC` | `proUntil = max(period_end)` on every tier lookup (FR-027 AC 1); API-022 newest first — v2.0 |
+| subscription_payments | `subscription_payments_subscription_id_idx` | `subscription_id` | FK `RESTRICT` check and per-subscription invoice reconciliation — v2.0 |
+| payment_events | `payment_events_razorpay_event_id_uniq` (unique) | `razorpay_event_id` | Webhook de-duplication (FR-025 AC 2) — v2.0 |
+| payment_events | `payment_events_received_at_idx` | `received_at` | Retention delete after `K-74` — v2.0 |
 
 No index on `analyses.job_role_id`: no query filters by it, and the `RESTRICT` check only runs on role delete, which never happens.
 
@@ -1470,8 +1563,11 @@ No index on `analyses.job_role_id`: no query filters by it, and the `RESTRICT` c
 | `rewrite_suggestions.analysis_id` | `analyses.id` | 0..10 → 1 | `CASCADE` |
 | `analyses.user_id`, `consents.user_id`, `usage_counters.user_id`, `audit_events.actor_user_id` | platform user (external) | many → 1 user | No FK. On user erasure (FR-016): `analyses` rows deleted (children cascade); open consent ended (`withdrawn`); `usage_counters` kept until `K-35`; `audit_events` kept until `K-36` |
 | `audit_events.target_id` | any | — | No FK; keeps the ID of a deleted row on purpose |
+| `subscription_payments.subscription_id` | `subscriptions.id` | 0..n periods → 1 subscription | `RESTRICT` — billing rows are only removed by retention (FR-017), payments first, then the subscription (v2.0) |
+| `subscriptions.user_id`, `subscription_payments.user_id` | platform user (external) | many → 1 user | No FK. **Not** deleted by user erasure (FR-016 AC 6); kept `K-73` for legal reasons (v2.0) |
+| `payment_events.razorpay_subscription_id` | `subscriptions.razorpay_subscription_id` | many → 0..1 | No FK: events for unknown subscriptions are logged too (FR-025 AC 5) (v2.0) |
 
-**What a user's data deletion removes** (FR-015 / FR-016): file name, redacted text, scores, missing skills, rewrites — everything in TBL-004…TBL-007 for that user — in one transaction. What stays: TBL-003 consent rows (prove what was agreed and when it ended), TBL-008 counts, TBL-009 events; none contain resume content.
+**What a user's data deletion removes** (FR-015 / FR-016): file name, redacted text, scores, missing skills, rewrites — everything in TBL-004…TBL-007 for that user — in one transaction. What stays: TBL-003 consent rows (prove what was agreed and when it ended), TBL-008 counts, TBL-009 events, and since v2.0 the billing records TBL-010 – TBL-012 (legal obligation, NFR-023); none contain resume content.
 
 ### 5.5 Seed data (job-role catalog)
 
