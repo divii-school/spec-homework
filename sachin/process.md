@@ -5,9 +5,9 @@ List every AI conversation you used, with a link and one line on what it was for
 
 | Date | Tool | Link | What I used it for |
 |---|---|---|---|
-| 2026-10-19 | Claude Code (CLI, in VS Code) | none: local Claude Code sessions have no share link | Drafting sections 1–3 from the design decisions I fixed first (limits, plans, retention, stack); reviewed and edited before committing |
-| 2026-10-20 | Claude Code (CLI, in VS Code) | none: local Claude Code sessions have no share link | Sections 4–5: architecture, flows, the AI request and response schema checked against the current Anthropic API reference, tables and indexes; Mermaid diagrams parsed before committing |
-| 2026-10-22 | Claude Code (CLI, in VS Code) | none: local Claude Code sessions have no share link | Sections 6–7: API common rules, 16 endpoints, error code list, traceability matrix; then a separate Claude Code agent read the spec alone as a build test and listed every point it would have to guess, which were fixed before committing |
+| 2026-10-19 | Claude Code (CLI, in VS Code) | Claude Code CLI sessions have no shareable link. Session ID: `bf49d059-4487-40f6-ba0e-9c6cae0ff6f3` (transcript kept locally, can be shared on request) | Drafting sections 1–3 from the design decisions I fixed first (limits, plans, retention, stack); reviewed and edited before committing |
+| 2026-10-20 | Claude Code (CLI, in VS Code) | Claude Code CLI sessions have no shareable link. Session ID: `2ecfca20-68f6-4b10-bcb0-d91451e55899` (transcript kept locally, can be shared on request) | Sections 4–5: architecture, flows, the AI request and response schema checked against the current Anthropic API reference, tables and indexes; Mermaid diagrams parsed before committing |
+| 2026-10-22 | Claude Code (CLI, in VS Code) | Claude Code CLI sessions have no shareable link. Session ID: `23474c97-52fd-4021-a450-b961d7466b1a` (transcript kept locally, can be shared on request) | Sections 6–7: API common rules, 16 endpoints, error code list, traceability matrix; then a separate Claude Code agent read the spec alone as a build test and listed every point it would have to guess, which were fixed before committing |
 
 ## Notes
 Anything worth knowing about how you worked: decisions you changed, things the AI got wrong, what you checked by hand.
