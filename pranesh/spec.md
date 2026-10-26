@@ -2024,16 +2024,18 @@ The `ro_app` database user gets `SELECT, INSERT, UPDATE, DELETE` on the three ne
 |---|---|
 | Base path | `/api/ro/v1` on the Platform host (e.g. `https://app.surfingbear.com/api/ro/v1`). Backend port 8080. |
 | Versioning | Breaking changes go to `/api/ro/v2`; `v1` is then kept for at least 90 days. Adding an optional request field or a new response field is not breaking; clients must ignore unknown response fields. |
-| Auth | Cookie `sb_at` (CR-001…003). No other mechanism. Unauthenticated → `401 UNAUTHENTICATED`. |
-| CSRF | Header `X-Requested-By: ro-web` on every `POST`/`PUT`/`PATCH`/`DELETE` (CR-005). |
+| Auth | Cookie `sb_at` (CR-001…003). No other mechanism. Unauthenticated → `401 UNAUTHENTICATED`. Exceptions: API-017 (local only) and (v1.1) API-022, which is authenticated by its Razorpay signature (CR-041). |
+| Plan | *(v1.1)* Every authenticated request runs with the plan of FR-025 (`FREE` or `PRO`), resolved once per request. No endpoint takes the plan as input. |
+| CSRF | Header `X-Requested-By: ro-web` on every `POST`/`PUT`/`PATCH`/`DELETE` (CR-005), except API-022. |
 | Request id | Optional request header `X-Request-Id` (UUID); always returned in the response header `X-Request-Id` (CR-011). |
-| Content types | Requests: `application/json; charset=utf-8`, except API-004 (`multipart/form-data`). Responses: `application/json; charset=utf-8`, except API-010 (`application/pdf`) and `204` (no body). |
+| Content types | Requests: `application/json; charset=utf-8`, except API-004 (`multipart/form-data`) and API-022 (Razorpay sends `application/json`; the body is read as raw bytes, CR-018). Responses: `application/json; charset=utf-8`, except API-010 (`application/pdf`) and `204` (no body). |
+| Money | *(v1.1)* Amounts are integers in **paise** with a separate `currency` (`"INR"`), never decimals: `29900` = ₹299.00. |
 | JSON | `camelCase` properties; `null` fields are **included** (not omitted) so the shape is stable; enums as their constant names. |
 | Ids | UUID strings, lower case, e.g. `"8f14e45f-ceea-4e7a-9a3b-0c1d2e3f4a5b"`. A malformed id in a path → `400 VALIDATION_FAILED` (`fieldErrors[0].code = "INVALID_FORMAT"`). |
 | Date / time | ISO-8601 UTC with milliseconds and `Z`, e.g. `"2026-10-16T12:03:44.120Z"` (CR-031). |
 | Pagination | List endpoints API-005 and API-008 take `page` (1-based, default `1`, integer ≥ 1) and `size` (default `20`, 1–100). Out-of-range or non-integer values → `400 VALIDATION_FAILED` (`OUT_OF_RANGE` / `INVALID_FORMAT`). A page after the last one returns `200` with an empty `items`. Sorting is fixed per endpoint (no `sort` parameter). Response shape below. |
 | Errors | Exactly the format of §1.4 (repeated below). Codes from §6.3 only. |
-| Idempotency | API-007 requires `Idempotency-Key` (UUID). `PUT` and `DELETE` endpoints are naturally idempotent except that a second `DELETE` of the same id returns `404`. |
+| Idempotency | API-007 requires `Idempotency-Key` (UUID). `PUT` and `DELETE` endpoints are naturally idempotent except that a second `DELETE` of the same id returns `404`. *(v1.1)* API-019 reuses an unexpired checkout, API-020 and API-021 are idempotent by state (FR-026…029), and API-022 is de-duplicated by `x-razorpay-event-id` (FR-028); none of them needs `Idempotency-Key`. |
 | Rate limits | CR-020 buckets; `429 RATE_LIMITED` with `Retry-After`. |
 | Management endpoints | Served on the separate management port 8081, not routed by the ALB: `GET /actuator/health/liveness`, `GET /actuator/health/readiness` (ALB target health check), `GET /actuator/info`, `GET /actuator/prometheus`. No authentication (network-restricted to the VPC). |
 | API documentation | springdoc-openapi: `/api/ro/v3/api-docs` and `/api/ro/swagger-ui.html`, enabled only in `local` and `dev` (§1.7). |
@@ -2068,8 +2070,8 @@ Standard error format (same as §1.4):
 
 | HTTP | Error code | When |
 |---|---|---|
-| 401 | `UNAUTHENTICATED` | Missing, invalid or expired token (all except API-017) |
-| 403 | `CSRF_HEADER_MISSING` | `POST`/`PUT`/`PATCH`/`DELETE` without `X-Requested-By: ro-web` |
+| 401 | `UNAUTHENTICATED` | Missing, invalid or expired token (all except API-017 and API-022) |
+| 403 | `CSRF_HEADER_MISSING` | `POST`/`PUT`/`PATCH`/`DELETE` without `X-Requested-By: ro-web` (all except API-022) |
 | 404 | `ENDPOINT_NOT_FOUND` | Unknown path |
 | 405 | `METHOD_NOT_ALLOWED` | Known path, wrong method (with `Allow` header) |
 | 429 | `RATE_LIMITED` | CR-020 bucket exceeded |
@@ -2120,12 +2122,32 @@ Standard error format (same as §1.4):
 
 `JobRoleResponse`: `{ "id": uuid, "name": string, "description": string, "skills": [ { "name": string, "importance": "REQUIRED" \| "PREFERRED", "displayOrder": integer } ] }`. `AdminJobRoleResponse` = `JobRoleResponse` plus `"isActive": boolean, "createdAt": datetime, "updatedAt": datetime`.
 
+`SubscriptionResponse` *(v1.1)* — one TBL-013 row as the user sees it:
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | uuid | TBL-013 `id` |
+| `razorpaySubscriptionId` | string | `sub_…` |
+| `status` | `"CREATED"` \| `"ACTIVE"` \| `"PAST_DUE"` \| `"ENDED"` | §4.3.12 |
+| `displayState` | `"CHECKOUT_PENDING"` \| `"ACTIVE_RENEWING"` \| `"ACTIVE_CANCELLING"` \| `"PAST_DUE"` \| `"ENDED_WITH_ACCESS"` \| `"ENDED"` | Derived, in this order: `CREATED` → `CHECKOUT_PENDING`; `ACTIVE` and not `cancelAtPeriodEnd` → `ACTIVE_RENEWING`; `ACTIVE` and `cancelAtPeriodEnd` → `ACTIVE_CANCELLING`; `PAST_DUE` → `PAST_DUE`; `ENDED` with `paidThrough > now` → `ENDED_WITH_ACCESS`; otherwise `ENDED`. API-018 reports `NONE` at top level when there is no subscription (FR-030) |
+| `priceAmountPaise` | integer | `price_paise` |
+| `currency` | `"INR"` | |
+| `paidThrough` | datetime \| null | End of the last paid cycle |
+| `nextChargeAt` | datetime \| null | `current_period_end` when `displayState = ACTIVE_RENEWING`, otherwise `null` |
+| `cancelAtPeriodEnd` | boolean | |
+| `cancelRequestedAt` | datetime \| null | |
+| `checkoutExpiresAt` | datetime \| null | Only for `CREATED`, otherwise `null` |
+| `endedAt` | datetime \| null | |
+| `endReason` | `"USER_CANCELLED"` \| `"PAYMENT_FAILED"` \| `"CHECKOUT_EXPIRED"` \| `"COMPLETED"` \| `"CANCELLED_EXTERNALLY"` \| null | Only when `ENDED` |
+| `createdAt` | datetime | |
+
 ### 6.2 Endpoints
 
 #### API-001 `GET /api/ro/v1/me`
 - **Purpose:** The caller's plan, admin flag, consent status and this month's usage.
 - **Auth / role:** any authenticated user.
-- **Implements:** FR-001, FR-002 (criterion 1), FR-024.
+- **Implements:** FR-001, FR-002 (criterion 1), FR-024, FR-025 (v1.1).
+- **Changed in v1.1:** `plan` is `"FREE"` or `"PRO"` (was `"FREE"` or `"PREMIUM"`); new field `proUntil`; `usage.limit` and `usage.remaining` are `null` for `PRO`. Adding a field and a nullable value is non-breaking per §6.1 for the Module's own frontend, which ships in the same release.
 
 **Request:** no parameters.
 
@@ -2135,6 +2157,7 @@ Standard error format (same as §1.4):
 {
   "userId": "7d0c2f1e-5b8a-4c39-9a51-0f1f2c3d4e5f",
   "plan": "FREE",
+  "proUntil": null,
   "isAdmin": false,
   "consent": {
     "currentVersion": "2026-10-v1",
@@ -2150,6 +2173,8 @@ Standard error format (same as §1.4):
   }
 }
 ```
+
+The same user while on Resume Pro (renewing, so `proUntil` includes the 24-hour `RENEWAL_GRACE`, FR-025): `"plan": "PRO"`, `"proUntil": "2026-11-27T09:12:40.000Z"`, `"usage": { "period": "2026-10", "used": 7, "limit": null, "remaining": null, "resetsAt": "2026-10-31T18:30:00.000Z" }`.
 
 `consent.acceptedAt` is `null` when `accepted` is `false`.
 
@@ -2317,7 +2342,7 @@ Sorted by `createdAt` desc, then `id` desc. Expired-but-not-yet-deleted rows (`e
 
 #### API-007 `POST /api/ro/v1/analyses`
 - **Purpose:** Start an analysis.
-- **Auth / role:** any authenticated user with active consent and remaining quota.
+- **Auth / role:** any authenticated user with active consent and, for `FREE`, remaining quota (`PRO` has no monthly limit since v1.1, FR-009).
 - **Implements:** FR-008, FR-009.
 
 **Request**
@@ -2365,7 +2390,7 @@ Sorted by `createdAt` desc, then `id` desc. Expired-but-not-yet-deleted rows (`e
 | 404 | `RESOURCE_NOT_FOUND` | Resume missing, expired or not owned |
 | 422 | `JOB_ROLE_NOT_AVAILABLE` | Job role missing or inactive |
 | 409 | `ANALYSIS_IN_PROGRESS` | Another analysis of this user is `QUEUED`/`PROCESSING`; `details.analysisId` |
-| 403 | `QUOTA_EXCEEDED` | Monthly limit reached; `details = { "limit": 3, "used": 3, "resetsAt": "2026-10-31T18:30:00.000Z" }` |
+| 403 | `QUOTA_EXCEEDED` | `FREE` only: monthly limit reached; `details = { "limit": 3, "used": 3, "resetsAt": "2026-10-31T18:30:00.000Z" }` |
 
 #### API-008 `GET /api/ro/v1/analyses`
 - **Purpose:** The caller's analysis history.
@@ -2412,7 +2437,7 @@ Sorted by `createdAt` desc, then `id` desc.
 
 #### API-009 `GET /api/ro/v1/analyses/{analysisId}`
 - **Purpose:** Status and result of one analysis (polled by the UI).
-- **Auth / role:** owner. Suggestion visibility per the caller's current plan.
+- **Auth / role:** owner. Suggestion visibility per the caller's current plan (FR-025 at read time; `PRO` sees all, `lockedCount = 0`).
 - **Implements:** FR-011, FR-012, FR-013, FR-014, FR-015.
 
 **Request**
@@ -2476,7 +2501,7 @@ Sorted by `createdAt` desc, then `id` desc.
 
 #### API-010 `GET /api/ro/v1/analyses/{analysisId}/report`
 - **Purpose:** Download the analysis as a PDF.
-- **Auth / role:** owner.
+- **Auth / role:** owner. Suggestions included per the caller's plan at download time (FR-018, FR-025).
 - **Implements:** FR-018, FR-014 (criterion 2).
 
 **Request**
@@ -2549,11 +2574,32 @@ Sorted by `createdAt` desc, then `id` desc.
     }
   ],
   "analyses": [],
-  "usage": [ { "period": "2026-10", "used": 1 } ]
+  "usage": [ { "period": "2026-10", "used": 1 } ],
+  "subscriptions": [
+    {
+      "id": "6c1f0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+      "razorpaySubscriptionId": "sub_O1aBcDeFgHiJkL",
+      "status": "ACTIVE",
+      "priceAmountPaise": 29900,
+      "currency": "INR",
+      "termsVersion": "2026-10-pro-v1",
+      "termsAcceptedAt": "2026-10-26T09:10:02.118Z",
+      "paidThrough": "2026-11-26T09:12:40.000Z",
+      "cancelAtPeriodEnd": false,
+      "cancelRequestedAt": null,
+      "activatedAt": "2026-10-26T09:12:55.402Z",
+      "endedAt": null,
+      "endReason": null,
+      "createdAt": "2026-10-26T09:10:02.118Z",
+      "payments": [
+        { "razorpayPaymentId": "pay_O1aBcDeFgHiJkM", "amountPaise": 29900, "currency": "INR", "cycleStart": "2026-10-26T09:12:40.000Z", "cycleEnd": "2026-11-26T09:12:40.000Z", "paidAt": "2026-10-26T09:12:41.000Z" }
+      ]
+    }
+  ]
 }
 ```
 
-`analyses[]` (shown empty above for brevity) holds `AnalysisResponse` objects in which `suggestions.visible` holds **all** suggestions and `lockedCount` is `0` (FR-014 criterion 4). Arrays are sorted by `createdAt` (consents by `acceptedAt`, usage by `period`) ascending.
+`analyses[]` (shown empty above for brevity) holds `AnalysisResponse` objects in which `suggestions.visible` holds **all** suggestions and `lockedCount` is `0` (FR-014 criterion 4). *(v1.1)* `subscriptions[]` holds every TBL-013 row of the user with its TBL-014 `payments[]` (fields as shown; `[]` when the user never subscribed); webhook event rows are not exported because they hold no data about the user beyond what `payments` shows. Arrays are sorted by `createdAt` (consents by `acceptedAt`, usage by `period`, payments by `cycleStart`) ascending.
 
 **Errors:** only the common ones (including `429 RATE_LIMITED` after 5 exports per day).
 
@@ -2579,7 +2625,7 @@ Sorted by `createdAt` desc, then `id` desc.
 }
 ```
 
-Calling it with no data left still succeeds with counts `0` and creates a new TBL-010 row.
+Calling it with no data left still succeeds with counts `0` and creates a new TBL-010 row. *(v1.1)* Subscriptions and payments are not deleted and the subscription is not cancelled (FR-021 criterion 6a, CR-042); the response shape is unchanged.
 
 **Errors**
 
@@ -2687,17 +2733,250 @@ Calling it with no data left still succeeds with counts `0` and creates a new TB
 | Field | In | Type | Required | Validation |
 |---|---|---|---|---|
 | `userId` | body | uuid | yes | UUID |
-| `plan` | body | string | yes | `FREE` \| `PREMIUM` |
 | `roles` | body | string[] | no | Each `RO_ADMIN`; default `[]` |
 
-**Response 204** — header `Set-Cookie: sb_at=<JWT>; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800`. The JWT is RS256, signed with a 2048-bit RSA key pair generated in memory at start-up (`DevJwtKeyConfig`), with `iss = ro.auth.issuer`, `aud = ["resume-optimizer"]`, `sub = userId`, `sb_plan = plan`, `roles`, `exp = now + 8 h`. Under `local`, the JWT decoder trusts only that in-memory public key.
+*(changed in v1.1)* The `plan` field is **removed**: the plan no longer comes from the token (CR-006). A request that still sends `plan` gets `400 MALFORMED_REQUEST` (unknown property, CR-018). To be `PRO` locally, go through `/pro` with the stub gateway (§4.6.7).
+
+**Response 204** — header `Set-Cookie: sb_at=<JWT>; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800`. The JWT is RS256, signed with a 2048-bit RSA key pair generated in memory at start-up (`DevJwtKeyConfig`), with `iss = ro.auth.issuer`, `aud = ["resume-optimizer"]`, `sub = userId`, `roles`, `exp = now + 8 h` (no `sb_plan` since v1.1). Under `local`, the JWT decoder trusts only that in-memory public key.
 
 **Errors**
 
 | HTTP | Error code | When |
 |---|---|---|
 | 400 | `VALIDATION_FAILED` | Field missing or invalid |
+| 400 | `MALFORMED_REQUEST` | Unknown field (including the removed `plan`) or invalid JSON |
 | 403 | `CSRF_HEADER_MISSING` | Missing `X-Requested-By: ro-web` |
+
+#### API-018 `GET /api/ro/v1/me/subscription` *(v1.1)*
+- **Purpose:** The caller's plan and Resume Pro subscription, for `/pro` and for confirmation polling.
+- **Auth / role:** any authenticated user.
+- **Implements:** FR-025, FR-027 (criterion 5), FR-030.
+
+**Request:** no parameters.
+
+**Response 200**
+
+```json
+{
+  "plan": "PRO",
+  "proUntil": "2026-11-27T09:12:40.000Z",
+  "displayState": "ACTIVE_RENEWING",
+  "subscription": {
+    "id": "6c1f0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+    "razorpaySubscriptionId": "sub_O1aBcDeFgHiJkL",
+    "status": "ACTIVE",
+    "displayState": "ACTIVE_RENEWING",
+    "priceAmountPaise": 29900,
+    "currency": "INR",
+    "paidThrough": "2026-11-26T09:12:40.000Z",
+    "nextChargeAt": "2026-11-26T09:12:40.000Z",
+    "cancelAtPeriodEnd": false,
+    "cancelRequestedAt": null,
+    "checkoutExpiresAt": null,
+    "endedAt": null,
+    "endReason": null,
+    "createdAt": "2026-10-26T09:10:02.118Z"
+  },
+  "price": { "amountPaise": 29900, "currency": "INR", "interval": "MONTH" },
+  "termsVersion": "2026-10-pro-v1"
+}
+```
+
+`subscription` is the user's open subscription if there is one, otherwise their most recently created one, otherwise `null`. Top-level `displayState` is `"NONE"` when `subscription` is `null` or its `displayState` is `"ENDED"`, otherwise the subscription's `displayState`. `plan` and `proUntil` are exactly as in API-001. `price` and `termsVersion` come from §3.4, so `/pro` needs no constants of its own.
+
+**Errors:** only the common ones.
+
+#### API-019 `POST /api/ro/v1/me/subscription/checkout` *(v1.1)*
+- **Purpose:** Start (or resume) a Razorpay checkout for Resume Pro.
+- **Auth / role:** any authenticated user who is not `PRO`. Rate bucket `billing`.
+- **Implements:** FR-026.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `acceptTerms` | body | boolean | yes | Must be `true` |
+| `termsVersion` | body | string | yes | 1–30 characters; must equal `PRO_TERMS_VERSION` |
+
+```json
+{ "acceptTerms": true, "termsVersion": "2026-10-pro-v1" }
+```
+
+**Response 201** (new checkout) or **200** (unexpired checkout reused, FR-026 check 5); header `Location: /api/ro/v1/me/subscription`
+
+```json
+{
+  "subscriptionId": "6c1f0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+  "razorpaySubscriptionId": "sub_O1aBcDeFgHiJkL",
+  "keyId": "rzp_test_1DP5mmOlF5G5ag",
+  "amountPaise": 29900,
+  "currency": "INR",
+  "name": "SurfingBear",
+  "description": "Resume Pro — ₹299 per month",
+  "checkoutExpiresAt": "2026-10-26T09:40:02.118Z",
+  "stubPayment": null
+}
+```
+
+The frontend passes `keyId` and `razorpaySubscriptionId` to Razorpay Checkout (§4.6.7). `stubPayment` is non-null only with the stub gateway (`local`): `{ "razorpayPaymentId": "pay_…", "razorpaySignature": "<64 hex>" }`.
+
+**Errors** (in the FR-026 order)
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `acceptTerms` missing or not `true` (`field = "acceptTerms"`, `code = "INVALID_VALUE"`); `termsVersion` missing, blank or too long |
+| 400 | `MALFORMED_REQUEST` | Body not valid JSON or has unknown fields |
+| 409 | `PRO_TERMS_VERSION_MISMATCH` | `termsVersion` ≠ current; `details.currentVersion` |
+| 409 | `SUBSCRIPTION_ALREADY_ACTIVE` | Caller is `PRO`, or has an `ACTIVE`/`PAST_DUE` subscription; `details = { "status": "ACTIVE", "proUntil": "2026-11-27T09:12:40.000Z" }` (`proUntil` null when not `PRO`) |
+| 502 | `PAYMENT_PROVIDER_UNAVAILABLE` | Razorpay error or timeout, or the plan check of §4.4 has failed; nothing stored |
+
+#### API-020 `POST /api/ro/v1/me/subscription/verify` *(v1.1)*
+- **Purpose:** Confirm the payment Razorpay Checkout reported in the browser, and grant Pro at once.
+- **Auth / role:** owner of the subscription. Rate bucket `billing`.
+- **Implements:** FR-027.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `razorpayPaymentId` | body | string | yes | `^pay_[A-Za-z0-9]{1,36}$` |
+| `razorpaySubscriptionId` | body | string | yes | `^sub_[A-Za-z0-9]{1,36}$` |
+| `razorpaySignature` | body | string | yes | `^[0-9a-f]{64}$` |
+
+```json
+{ "razorpayPaymentId": "pay_O1aBcDeFgHiJkM", "razorpaySubscriptionId": "sub_O1aBcDeFgHiJkL", "razorpaySignature": "0b5e9c1f6a2d4e8b7c3a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c" }
+```
+
+**Response 200** (Pro granted) or **202** (signature valid, payment not captured yet; poll API-018) — body exactly as API-018.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | A field missing or not matching its pattern |
+| 400 | `MALFORMED_REQUEST` | Body not valid JSON or has unknown fields |
+| 404 | `RESOURCE_NOT_FOUND` | No TBL-013 row of the caller has this `razorpaySubscriptionId` |
+| 400 | `PAYMENT_VERIFICATION_FAILED` | Signature does not match (CR-041 rule 3); nothing changed |
+| 502 | `PAYMENT_PROVIDER_UNAVAILABLE` | Razorpay could not be asked for the subscription or invoices; the webhook or FR-032 will finish the activation |
+
+#### API-021 `POST /api/ro/v1/me/subscription/cancel` *(v1.1)*
+- **Purpose:** Cancel Resume Pro; access continues until the end of the paid cycle.
+- **Auth / role:** any authenticated user with an `ACTIVE` or `PAST_DUE` subscription. Rate bucket `billing`.
+- **Implements:** FR-029.
+
+**Request:** no body (an empty body or `{}` is accepted; any field → `400 MALFORMED_REQUEST`).
+
+**Response 200** — body exactly as API-018 after the change. Example after cancelling an `ACTIVE` subscription: `"plan": "PRO"`, `"proUntil": "2026-11-26T09:12:40.000Z"` (grace no longer applies), `"displayState": "ACTIVE_CANCELLING"`, `subscription.cancelAtPeriodEnd = true`, `subscription.nextChargeAt = null`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 409 | `NO_ACTIVE_SUBSCRIPTION` | No `ACTIVE`/`PAST_DUE` subscription (never subscribed, only a `CREATED` checkout, or already `ENDED`) |
+| 502 | `PAYMENT_PROVIDER_UNAVAILABLE` | Razorpay cancel failed or timed out; nothing changed, the user may retry |
+
+#### API-022 `POST /api/ro/v1/webhooks/razorpay` *(v1.1)*
+- **Purpose:** Receive Razorpay subscription events.
+- **Auth / role:** none in the CR-001 sense; accepted only with a valid `X-Razorpay-Signature` (CR-041 rule 2). Not rate-limited, no CSRF header (CR-005, CR-020). Called only by Razorpay.
+- **Implements:** FR-028.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `X-Razorpay-Signature` | header | string | yes | Lower-case hex HMAC-SHA256 of the raw body with `RO_RAZORPAY_WEBHOOK_SECRET` |
+| `x-razorpay-event-id` | header | string | yes | 1–64 characters |
+| body | body | JSON (raw bytes) | yes | ≤ `WEBHOOK_MAX_BODY_BYTES`; read leniently after the signature check (CR-018) |
+
+Body fields read (everything else is ignored):
+
+```json
+{
+  "entity": "event",
+  "event": "subscription.charged",
+  "created_at": 1795684361,
+  "payload": {
+    "subscription": { "entity": { "id": "sub_O1aBcDeFgHiJkL", "status": "active", "current_start": 1795684360, "current_end": 1798276360, "paid_count": 2 } },
+    "payment": { "entity": { "id": "pay_O9zYxWvUtSrQpN", "amount": 29900, "currency": "INR", "status": "captured", "invoice_id": "inv_O9zYxWvUtSrQpM", "created_at": 1795684361 } }
+  }
+}
+```
+
+This is the second cycle of the subscription in the API-018 example (`2026-11-26T09:12:40Z` → `2026-12-26T09:12:40Z`): applying it inserts one TBL-014 row and moves `paid_through` from `2026-11-26T09:12:40Z` to `2026-12-26T09:12:40Z`.
+
+**Response 200** — body `{}`, for an applied, duplicate, stale, unknown-type or unknown-subscription event (FR-028).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `INVALID_WEBHOOK_SIGNATURE` | Signature header missing or wrong; nothing stored |
+| 400 | `VALIDATION_FAILED` | `x-razorpay-event-id` missing or longer than 64 |
+| 400 | `MALFORMED_REQUEST` | Body larger than `WEBHOOK_MAX_BODY_BYTES`, or not JSON after a valid signature |
+| 500 / 503 | `INTERNAL_ERROR` / `SERVICE_UNAVAILABLE` | As everywhere; Razorpay redelivers, and de-duplication makes the redelivery safe |
+
+#### API-023 `GET /api/ro/v1/analysis-comparisons` *(v1.1)*
+- **Purpose:** Compare the scores of two of the caller's completed analyses.
+- **Auth / role:** owner of both analyses, plan `PRO`.
+- **Implements:** FR-031.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `baseId` | query | uuid | yes | UUID; the older analysis (the frontend sends the older one) |
+| `compareId` | query | uuid | yes | UUID; must differ from `baseId` |
+
+**Response 200**
+
+```json
+{
+  "base": {
+    "id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", "status": "COMPLETED", "failureCode": null,
+    "resume": { "id": null, "filename": "Asha_Resume_2026_v1.pdf" },
+    "jobRole": { "id": "10000000-0000-0000-0000-000000000001", "name": "Backend Developer (Java)" },
+    "experienceLevel": "MID", "overallScore": 62, "scoreBand": "FAIR",
+    "createdAt": "2026-10-02T08:00:00.000Z", "completedAt": "2026-10-02T08:00:47.120Z"
+  },
+  "compare": {
+    "id": "5e8f2a10-7c3b-4d6e-9f01-2a3b4c5d6e7f", "status": "COMPLETED", "failureCode": null,
+    "resume": { "id": "2b7e1516-28ae-4d2a-a6ab-f7158809cf4f", "filename": "Asha_Resume_2026.pdf" },
+    "jobRole": { "id": "10000000-0000-0000-0000-000000000001", "name": "Backend Developer (Java)" },
+    "experienceLevel": "MID", "overallScore": 73, "scoreBand": "FAIR",
+    "createdAt": "2026-10-16T12:01:00.250Z", "completedAt": "2026-10-16T12:01:41.903Z"
+  },
+  "sameTarget": true,
+  "overall": { "base": 62, "compare": 73, "delta": 11 },
+  "scoreBand": { "base": "FAIR", "compare": "FAIR", "changed": false },
+  "dimensions": [
+    { "dimension": "KEYWORD_MATCH", "label": "Keyword match", "baseScore": 62, "compareScore": 74, "delta": 12 },
+    { "dimension": "IMPACT", "label": "Quantified impact", "baseScore": 40, "compareScore": 55, "delta": 15 },
+    { "dimension": "STRUCTURE", "label": "Structure and sections", "baseScore": 80, "compareScore": 85, "delta": 5 },
+    { "dimension": "READABILITY", "label": "Readability", "baseScore": 75, "compareScore": 78, "delta": 3 },
+    { "dimension": "EXPERIENCE_FIT", "label": "Experience fit", "baseScore": 65, "compareScore": 70, "delta": 5 },
+    { "dimension": "ATS_FORMATTING", "label": "ATS-safe formatting", "baseScore": 55, "compareScore": 80, "delta": 25 }
+  ],
+  "skills": {
+    "gained": [ { "name": "Microservices", "importance": "REQUIRED" } ],
+    "lost": [],
+    "stillMissing": [ { "name": "Kafka", "importance": "PREFERRED" } ],
+    "stillMatchedCount": 9,
+    "notComparableCount": 0
+  }
+}
+```
+
+Overall check per FR-011: base 62×0.30 + 40×0.20 + 80×0.15 + 75×0.15 + 65×0.10 + 55×0.10 = 18.6 + 8 + 12 + 11.25 + 6.5 + 5.5 = 61.85 → `62`; compare is the API-009 example (72.65 → `73`). `skills` is `null` when the job roles differ (§4.6.8). The base's `resume.id` is `null` because that resume has expired (FR-016); the comparison still works because it reads only the analyses.
+
+**Errors** (in the FR-031 order)
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `baseId` or `compareId` missing or not a UUID |
+| 403 | `PRO_REQUIRED` | Caller is `FREE` |
+| 422 | `COMPARISON_SAME_ANALYSIS` | `baseId = compareId` |
+| 404 | `RESOURCE_NOT_FOUND` | Either analysis missing or not owned |
+| 409 | `ANALYSIS_NOT_COMPLETED` | Either analysis not `COMPLETED`; `details = { "analysisId": "…", "status": "PROCESSING" }` |
 
 ### 6.3 Error code list
 
@@ -2727,10 +3006,10 @@ Calling it with no data left still succeeds with counts `0` and creates a new TB
 | ERR-020 | `RESUME_LANGUAGE_UNSUPPORTED` | 422 | Only resumes in English are supported. | FR-004 check 12 | — |
 | ERR-021 | `RESUME_LIMIT_REACHED` | 409 | You can keep up to 20 resumes. Please delete one first. | FR-004 check 2 | `maxResumes` |
 | ERR-022 | `JOB_ROLE_NOT_AVAILABLE` | 422 | This job role is not available. Please choose another. | FR-008 step 6 | — |
-| ERR-023 | `QUOTA_EXCEEDED` | 403 | You have used all your analyses for this month. | FR-009 | `limit`, `used`, `resetsAt` |
+| ERR-023 | `QUOTA_EXCEEDED` | 403 | You have used all your analyses for this month. | FR-009 (since v1.1 `FREE` only) | `limit`, `used`, `resetsAt` |
 | ERR-024 | `ANALYSIS_IN_PROGRESS` | 409 | An analysis is still running. Please wait for it to finish. | FR-007, FR-008 step 7, FR-017 | `analysisId` |
 | ERR-025 | `IDEMPOTENCY_KEY_CONFLICT` | 409 | This request was already sent with different details. Please start again. | FR-008 step 3 | `analysisId` |
-| ERR-026 | `ANALYSIS_NOT_COMPLETED` | 409 | The report is available once the analysis has finished. | FR-018 | `status` |
+| ERR-026 | `ANALYSIS_NOT_COMPLETED` | 409 | The report is available once the analysis has finished. | FR-018; *(v1.1)* FR-031 (comparison; the frontend shows the `/compare` text of §4.7 instead of this message) | `status`; for FR-031 also `analysisId` |
 | ERR-027 | `RATE_LIMITED` | 429 | Too many requests. Please wait a moment and try again. | CR-020 | `bucket`, `retryAfterSeconds` |
 | ERR-028 | `JOB_ROLE_NAME_TAKEN` | 409 | A job role with this name already exists. | FR-023 | — |
 | ERR-029 | `INTERNAL_ERROR` | 500 | Something went wrong on our side. Please try again. | Unexpected exception (CR-015) | — |
@@ -2740,6 +3019,14 @@ Calling it with no data left still succeeds with counts `0` and creates a new TB
 | ERR-033 | `PROCESSING_TIMEOUT` | — | The analysis took too long. Please try again. This attempt did not use your monthly quota. | FR-019 criteria 1, 3, 4 | — |
 | ERR-034 | `AI_REFUSED` | — | We could not analyse this resume. Please check its content and try again. This attempt did not use your monthly quota. | FR-019 criterion 1 (`stop_reason = refusal`) | — |
 | ERR-035 | `JOB_ROLE_LIMIT_REACHED` | 409 | The catalogue already has the maximum of 200 job roles. | FR-023 criterion 4 | `maxRoles` |
+| ERR-036 *(v1.1)* | `PRO_REQUIRED` | 403 | This feature is part of Resume Pro. | FR-031 check 2 | — |
+| ERR-037 *(v1.1)* | `SUBSCRIPTION_ALREADY_ACTIVE` | 409 | You already have Resume Pro. | FR-026 checks 3–4 | `status`, `proUntil` |
+| ERR-038 *(v1.1)* | `PRO_TERMS_VERSION_MISMATCH` | 409 | The Resume Pro terms have changed. Please read and accept the new version. | FR-026 check 2 | `currentVersion` |
+| ERR-039 *(v1.1)* | `PAYMENT_VERIFICATION_FAILED` | 400 | We could not confirm this payment. If money was taken, Resume Pro will be activated automatically within a few minutes. | FR-027 criterion 3 | — |
+| ERR-040 *(v1.1)* | `NO_ACTIVE_SUBSCRIPTION` | 409 | You do not have an active Resume Pro subscription. | FR-029 criterion 1 | — |
+| ERR-041 *(v1.1)* | `PAYMENT_PROVIDER_UNAVAILABLE` | 502 | Our payment partner is not responding. Please try again in a few minutes. | FR-026 check 7, FR-027 criterion 4, FR-029 criterion 5, §4.4 plan check | `operation` (`create`, `verify`, `cancel`) |
+| ERR-042 *(v1.1)* | `INVALID_WEBHOOK_SIGNATURE` | 400 | The request signature is not valid. | FR-028 criterion 1 (never shown to users) | — |
+| ERR-043 *(v1.1)* | `COMPARISON_SAME_ANALYSIS` | 422 | Please choose two different analyses to compare. | FR-031 check 3 | — |
 
 ---
 
