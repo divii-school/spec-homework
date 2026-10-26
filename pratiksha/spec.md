@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | Author | Pratiksha Patil |
-| Version | v0.4 |
-| Last updated | 2026-10-23 |
+| Version | v0.5 |
+| Last updated | 2026-10-26 |
 | Status | Draft |
 | Stack | Backend NestJS (TypeScript) · Frontend Next.js · PostgreSQL · Redis |
 
@@ -37,42 +37,49 @@ Rules every Divii / Hanriver project must follow, applied to this module. Each r
 |---|---|---|---|
 | CR-001 | Authentication | The module never stores passwords or creates its own sessions. User identity comes only from the platform JWT (FR-001). The JWT is verified locally with the platform's public keys (JWKS). Keys are cached in memory for 10 min and fetched again when a token has an unknown `kid`, at most once per minute. | Code review; unit test with an expired, a wrongly signed and a valid token |
 | CR-002 | Authentication | In the browser the token travels only in the platform's `sb_session` cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, domain `.surfingbear.com`). Frontend code never reads, copies or stores the token (no `localStorage`, no `sessionStorage`, no JS-readable cookie). The `Authorization: Bearer` header is accepted only for tests and server-to-server calls. | Code review; grep CI check for `localStorage` and `sessionStorage` in `apps/web` |
-| CR-003 | Authentication | For cookie-authenticated `POST`, `PUT`, `PATCH` and `DELETE` requests, the `Origin` header must equal `FRONTEND_ORIGIN`. Otherwise the API returns `403 FORBIDDEN`. This protects against CSRF. | Integration test sending a wrong `Origin` |
+| CR-003 | Authentication | For cookie-authenticated `POST`, `PUT`, `PATCH` and `DELETE` requests, the `Origin` header must equal `FRONTEND_ORIGIN`. Otherwise the API returns `403 FORBIDDEN`. This protects against CSRF. The Razorpay webhook (API-016) carries no cookie and is exempt; it is authenticated by its signature instead (CR-034). | Integration test sending a wrong `Origin` |
 | CR-004 | Authentication | The internal platform endpoint (FR-020) uses the header `X-Service-Token`. The token is a random secret of at least 32 bytes stored in AWS Secrets Manager, compared in constant time, and rotated every 90 days. | Code review; secret rotation date in Secrets Manager |
 
 ### 1.2 Roles and permissions
 
-The role is derived from the request, never stored by this module:
-- `FREE_USER`: valid platform JWT with `plan` = `FREE`, missing or unknown.
-- `PRO_USER`: valid platform JWT with `plan` = `PRO`.
+The role is worked out on every request by CMP-002 with the Plan Resolver of CMP-021. Since v0.5 the plan comes from this module's own subscription records (A-14). The JWT `plan` claim is ignored.
+- `FREE_USER`: valid platform JWT, and the user has no subscription row with `current_period_end > now()` (TBL-011).
+- `PRO_USER`: valid platform JWT, and the user has a subscription row with `current_period_end > now()`, whatever its status. This includes a subscription that was cancelled but whose paid month has not ended yet (FR-023).
 - `PLATFORM_SERVICE`: valid `X-Service-Token` (FR-020). No user JWT.
+- `RAZORPAY`: a webhook request with a valid `X-Razorpay-Signature` (FR-022, CR-034). No user JWT.
 
-| Permission | FREE_USER | PRO_USER | PLATFORM_SERVICE |
-|---|---|---|---|
-| List job roles and experience levels (FR-003) | ✅ | ✅ | ❌ |
-| View and accept the consent notice (FR-002) | ✅ | ✅ | ❌ |
-| Upload a resume and start an analysis (FR-004) | ✅ up to `FREE_MONTHLY_ANALYSES`/month | ✅ up to `PRO_MONTHLY_ANALYSES`/month | ❌ |
-| View own quota usage (FR-019) | ✅ | ✅ | ❌ |
-| View own history and analysis status (FR-011, FR-013) | ✅ | ✅ | ❌ |
-| View own analysis result (FR-014) | ✅ partial (FR-010) | ✅ full | ❌ |
-| Download own PDF report (FR-015) | ✅ partial (FR-010) | ✅ full | ❌ |
-| Delete own analysis (FR-016) | ✅ | ✅ | ❌ |
-| Delete all own data (FR-017) | ✅ | ✅ | ❌ |
-| Erase any user's data (FR-020) | ❌ | ❌ | ✅ |
-| Read or change another user's data | ❌ | ❌ | ❌ |
+| Permission | FREE_USER | PRO_USER | PLATFORM_SERVICE | RAZORPAY |
+|---|---|---|---|---|
+| List job roles and experience levels (FR-003) | ✅ | ✅ | ❌ | ❌ |
+| View and accept the consent notice (FR-002) | ✅ | ✅ | ❌ | ❌ |
+| Upload a resume and start an analysis (FR-004) | ✅ up to `FREE_MONTHLY_ANALYSES`/month | ✅ no monthly limit (FR-006) | ❌ | ❌ |
+| View own quota usage (FR-019) | ✅ | ✅ | ❌ | ❌ |
+| View own history and analysis status (FR-011, FR-013) | ✅ | ✅ | ❌ | ❌ |
+| Filter history and see dimension scores in the list (FR-025) | ❌ `403 PRO_REQUIRED` | ✅ | ❌ | ❌ |
+| Compare two own analyses (FR-026) | ❌ `403 PRO_REQUIRED` | ✅ | ❌ | ❌ |
+| View own analysis result (FR-014) | ✅ partial (FR-010) | ✅ full | ❌ | ❌ |
+| Download own PDF report (FR-015) | ✅ partial (FR-010) | ✅ full | ❌ | ❌ |
+| Delete own analysis (FR-016) | ✅ | ✅ | ❌ | ❌ |
+| Delete all own data (FR-017) | ✅ | ✅ | ❌ | ❌ |
+| View own plan and subscription (FR-024) | ✅ | ✅ | ❌ | ❌ |
+| Subscribe to Resume Pro (FR-021) | ✅ | ❌ `409 SUBSCRIPTION_ALREADY_ACTIVE` | ❌ | ❌ |
+| Cancel own Resume Pro (FR-023) | ❌ `404 SUBSCRIPTION_NOT_FOUND` | ✅ | ❌ | ❌ |
+| Report subscription and payment events (FR-022) | ❌ | ❌ | ❌ | ✅ |
+| Erase any user's data (FR-020) | ❌ | ❌ | ✅ | ❌ |
+| Read or change another user's data | ❌ | ❌ | ❌ | ❌ |
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
 | CR-005 | Authorization | Every database query on a user-owned table (§5) filters by the current user's `user_id`. The filter is applied in the service layer, not left to the controller. A missing row and another user's row give the same `404`. | Code review; E2E test where user B requests user A's analysis and gets `404 ANALYSIS_NOT_FOUND` |
-| CR-006 | Authorization | Plan-based filtering (FR-010) happens on the backend before the response is built. Locked items are never sent to the browser. | E2E test: a FREE response contains at most `FREE_VISIBLE_SUGGESTIONS` suggestions |
+| CR-006 | Authorization | Plan-based filtering (FR-010) and Pro-only features (FR-025, FR-026) are decided on the backend from the plan the Plan Resolver (CMP-021) returns for this request. Locked items are never sent to the browser. The frontend never decides the plan itself. | E2E test: a FREE response contains at most `FREE_VISIBLE_SUGGESTIONS` suggestions |
 
 ### 1.3 Logging
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
 | CR-007 | Logging | Logs are JSON, one object per line, written to stdout (collected by CloudWatch Logs) using `nestjs-pino`. Required fields: `timestamp` (ISO 8601 UTC), `level`, `service` (`api` or `worker`), `env`, `requestId`, `message`. Added when known: `userId` (internal UUID), `analysisId`, `event`, `durationMs`, `errorCode`. | Log sample review in staging |
-| CR-008 | Logging / privacy | Never logged: resume text, file names, file contents, AI prompts and responses, JWTs, cookies, `X-Service-Token`, email addresses, IP addresses. Pino `redact` removes `req.headers.cookie`, `req.headers.authorization`, `req.headers["x-service-token"]` and any field named `text`, `fileName`, `originalText`, `suggestedText`. | NFR-010 log-scan test; code review |
-| CR-009 | Logging | Levels: `error` = needs a person to act; `warn` = handled problem (AI retry, rate limit hit); `info` = business event; `debug` = local and dev only. Business events logged at `info`: `analysis.created`, `analysis.completed`, `analysis.failed`, `analysis.deleted`, `user.data_erased`, `consent.accepted`, `purge.completed`. | Code review |
+| CR-008 | Logging / privacy | Never logged: resume text, file names, file contents, AI prompts and responses, JWTs, cookies, `X-Service-Token`, email addresses, IP addresses, Razorpay webhook bodies, Razorpay signatures and key secrets, and any card, UPI or bank detail. Pino `redact` removes `req.headers.cookie`, `req.headers.authorization`, `req.headers["x-service-token"]`, `req.headers["x-razorpay-signature"]`, `req.body` on API-015 and API-016, and any field named `text`, `fileName`, `originalText`, `suggestedText`, `razorpaySignature`. Razorpay subscription and payment IDs may be logged; they identify no person on their own. | NFR-010 log-scan test; code review |
+| CR-009 | Logging | Levels: `error` = needs a person to act; `warn` = handled problem (AI retry, rate limit hit); `info` = business event; `debug` = local and dev only. Business events logged at `info`: `analysis.created`, `analysis.completed`, `analysis.failed`, `analysis.deleted`, `user.data_erased`, `consent.accepted`, `purge.completed`, `subscription.created`, `subscription.activated`, `subscription.charged`, `subscription.cancel_requested`, `subscription.cancelled`, `subscription.halted`, `subscription.reconciled`. `warn`: webhook with an invalid signature, webhook for an unknown subscription, charge amount ≠ `PRO_PRICE_PAISE`. | Code review |
 | CR-010 | Logging | Each request gets a `requestId`. The value of an incoming `X-Request-Id` header is used if it is a valid UUID, otherwise a new UUID v4 is generated. It is returned in the `X-Request-Id` response header and in every error body, and passed in the background job data so worker logs carry the same ID. | Integration test |
 | CR-011 | Logging | Log retention: 30 days in CloudWatch for dev and staging, 90 days for prod. | AWS log group settings |
 
@@ -102,21 +109,22 @@ Every API error uses this **one** format. No other error shape is allowed.
 |---|---|---|---|
 | CR-012 | Error handling | One global NestJS exception filter (`HttpExceptionFilter`) builds every error response. Code throws `AppException(code, details?)`, and the HTTP status and message come from the error list in `packages/shared/src/error-codes.ts`, which matches §6.3. | Unit test of the filter; code review |
 | CR-013 | Error handling | Any unexpected error returns `500 INTERNAL_ERROR` with the message "Something went wrong. Please try again." The stack trace is logged at `error` level and never sent to the client. | Integration test with a forced exception |
-| CR-014 | Error handling | Status codes are used only as follows: `400` invalid input, `401` not authenticated, `403` authenticated but not allowed (consent, origin), `404` not found or not yours, `409` conflicts with current state, `413` file too large, `415` wrong file type, `422` readable request but the file content cannot be used, `429` quota or rate limit, `500` server fault, `503` a required dependency is down (health check, or platform keys never loaded, §4.4). | Code review against §6.3 |
+| CR-014 | Error handling | Status codes are used only as follows: `400` invalid input, `401` not authenticated, `403` authenticated but not allowed (consent, origin), `404` not found or not yours, `409` conflicts with current state, `413` file too large, `415` wrong file type, `422` readable request but the file content cannot be used, `429` quota or rate limit, `500` server fault, `503` a required dependency is down (health check, platform keys never loaded, or Razorpay unreachable, §4.4). A Razorpay webhook or payment signature that does not verify is `400`, not `401`, because the caller is not a logged-in user. | Code review against §6.3 |
 
 ### 1.5 Security
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-015 | Secrets | Secrets (`DATABASE_URL`, `REDIS_URL`, `SERVICE_TOKEN`) live in AWS Secrets Manager and are injected as environment variables at container start. AWS access uses IAM task roles, so there are no AWS keys. Secrets are never committed. `.env` is git-ignored, and `.env.example` lists every variable with dummy values. | `gitleaks` in CI blocks the merge on any finding |
+| CR-015 | Secrets | Secrets (`DATABASE_URL`, `REDIS_URL`, `SERVICE_TOKEN`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`) live in AWS Secrets Manager and are injected as environment variables at container start. AWS access uses IAM task roles, so there are no AWS keys. Secrets are never committed. `.env` is git-ignored, and `.env.example` lists every variable with dummy values. | `gitleaks` in CI blocks the merge on any finding |
 | CR-016 | CORS | Frontend and API share one origin (A-03), so in staging and prod the API sends no `Access-Control-Allow-*` headers. Only in `local` does it allow origin `http://localhost:3000` with credentials. | Integration test of the CORS headers per environment |
 | CR-017 | Input validation | Every request body and query uses a DTO class with `class-validator`. The global `ValidationPipe` uses `whitelist: true`, `forbidNonWhitelisted: true` and `transform: true`. Unknown fields → `400 VALIDATION_ERROR`. JSON bodies are limited to 100 KB. Multipart is accepted only on the upload endpoint, limited to one file of `MAX_FILE_SIZE_BYTES`. | Unit tests per DTO |
-| CR-018 | Rate limiting | Per-user limits from NFR-015, counted in Redis with `@nestjs/throttler` and Redis storage, so limits hold across all API instances. Requests without a valid user are limited to 30/min per IP. `/api/v1/health` is not limited. | Integration test |
+| CR-018 | Rate limiting | Per-user limits from NFR-015, counted in Redis with `@nestjs/throttler` and Redis storage, so limits hold across all API instances. Requests without a valid user are limited to 30/min per IP. `/api/v1/health` and the Razorpay webhook (API-016) are not limited, because Razorpay sends bursts from shared IPs; the webhook is protected by its signature instead (CR-034). | Integration test |
 | CR-019 | Untrusted files | Text extraction runs in a separate worker thread limited to 10 s and 256 MB of memory. Exceeding either → `422 FILE_UNREADABLE`. The original file is only read by the extractor and never served back to any user. | Unit test with a "zip bomb" DOCX and a very large PDF |
 | CR-020 | AI safety | Resume text is untrusted. It is placed inside a clearly delimited block in the prompt, and the prompt tells the model to ignore instructions inside it. AI output is accepted only if it passes JSON-schema validation (FR-012). The frontend renders all AI text as plain text, never as HTML (`dangerouslySetInnerHTML` is banned by lint). | Unit test with a resume containing "ignore previous instructions"; ESLint rule |
-| CR-021 | HTTP headers | API: `helmet` defaults. Frontend: `Content-Security-Policy: default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'`, plus `Strict-Transport-Security: max-age=31536000; includeSubDomains`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: strict-origin-when-cross-origin`. | `curl -I` check in the staging smoke test |
-| CR-022 | Data retention | Personal data is kept only as stated in FR-018. No data from the JWT other than `sub` and `plan` is stored (no email, no name). | Schema review against §5 |
+| CR-021 | HTTP headers | API: `helmet` defaults. Frontend: `Content-Security-Policy: default-src 'self'; script-src 'self' https://checkout.razorpay.com; frame-src https://api.razorpay.com https://checkout.razorpay.com; connect-src 'self' https://lumberjack.razorpay.com; img-src 'self' data: https://cdn.razorpay.com; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'` (the Razorpay hosts are needed only by Razorpay Checkout, FR-021), plus `Strict-Transport-Security: max-age=31536000; includeSubDomains`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: strict-origin-when-cross-origin`. | `curl -I` check in the staging smoke test |
+| CR-022 | Data retention | Personal data is kept only as stated in FR-018. No data from the JWT other than `sub` is stored (no email, no name). For billing, only Razorpay IDs, statuses, amounts and dates are stored (TBL-011 – TBL-013). Card, UPI and bank details, and the email and phone number the user types into Razorpay Checkout, never reach this module (NFR-021). | Schema review against §5 |
 | CR-023 | Dependencies | `pnpm-lock.yaml` is committed. Renovate opens dependency update PRs weekly. A release is blocked by any critical or high finding (NFR-009). | CI gate |
+| CR-034 | Payments | Every message from Razorpay is checked before it changes anything: webhooks by `X-Razorpay-Signature` = hex HMAC-SHA256 of the **raw** request body with `RAZORPAY_WEBHOOK_SECRET`; checkout results by `razorpaySignature` = hex HMAC-SHA256 of `razorpayPaymentId + "\|" + razorpaySubscriptionId` with `RAZORPAY_KEY_SECRET`. Both are compared with `crypto.timingSafeEqual`. The key secret and webhook secret never reach the browser; only `RAZORPAY_KEY_ID` does. Live keys exist only in prod; every other environment uses Razorpay Test Mode keys. | Unit tests with a tampered body, a wrong secret and a valid signature; Secrets Manager review |
 
 ### 1.6 Internationalization (i18n)
 
@@ -135,6 +143,7 @@ Every API error uses this **one** format. No other error shape is allowed.
 | URL | `http://localhost:3000` | `https://resume.dev.surfingbear.com` | `https://resume.staging.surfingbear.com` | `https://resume.surfingbear.com` |
 | AI (`AI_PROVIDER`) | `mock`: returns a fixed valid response from `apps/api/test/fixtures/ai-response.json` | `bedrock` | `bedrock` | `bedrock` |
 | Platform auth | Local JWKS from `apps/api/test/fixtures/jwks.json`, plus a script `pnpm token:dev --plan FREE` that signs test tokens | Platform dev JWKS | Platform staging JWKS | Platform prod JWKS |
+| Payments (Razorpay) | Test Mode keys. Webhooks cannot reach a laptop, so `pnpm billing:webhook --event subscription.charged --user <id>` signs and posts a fake event to API-016 | Test Mode keys and plan, webhook URL `https://resume.dev.surfingbear.com/api/v1/webhooks/razorpay` | Test Mode keys and plan, webhook on the staging URL | **Live** keys and plan, webhook on the prod URL |
 | Data | Seed job roles + 2 test users | Seed job roles + test users | Copy of the job-role catalogue only; **no real user data** | Real data |
 | Log level | `debug` | `debug` | `info` | `info` |
 | Scaling | 1 of each | api 1, worker 1 | api 2, worker 2 | api 2–10, worker 2–10 (autoscale) |
@@ -142,7 +151,7 @@ Every API error uses this **one** format. No other error shape is allowed.
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-027 | Environments | All configuration comes from environment variables, validated at start-up with a Joi schema. A missing or invalid variable stops the app before it accepts traffic. Variables: `APP_ENV`, `PORT`, `DATABASE_URL`, `REDIS_URL`, `AWS_REGION`, `S3_BUCKET`, `AI_PROVIDER`, `BEDROCK_MODEL_ID`, `JWKS_URL`, `JWT_ISSUER`, `JWT_AUDIENCE`, `SERVICE_TOKEN`, `FRONTEND_ORIGIN`, `LOG_LEVEL`, plus every constant from §3.3.2 (optional, defaulting to the value in that table). | Unit test of the config schema; app start without `DATABASE_URL` fails |
+| CR-027 | Environments | All configuration comes from environment variables, validated at start-up with a Joi schema. A missing or invalid variable stops the app before it accepts traffic. Variables: `APP_ENV`, `PORT`, `DATABASE_URL`, `REDIS_URL`, `AWS_REGION`, `S3_BUCKET`, `AI_PROVIDER`, `BEDROCK_MODEL_ID`, `JWKS_URL`, `JWT_ISSUER`, `JWT_AUDIENCE`, `SERVICE_TOKEN`, `FRONTEND_ORIGIN`, `LOG_LEVEL`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `RAZORPAY_PLAN_ID`, plus every constant from §3.3.2 (optional, defaulting to the value in that table). | Unit test of the config schema; app start without `DATABASE_URL` fails |
 | CR-028 | Environments | Production data is never copied to another environment. | Process; IAM policy blocks prod S3/RDS access from non-prod roles |
 
 ### 1.8 Deployment
@@ -180,7 +189,7 @@ The code is one **pnpm monorepo** with three packages: `apps/api` (NestJS: HTTP 
 | JSON fields | camelCase | `overallScore`, `lockedSuggestionsCount` |
 | Error codes | UPPER_SNAKE_CASE | `QUOTA_EXCEEDED` |
 | Redis keys | `ro:<env>:<purpose>:<id>` | `ro:prod:ratelimit:user:7d9f…` |
-| Queues and jobs | Queue names kebab-case, job names verb-noun | queue `analysis`, job `analyze-resume` |
+| Queues and jobs | Queue names kebab-case, job names verb-noun | queue `analysis`, job `analyze-resume`; queue `billing`, job `cancel-razorpay-subscription` |
 | Environment variables | UPPER_SNAKE_CASE | `BEDROCK_MODEL_ID` |
 
 ### 2.2 Folder / module structure
@@ -206,10 +215,11 @@ resume-optimizer/
 │   │   │       ├── users/                 # create user on first request
 │   │   │       ├── consent/               # FR-002
 │   │   │       ├── job-roles/             # FR-003
-│   │   │       ├── analyses/              # FR-004, FR-011, FR-013, FR-014, FR-016
+│   │   │       ├── analyses/              # FR-004, FR-011, FR-013, FR-014, FR-016, FR-025
 │   │   │       │   ├── analyses.controller.ts
 │   │   │       │   ├── analyses.service.ts
 │   │   │       │   ├── analysis.processor.ts   # BullMQ job "analyze-resume"
+│   │   │       │   ├── comparison/        # FR-026: comparisons.controller.ts, comparison.service.ts
 │   │   │       │   └── dto/
 │   │   │       ├── file-processing/       # FR-005: file-validator.service.ts, text-extractor.service.ts
 │   │   │       ├── ai/                    # FR-007–FR-009: ai.service.ts, bedrock.client.ts, mock.client.ts,
@@ -218,6 +228,10 @@ resume-optimizer/
 │   │   │       ├── storage/               # s3-storage.service.ts
 │   │   │       ├── reports/               # FR-015: pdf-report.service.ts
 │   │   │       ├── privacy/               # FR-017, FR-018, FR-020: erasure, retention purge, sweeper
+│   │   │       ├── billing/               # FR-021–FR-024: subscriptions.controller.ts, subscriptions.service.ts,
+│   │   │       │                          #   plan-resolver.service.ts, razorpay.client.ts,
+│   │   │       │                          #   razorpay-webhook.controller.ts, razorpay-event.handler.ts,
+│   │   │       │                          #   billing.processor.ts (cancel + reconcile jobs)
 │   │   │       └── health/
 │   │   ├── prisma/
 │   │   │   ├── schema.prisma
@@ -229,8 +243,10 @@ resume-optimizer/
 │       │   ├── layout.tsx
 │       │   ├── page.tsx                   # redirects to /analyze
 │       │   ├── analyze/page.tsx           # upload screen (FR-004, FR-019)
-│       │   ├── analyses/page.tsx          # history (FR-013)
+│       │   ├── analyses/page.tsx          # history (FR-013, FR-025)
+│       │   ├── analyses/compare/page.tsx  # ?first=<id>&second=<id> (FR-026)
 │       │   ├── analyses/[analysisId]/page.tsx  # progress + result (FR-011, FR-014, FR-015)
+│       │   ├── pro/page.tsx               # Resume Pro: subscribe, status, cancel (FR-021, FR-023, FR-024)
 │       │   ├── privacy/page.tsx           # consent notice + delete my data (FR-002, FR-017)
 │       │   ├── error.tsx
 │       │   └── not-found.tsx
@@ -239,8 +255,11 @@ resume-optimizer/
 │       │   ├── upload/                    # FileDropzone.tsx, QuotaBadge.tsx
 │       │   ├── analysis/                  # ScoreGauge.tsx, DimensionBars.tsx, MissingSkillsList.tsx,
 │       │   │                              #   SuggestionCard.tsx, LockedCard.tsx, ProgressSteps.tsx
+│       │   ├── billing/                   # RazorpayCheckout.tsx, PlanCard.tsx, CancelDialog.tsx, ProBadge.tsx
+│       │   ├── history/                   # HistoryFilters.tsx, CompareBar.tsx
+│       │   ├── comparison/                # ComparisonView.tsx, DimensionDeltaBars.tsx
 │       │   └── consent/                   # ConsentDialog.tsx
-│       ├── hooks/                         # useAnalysisStatus.ts (polling), useQuota.ts
+│       ├── hooks/                         # useAnalysisStatus.ts (polling), useQuota.ts, useSubscription.ts
 │       ├── lib/                           # api-client.ts, format.ts (CR-026)
 │       ├── messages/en.json               # all UI strings (CR-024)
 │       ├── middleware.ts                  # no sb_session cookie → redirect to platform login
@@ -273,7 +292,7 @@ Rules:
 
 ### 2.4 Code review rules
 
-1. Every PR needs **1 approval** from someone other than the author. Changes to `auth/`, `privacy/`, `prisma/migrations/` or the AI prompt need **2 approvals**, one of them from the tech lead.
+1. Every PR needs **1 approval** from someone other than the author. Changes to `auth/`, `privacy/`, `billing/`, `prisma/migrations/` or the AI prompt need **2 approvals**, one of them from the tech lead.
 2. CI (CR-029) must be green before review starts.
 3. Aim for at most 400 changed lines per PR (generated files excluded). Larger PRs are split unless the reviewer agrees.
 4. Reviewers respond within 1 working day.
@@ -332,6 +351,12 @@ All limits and numbers used below are defined once in **§3.3.2 Limits and const
 | FR-018 | Automatic deletion after the retention period | Must |
 | FR-019 | Show quota usage | Should |
 | FR-020 | Delete data when the platform account is deleted | Should |
+| FR-021 | Subscribe to Resume Pro (₹299/month via Razorpay) | Must |
+| FR-022 | Subscription lifecycle from Razorpay events | Must |
+| FR-023 | Cancel Resume Pro | Must |
+| FR-024 | View my plan and subscription | Must |
+| FR-025 | Pro analysis history: filters and dimension scores | Must |
+| FR-026 | Compare the scores of two analyses (Pro) | Must |
 
 ---
 
@@ -341,7 +366,7 @@ The module has no sign-up or login of its own. Every request is identified by th
 Acceptance criteria:
 1. Every API except `GET /api/v1/health` requires a valid platform access token (JWT, RS256). The token is read from the `sb_session` httpOnly cookie, or from the `Authorization: Bearer <token>` header if the cookie is absent.
 2. The token is valid only if: its signature verifies against the platform JWKS, `iss` = `https://auth.surfingbear.com`, `aud` contains `resume-optimizer`, and `exp` is in the future (60 s clock-skew allowance). Otherwise the API returns `401 UNAUTHORIZED`.
-3. The user is identified by the token claim `sub` (platform user ID). The plan is read from the claim `plan` (`FREE` or `PRO`). A missing or unknown `plan` value is treated as `FREE`.
+3. The user is identified by the token claim `sub` (platform user ID). *(Changed in v0.5.)* The token claim `plan` is ignored. The plan is `PRO` only when the user has a subscription with `current_period_end > now()` (FR-022 criterion 6); otherwise it is `FREE`.
 4. On the first valid request from a new `sub`, a user record is created automatically (no sign-up step).
 5. A user can only see and change their own data. Requesting another user's analysis returns `404 ANALYSIS_NOT_FOUND` (not 403), so analysis IDs cannot be probed.
 6. When the frontend receives `401`, it redirects the browser to `https://surfingbear.com/login?returnTo=<current URL>`.
@@ -393,15 +418,15 @@ Acceptance criteria:
 10. Before text is sent to the AI, email addresses are replaced with `[EMAIL]` and phone numbers with `[PHONE]` (regexes in §4.6). The AI only needs to know whether they exist, not their values.
 
 #### FR-006 Monthly analysis quota per plan
-Free users get a limited number of analyses per month.
+Free users get a limited number of analyses per month. Resume Pro users have no monthly limit (changed in v0.5).
 
 Acceptance criteria:
-1. Monthly limit: `FREE` = `FREE_MONTHLY_ANALYSES`, `PRO` = `PRO_MONTHLY_ANALYSES` (§3.3.2).
+1. Monthly limit: `FREE` = `FREE_MONTHLY_ANALYSES` (§3.3.2). `PRO` = no limit. *(Changed in v0.5: `PRO_MONTHLY_ANALYSES` is deprecated.)* "No limit" means no monthly cap. The per-hour upload rate limit (NFR-015) and the one-active-analysis rule (FR-004 criterion 4) still apply to every plan (A-18).
 2. A month is a calendar month in the `Asia/Kolkata` time zone. The counter resets at 00:00 IST on the 1st of each month.
-3. One unit is used when an analysis is created (status `QUEUED`). If the analysis later ends in `FAILED`, the unit is given back (FR-012).
+3. For a `FREE` user, one unit is used when an analysis is created (status `QUEUED`). If the analysis later ends in `FAILED`, the unit is given back (FR-012). An analysis created while the user is `PRO` uses **no** unit and stores `plan = PRO` and `quota_month = null` (TBL-005), so it never counts towards the Free limit, even if Pro ends later in the same month (A-16).
 4. Deleting an analysis (FR-016) does **not** give the unit back. Otherwise deleting and re-uploading would bypass the limit.
-5. If used ≥ limit, an upload returns `429 QUOTA_EXCEEDED`. The error `details` contain `limit`, `used` and `resetsAt` (the next 1st of the month at 00:00 IST, sent in UTC per CR-026, e.g. `2026-10-31T18:30:00Z`).
-6. The plan in the current token decides the limit. If a user upgrades from FREE to PRO mid-month, their remaining quota is `PRO_MONTHLY_ANALYSES` minus the units already used that month.
+5. For a `FREE` user, if used ≥ limit, an upload returns `429 QUOTA_EXCEEDED`. The error `details` contain `limit`, `used` and `resetsAt` (the next 1st of the month at 00:00 IST, sent in UTC per CR-026, e.g. `2026-10-31T18:30:00Z`).
+6. *(Changed in v0.5.)* The plan at the moment of the upload (Plan Resolver, CMP-021) decides whether a unit is used. A user who upgrades mid-month can upload without limit at once. A user whose Pro ends mid-month is back on the Free limit, counting only the Free units already used that month.
 7. Two uploads sent at the same moment can never both pass when only one unit is left. The check and the increment happen in one atomic database operation.
 
 #### FR-007 ATS score out of 100 across 6 dimensions
@@ -443,15 +468,16 @@ Acceptance criteria:
 4. `suggestedText` must not invent facts: the AI prompt forbids adding numbers, employers, dates or skills that are not in the original. Where a number would help, it uses a placeholder such as `[X%]`.
 
 #### FR-010 Plan-based visibility of results (Free vs Pro)
-Free users see only part of the suggestions. The full result is always generated and stored. What the API returns depends on the plan in the token at the time of the request.
+Free users see only part of the suggestions. The full result is always generated and stored. What the API returns depends on the user's plan at the time of the request (Plan Resolver, CMP-021; changed in v0.5).
 
 Acceptance criteria:
 1. Both plans see: the overall score, band, all 6 dimension scores with feedback, and the total counts of missing skills and suggestions.
 2. `FREE`: only the first `FREE_VISIBLE_SUGGESTIONS` suggestions (by `priority`) and the first `FREE_VISIBLE_MISSING_SKILLS` missing skills (in FR-008 order) are returned. The rest are **not sent** by the API at all. Only `lockedSuggestionsCount` and `lockedMissingSkillsCount` are sent.
-3. `PRO`: everything is returned and both locked counts are `0`.
+3. `PRO`: every suggestion and missing skill is returned and both locked counts are `0`.
 4. If a FREE user later upgrades to PRO, locked items of their past analyses become visible without re-analysis.
-5. The frontend shows locked items as greyed placeholder cards with the text "Upgrade to Pro to see N more suggestions" and a button linking to `https://surfingbear.com/pricing`.
+5. *(Changed in v0.5.)* The frontend shows locked items as greyed placeholder cards with the text "Upgrade to Resume Pro (₹299/month) to see N more suggestions" and a button to the in-app `/pro` page (FR-021).
 6. The same rules apply to the PDF (FR-015).
+7. *(Added in v0.5.)* When Pro access ends (FR-022 criterion 6), the user's past analyses are shown with the FREE filter again, including analyses created while they were Pro.
 
 #### FR-011 Analysis status tracking
 The analysis runs in the background, so the frontend checks its progress.
@@ -474,7 +500,7 @@ Acceptance criteria:
 6. Each `failureCode` has a fixed user-facing message (listed in §6.3). The frontend shows that message with a "Try again" button that goes back to the upload screen.
 
 #### FR-013 View analysis history
-The user sees their past analyses.
+The user sees their past analyses. This works the same for FREE and PRO users and is unchanged in v0.5, because Free users must keep everything they have today (A-17). Pro-only extras are in FR-025 and FR-026.
 
 Acceptance criteria:
 1. The list shows the user's own analyses, newest first (`createdAt` descending), with page size 20 by default and 50 at most (cursor pagination, §6.1).
@@ -497,7 +523,7 @@ Acceptance criteria:
 1. Allowed only when status is `COMPLETED`, otherwise `409 ANALYSIS_NOT_COMPLETED`.
 2. The PDF is generated on request and streamed back (`Content-Type: application/pdf`). It is not stored, so it never needs separate deletion.
 3. File name: `SurfingBear-Resume-Report-<YYYY-MM-DD>.pdf`, where the date is the analysis `completedAt` in IST.
-4. Content: SurfingBear logo and title, job role, experience level, analysis date (IST), overall score and band, 6 dimensions with score/max and feedback, missing skills and suggestions filtered by FR-010. For FREE users, a line "N more suggestions available with SurfingBear Pro" is added. The original resume file is not embedded.
+4. Content: SurfingBear logo and title, job role, experience level, analysis date (IST), overall score and band, 6 dimensions with score/max and feedback, missing skills and suggestions filtered by FR-010. For FREE users, a line "N more suggestions available with Resume Pro (₹299/month)" is added. The original resume file is not embedded.
 5. Page size A4. Fonts embedded so the PDF looks the same on every device. Supports the `₹` symbol.
 
 #### FR-016 Delete one analysis
@@ -522,6 +548,7 @@ Acceptance criteria:
 5. Stored files are deleted within `ERASURE_STORAGE_SLA_MINUTES` minutes. Database backups containing the data expire within `BACKUP_RETENTION_DAYS` days.
 6. An audit record is written with the user ID, the time and the number of analyses deleted, and no personal data.
 7. The frontend asks the user to type `DELETE` to confirm.
+8. *(Added in v0.5.)* Subscription, payment and webhook records (TBL-011 – TBL-013) are **kept** and the Razorpay subscription is **not** cancelled. They hold no resume data, and deleting them would take away Pro access the user has paid for. The confirmation dialog says: "Your Resume Pro subscription is not affected. Cancel it separately on the Pro page." Billing records follow their own retention (FR-018 criterion 7).
 
 #### FR-018 Automatic deletion after the retention period
 Data is kept only as long as needed.
@@ -533,22 +560,118 @@ Acceptance criteria:
 4. Quota usage rows (FR-006) are deleted 12 months after the end of their month.
 5. A purge job runs every day at 02:00 IST. It deletes in batches of 500 and is safe to re-run if it stops halfway.
 6. Results stay viewable and downloadable as a PDF after the file is gone, because neither uses the original file.
+7. *(Added in v0.5.)* Billing records: a subscription that never got paid (`current_period_end` is null) and is no longer open (`EXPIRED` or `CANCELLED`) is deleted `UNPAID_CHECKOUT_RETENTION_DAYS` days after creation. A subscription that ended (`CANCELLED`, `COMPLETED` or `EXPIRED`) is deleted, with its payment rows, `BILLING_RECORD_RETENTION_MONTHS` months after its `current_period_end` (needed for payment disputes and support). Webhook event rows are deleted `WEBHOOK_EVENT_RETENTION_DAYS` days after receipt. Razorpay remains the system of record for payments and invoices.
 
 #### FR-019 Show quota usage
 The user sees how many analyses they have left this month.
 
 Acceptance criteria:
 1. Returns `plan`, `limit`, `used`, `remaining` (never negative) and `resetsAt` (the next 1st of the month at 00:00 IST, sent in UTC per CR-026, e.g. `2026-10-31T18:30:00Z`).
-2. The upload screen shows "X of Y analyses left this month". When `remaining` = 0, the upload button is disabled and FREE users see the upgrade link.
+2. The upload screen shows "X of Y analyses left this month". When `remaining` = 0, the upload button is disabled and FREE users see the upgrade link to `/pro`.
+3. *(Added in v0.5.)* For `PRO`: `limit` and `remaining` are `null`, `used` is the number of Free units used this month, and the upload screen shows "Unlimited analyses with Resume Pro" instead of the counter.
 
 #### FR-020 Delete data when the platform account is deleted
 When a user deletes their SurfingBear platform account, the platform tells this module to erase that user's data.
 
 Acceptance criteria:
 1. The platform calls an internal endpoint authenticated with a shared service token (header `X-Service-Token`), not a user JWT. A wrong or missing token → `401 UNAUTHORIZED`.
-2. It erases everything in FR-017 **including** the user row and all quota rows. Analyses still `QUEUED` or `PROCESSING` are cancelled first and their files deleted.
+2. It erases everything in FR-017 **including** the user row, all quota rows and *(v0.5)* all subscription, payment and webhook rows of the user. Analyses still `QUEUED` or `PROCESSING` are cancelled first and their files deleted.
 3. It is idempotent: an unknown user ID returns `204` as well.
 4. This endpoint is not exposed through the public load balancer path. It is reachable only from the platform's private network (§4).
+5. *(Added in v0.5.)* If the user has a subscription in `CREATED`, `AUTHENTICATED`, `ACTIVE`, `PENDING` or `HALTED`, a `cancel-razorpay-subscription` job (§4.7) is queued with that Razorpay subscription ID and `cancelAtCycleEnd: false` **before** the rows are deleted, so the user is never charged again. The endpoint does not wait for Razorpay; the job retries until it succeeds (5 attempts, then an `error` alarm). No refund is made for the current month (A-20).
+
+#### FR-021 Subscribe to Resume Pro (₹299/month via Razorpay)
+*(Added in v0.5.)* A FREE user buys the monthly Resume Pro subscription inside this module. Payment is collected by Razorpay Subscriptions through Razorpay Checkout, so card and UPI details never reach our servers (NFR-021).
+
+Acceptance criteria:
+1. The `/pro` page shows: the plan name "Resume Pro"; the price "₹299/month (incl. GST)"; the benefits (unlimited analyses, every rewrite suggestion and missing skill, analysis history with filters and score comparison); "Cancel any time. Pro stays active until the end of the month you paid for."; and "Payments are processed securely by Razorpay." It also has a "Subscribe" button.
+2. "Subscribe" calls API-014. It is refused with `409 SUBSCRIPTION_ALREADY_ACTIVE` when the user is already `PRO` (including a cancelled subscription whose paid month has not ended), or has a subscription in `AUTHENTICATED`, `ACTIVE`, `PENDING` or `HALTED`. `details` = `{ "status", "proUntil" }`. A user whose cancelled Pro is still running can subscribe again only after `proUntil` (A-20).
+3. If the user already has a `CREATED` subscription whose `checkout_expires_at` is in the future, API-014 returns that same subscription with `200` and makes no Razorpay call, so double clicks never create two subscriptions. A `CREATED` row past `checkout_expires_at` is first set to `EXPIRED`.
+4. Otherwise the backend calls Razorpay `POST /v1/subscriptions` with `plan_id` = `RAZORPAY_PLAN_ID`, `total_count` = `RAZORPAY_TOTAL_COUNT`, `quantity` = 1, `customer_notify` = 1, `expire_by` = now + `CHECKOUT_EXPIRY_MINUTES` (Unix seconds) and `notes` = `{ "userId": "<internal users.id>" }`. It inserts a TBL-011 row with status `CREATED` and returns `201` with `subscriptionId`, `razorpaySubscriptionId`, `razorpayKeyId`, `amountPaise`, `currency` and `checkoutExpiresAt`. If Razorpay fails or takes longer than `RAZORPAY_TIMEOUT_SECONDS`, the response is `503 PAYMENT_PROVIDER_UNAVAILABLE` and nothing is stored.
+5. The frontend loads `https://checkout.razorpay.com/v1/checkout.js` only on `/pro` and opens Checkout with `key` = `razorpayKeyId`, `subscription_id` = `razorpaySubscriptionId`, `name` = "SurfingBear", `description` = "Resume Pro – ₹299/month" and no `prefill` (this module does not know the user's email or phone). The payment methods are the ones Razorpay offers for subscriptions (cards, UPI Autopay); this module does not restrict them.
+6. When Checkout succeeds, the frontend sends `razorpay_payment_id`, `razorpay_subscription_id` and `razorpay_signature` to API-015. The backend checks the signature (CR-034). If it does not match → `400 PAYMENT_VERIFICATION_FAILED` and nothing changes. If `razorpaySubscriptionId` is not the user's own `CREATED`, `AUTHENTICATED` or `ACTIVE` subscription → `404 SUBSCRIPTION_NOT_FOUND`.
+7. After a valid signature, the backend fetches the subscription from Razorpay (`GET /v1/subscriptions/{id}`) and applies it exactly as a webhook would (FR-022 criterion 3), then returns the API-018 body. If that fetch fails, API-015 still returns `200` with the stored state; the webhook or the reconciliation (FR-022 criterion 9) finishes the activation. A valid signature alone never grants Pro: only a period end set from Razorpay data does (FR-022 criterion 6).
+8. If the API-015 response does not show `plan` = `PRO`, the frontend polls API-018 every `POLL_INTERVAL_SECONDS` for at most `SUBSCRIPTION_ACTIVATION_TIMEOUT_SECONDS`. Then it shows "Payment received. Activation is taking longer than usual; refresh this page in a few minutes." When `plan` = `PRO`, it shows "You're on Resume Pro" with a link back to the upload screen.
+9. If the user closes Checkout or the payment fails, nothing changes in this module. The `CREATED` row is reused while it is valid (criterion 3) and expires after `CHECKOUT_EXPIRY_MINUTES`.
+10. The Razorpay plan is created once per environment in the Razorpay Dashboard: amount `PRO_PRICE_PAISE`, currency `INR`, period `monthly`, interval 1. Its ID is `RAZORPAY_PLAN_ID`. At start-up the `worker` fetches the plan (`GET /v1/plans/{id}`). If the amount, currency, period or interval differs, it logs an `error`, which raises an alarm (NFR-014).
+
+#### FR-022 Subscription lifecycle from Razorpay events
+*(Added in v0.5.)* Razorpay tells this module about every change to a subscription through webhooks. The module keeps a local copy (TBL-011, TBL-012) from which the plan is decided on each request.
+
+Acceptance criteria:
+1. A Razorpay webhook is configured per environment to `POST /api/v1/webhooks/razorpay` (API-016), with secret `RAZORPAY_WEBHOOK_SECRET` and exactly these events: `subscription.authenticated`, `subscription.activated`, `subscription.charged`, `subscription.pending`, `subscription.halted`, `subscription.cancelled`, `subscription.completed`.
+2. An invalid or missing `X-Razorpay-Signature` → `400 WEBHOOK_SIGNATURE_INVALID`, and nothing is stored. A repeated `X-Razorpay-Event-Id` → `200`, not processed again. An unknown Razorpay subscription ID, or an event not in criterion 1 → `200`, recorded in TBL-013 with result `IGNORED` and a `warn` log.
+3. Each event is applied in one transaction that locks the subscription row (`SELECT … FOR UPDATE`) and inserts the TBL-013 row. The table below lists the changes:
+
+   | Razorpay event | New `status` | Other changes |
+   |---|---|---|
+   | `subscription.authenticated` | `AUTHENTICATED` | — |
+   | `subscription.activated` | `ACTIVE` | — |
+   | `subscription.charged` | `ACTIVE` | Insert a TBL-012 row for `payload.payment.entity`. Set `current_period_start` / `current_period_end` from `payload.subscription.entity.current_start` / `current_end` (Unix seconds → `timestamptz`) |
+   | `subscription.pending` | `PENDING` | — |
+   | `subscription.halted` | `HALTED` | Queue `cancel-razorpay-subscription` with `cancelAtCycleEnd: false` (criterion 8) |
+   | `subscription.cancelled` | `CANCELLED` | `cancelled_at` = event `created_at`, if still null |
+   | `subscription.completed` | `COMPLETED` | — |
+
+4. Events may arrive late, twice or out of order, and the result must not depend on it. Status changes follow the allowed-transition list in TBL-011. A status change that is not allowed is skipped, but the rest of the event (payment row, period) is still applied. `current_period_end` only moves forward (`GREATEST(old, new)`). `razorpay_payment_id` is unique, so a payment is never recorded twice.
+5. On `subscription.charged`, if the amount ≠ `PRO_PRICE_PAISE` or the currency ≠ `INR`, the event is still applied, because Razorpay has already taken the money, and a `warn` log raises an alarm (NFR-014).
+6. **Pro access rule:** a user is `PRO` exactly while `now() < current_period_end` of any of their subscriptions. The "paid month" is the Razorpay billing cycle `[current_start, current_end)` of the last successful charge: one month from the subscription start, as Razorpay counts it (for example 26 Oct 2026 10:15 IST → 26 Nov 2026 10:15 IST). `current_period_end` moves only when a charge succeeds. So a failed renewal or a cancellation ends Pro at the end of the paid month without any extra job. The plan is read on every request (no cache), so a change takes effect on the next request.
+7. Renewal failure: Razorpay retries the charge on its own schedule and the status becomes `PENDING`. If no retry succeeds before `current_period_end`, the user becomes `FREE` at that time. A later successful retry (`subscription.charged`) makes them `PRO` again for the new period. While `PENDING`, the `/pro` page shows "Your last payment didn't go through. Razorpay will try again; check Razorpay's email to update your payment method."
+8. `HALTED` means Razorpay has given up retrying. The module cancels the subscription at Razorpay right away (job in criterion 3), so the mandate can never charge the user later without warning. The user can subscribe again (FR-021) once their Pro has ended.
+9. **Reconciliation** (covers lost webhooks): every day at 03:00 IST the `reconcile-subscriptions` job fetches from Razorpay every subscription that is in `CREATED`, `AUTHENTICATED`, `ACTIVE`, `PENDING` or `HALTED`, or whose `current_period_end` falls within the last `RECONCILE_LOOKBACK_DAYS` days. It applies the fetched `status` with the same rules (criteria 3–4). If the entity's `paid_count` is higher than the number of TBL-012 rows of that subscription, a charge webhook was lost. The job then lists the subscription's paid invoices (`GET /v1/invoices?subscription_id=<id>`), inserts the missing payments and moves `current_period_start` / `current_period_end` to the entity's `current_start` / `current_end`. Every change is logged as `subscription.reconciled` and counted in `reconciliation_corrections_total`. `CREATED` rows past `checkout_expires_at` are set to `EXPIRED` by the same job.
+
+#### FR-023 Cancel Resume Pro
+*(Added in v0.5.)* A Pro user can cancel at any time. They are not charged again, and Pro access continues until the end of the month they paid for.
+
+Acceptance criteria:
+1. The `/pro` page has a "Cancel Resume Pro" button. The confirmation dialog says: "Cancel Resume Pro? You keep Pro until {proUntil, IST}. You won't be charged again. There is no refund for the current month, and a cancellation can't be undone."
+2. Confirming calls API-017. It is allowed when the user has a subscription in `ACTIVE`, `AUTHENTICATED` or `PENDING` with `cancel_at_period_end = false`. No such subscription → `404 SUBSCRIPTION_NOT_FOUND`. Already cancelled, cancel already requested, or `HALTED` (being cancelled automatically, FR-022 criterion 8) → `409 SUBSCRIPTION_ALREADY_CANCELLED`.
+3. `ACTIVE` → Razorpay `POST /v1/subscriptions/{id}/cancel` with `cancel_at_cycle_end: 1`. Razorpay makes no further charge and sends `subscription.cancelled` at the end of the cycle. `AUTHENTICATED` or `PENDING` → the same call with `cancel_at_cycle_end: 0` (cancel now), which also stops Razorpay's retries.
+4. When Razorpay accepts, the module sets `cancel_at_period_end = true` and `cancel_requested_at = now()`. For an immediate cancel it also sets `status = CANCELLED` and `cancelled_at = now()`. It returns `200` with the API-018 body.
+5. If Razorpay fails or takes longer than `RAZORPAY_TIMEOUT_SECONDS` → `503 PAYMENT_PROVIDER_UNAVAILABLE`, and nothing changes locally, so the user can try again. If Razorpay answers that the subscription is already cancelled, the module fetches it, applies it (FR-022 criterion 3) and returns `200`.
+6. `current_period_end` is not changed by cancelling. The user stays `PRO` until then and becomes `FREE` automatically afterwards (FR-022 criterion 6). Their analyses are kept and shown with the FREE filter (FR-010 criterion 7).
+7. There are no refunds or proration in this module (A-20). Refund requests go to support, who use the Razorpay Dashboard.
+
+#### FR-024 View my plan and subscription
+*(Added in v0.5.)* The user sees their plan and the state of their subscription.
+
+Acceptance criteria:
+1. API-018 returns `plan` (`FREE` or `PRO`, from FR-022 criterion 6), `proUntil` (the latest `current_period_end` if `PRO`, otherwise `null`) and `subscription`. `subscription` is the user's most recent subscription that is open (`CREATED` still valid, `AUTHENTICATED`, `ACTIVE`, `PENDING`, `HALTED`) or still gives Pro; otherwise it is `null`.
+2. `subscription` fields: `subscriptionId`, `status`, `cancelAtPeriodEnd`, `currentPeriodStart`, `currentPeriodEnd`, `nextChargeAt` (= `currentPeriodEnd` when `status` = `ACTIVE` and `cancelAtPeriodEnd` = false, otherwise `null`), `amountPaise`, `currency` and `lastPaymentFailed` (`true` when `status` is `PENDING` or `HALTED`).
+3. The `/pro` page shows one of these states:
+   - FREE with no subscription: plan card and "Subscribe".
+   - PRO and renewing: "Renews on {nextChargeAt} for ₹299" and "Cancel Resume Pro".
+   - PRO and cancelled: "Pro until {proUntil}. It won't renew."
+   - `lastPaymentFailed`: the FR-022 criterion 7 message.
+4. Every page header shows a "Pro" badge when `plan` = `PRO`. The web app reads the plan from API-018 through `useSubscription` and never stores it in browser storage (CR-002).
+
+#### FR-025 Pro analysis history: filters and dimension scores
+*(Added in v0.5.)* Pro users get more out of the history list: they can filter it, see each analysis's dimension scores in the list and pick two analyses to compare (FR-026). The FR-013 list itself is unchanged for everyone (A-17).
+
+Acceptance criteria:
+1. For `PRO`, API-008 accepts the optional filters `jobRoleId` (UUID; an inactive role is allowed, because old analyses may use it) and `experienceLevel` (`ENTRY`, `MID`, `SENIOR`, `LEAD`), combined with AND. A FREE user who sends either filter → `403 PRO_REQUIRED`. An unknown `jobRoleId` returns an empty list, not an error.
+2. For `PRO`, each item has `dimensionScores`: the 6 `{ code, score, maxScore }` in FR-007 table order when `COMPLETED`, otherwise `null`. For `FREE`, `dimensionScores` is always `null`.
+3. Ordering, page size and cursor are the same as FR-013. The cursor holds only the position, so the client must send the same filters with every page.
+4. The history page for PRO shows filter dropdowns (role, level) and a checkbox on each `COMPLETED` item. "Compare" is enabled when exactly 2 are ticked and opens `/analyses/compare?first=<id>&second=<id>`. A third tick is blocked with "Select up to 2 analyses". For FREE, the list looks exactly as in FR-013, plus one line under it: "Compare scores between analyses with Resume Pro", linking to `/pro`.
+
+#### FR-026 Compare the scores of two analyses (Pro)
+*(Added in v0.5.)* A Pro user compares two of their completed analyses to see how their score changed, for example before and after editing the resume.
+
+Acceptance criteria:
+1. Only `PRO` users. FREE → `403 PRO_REQUIRED`.
+2. Input: two analysis IDs (API-019). The same ID twice → `400 VALIDATION_ERROR`. An unknown, deleted or other user's ID → `404 ANALYSIS_NOT_FOUND` with `details` = `{ "analysisId" }`. An analysis that is not `COMPLETED` → `409 ANALYSIS_NOT_COMPLETED` with `details` = `{ "analysisId", "status" }`.
+3. The older analysis (by `createdAt`, then `id`) is `before` and the newer one is `after`, whatever order the IDs were sent in. Each side has `analysisId`, `fileName`, `jobRole`, `experienceLevel`, `createdAt`, `overallScore`, `band` and `suggestionsCount`.
+4. `overallDelta` = `after.overallScore − before.overallScore` (signed integer, −100 to 100).
+5. `dimensions` has 6 items in FR-007 table order: `code`, `maxScore`, `beforeScore`, `afterScore`, `delta` (= after − before).
+6. `missingSkills` compares names case-insensitively:
+   - `resolved`: in `before` but not in `after`, in `before` rank order.
+   - `new`: in `after` but not in `before`, in `after` rank order.
+   - `stillMissing`: in both, with the `after` importance, in `after` rank order.
+
+   Each item has `name` and `importance`. All skills are used, not just the FREE-visible ones, because the user is PRO.
+7. `sameTarget` = both analyses have the same `jobRoleId` **and** `experienceLevel`. Different targets are allowed. When `sameTarget` = false, the page shows the banner "These analyses target different roles or levels, so the scores are not directly comparable."
+8. The comparison is calculated on each request from TBL-005 – TBL-008 and is not stored.
+9. The compare page shows the two overall scores side by side with the delta (green arrow up, red arrow down, grey "no change"). It shows the 6 dimensions as paired bars with the delta, and the three skill lists. If API-019 returns `403 PRO_REQUIRED` (Pro ended), the page sends the user to `/pro` with "Score comparison is a Resume Pro feature."
 
 ---
 
@@ -556,7 +679,7 @@ Acceptance criteria:
 
 | ID | Category | Requirement | Measurable target | How it is verified |
 |---|---|---|---|---|
-| NFR-001 | Performance | Response time of all read and small write APIs (everything except upload and PDF) | p95 ≤ 300 ms, p99 ≤ 800 ms at 50 requests/s | k6 load test in staging before each release |
+| NFR-001 | Performance | Response time of all read and small write APIs (everything except upload, PDF and the endpoints that call Razorpay) | p95 ≤ 300 ms, p99 ≤ 800 ms at 50 requests/s. *(v0.5)* API-014, API-015 and API-017 call Razorpay and have p95 ≤ 2 s; the comparison API-019 is inside the 300 ms target | k6 load test in staging before each release |
 | NFR-002 | Performance | Upload API response time, including file checks and text extraction | p95 ≤ 3 s for a 5 MB, 10-page PDF | k6 test with sample files |
 | NFR-003 | Performance | Time from `QUEUED` to `COMPLETED` | p95 ≤ 45 s, p99 ≤ 90 s | `analysis_duration_seconds` metric in production; k6 in staging |
 | NFR-004 | Performance | PDF report generation | p95 ≤ 5 s | k6 test |
@@ -569,13 +692,16 @@ Acceptance criteria:
 | NFR-011 | Privacy | Data residency and AI processor terms | All stored data in AWS `ap-south-1` (Mumbai). AI processing via Amazon Bedrock in `ap-south-1`; Bedrock does not store prompts or use them for training | Infra review; AWS data-processing terms on file |
 | NFR-012 | Privacy | Retention is enforced on time | Data past its retention date (FR-018) is deleted within 24 h of that date | Daily purge-job metric `purge_overdue_rows` = 0 |
 | NFR-013 | Privacy | Erasure is completed on time | Database rows: immediately in the request. Stored files: ≤ 60 min. Backups: ≤ 7 days | E2E test checks S3 after 60 min; backup retention setting |
-| NFR-014 | Observability | Problems are visible and alerted | Structured JSON logs with `requestId`; metrics for request latency, queue depth and analysis outcome; alerts when failure rate > 5% over 15 min, queue depth > 200 for 10 min, or p95 of NFR-003 > 60 s for 15 min | Alert rules reviewed in staging with a fault-injection test |
-| NFR-015 | Security | Rate limiting per user | 60 requests/min across all APIs; 10 uploads/hour. Over the limit → `429 RATE_LIMITED` with `Retry-After` header | Integration test |
+| NFR-014 | Observability | Problems are visible and alerted | Structured JSON logs with `requestId`; metrics for request latency, queue depth and analysis outcome; alerts when failure rate > 5% over 15 min, queue depth > 200 for 10 min, or p95 of NFR-003 > 60 s for 15 min. *(v0.5)* Also alerts when: more than 10 webhook signature failures in 15 min; any `cancel-razorpay-subscription` job fails 5 times; any charge amount ≠ `PRO_PRICE_PAISE`; `reconciliation_corrections_total` > 0 in a daily run; the FR-021 criterion 10 plan check fails | Alert rules reviewed in staging with a fault-injection test |
+| NFR-015 | Security | Rate limiting per user | 60 requests/min across all APIs; 10 uploads/hour, for FREE and PRO alike (Pro's "unlimited" means no monthly cap, A-18). Over the limit → `429 RATE_LIMITED` with `Retry-After` header. The Razorpay webhook (API-016) is not limited (CR-018) | Integration test |
 | NFR-016 | Accessibility | Web frontend usable by everyone | WCAG 2.1 AA; Lighthouse accessibility score ≥ 90 on every page | Lighthouse CI + axe in Playwright tests |
 | NFR-017 | Compatibility | Supported browsers and screens | Latest 2 versions of Chrome, Edge, Firefox and Safari (desktop and mobile); widths 360 px to 1920 px | Playwright tests on Chromium, Firefox and WebKit |
-| NFR-018 | Maintainability | Test coverage | Backend line coverage ≥ 80%; E2E tests cover FR-004, FR-014, FR-015 and FR-017 | Jest coverage report as CI gate |
+| NFR-018 | Maintainability | Test coverage | Backend line coverage ≥ 80%; E2E tests cover FR-004, FR-014, FR-015, FR-017 and *(v0.5)* FR-021, FR-023, FR-026 (with Razorpay Test Mode) | Jest coverage report as CI gate |
 | NFR-019 | Cost | AI usage per analysis is bounded | Input ≤ 12,000 tokens, output ≤ 4,000 tokens per AI call; ≤ `AI_MAX_ATTEMPTS` calls per analysis | Token-count metric per analysis |
 | NFR-020 | AI consistency | Same input gives a stable score | Analysing the same file, role and level twice gives `overallScore` values that differ by ≤ 5 points (temperature 0) | Run on a fixed set of 20 sample resumes before each prompt or model change |
+| NFR-021 | Security (payments) | No payment instrument data on our side; every Razorpay message verified | Card, UPI and bank details are entered only in Razorpay Checkout, so no request to this module contains them (PCI DSS scope stays SAQ-A). 100% of webhooks and checkout results are signature-checked (CR-034); 0 accepted with a bad signature | Unit tests (CR-034); OWASP ZAP; code review: no DTO has card or VPA fields |
+| NFR-022 | Reliability (payments) | Pro starts quickly after payment and lost webhooks are corrected | Webhook handled with p99 ≤ 2 s (Razorpay waits 5 s). p95 of "payment captured → `plan` = `PRO`" ≤ 60 s. A lost webhook is corrected by the next daily reconciliation (≤ 24 h) | k6 `load/webhook.js`; Test Mode payments in staging; metric `subscription_activation_seconds` |
+| NFR-023 | Correctness (payments) | Duplicate or out-of-order Razorpay events never give a wrong result | Sending every event of a subscription 3 times in random order gives the same TBL-011/TBL-012 state as sending them once in order. 0 duplicate payment rows. `current_period_end` never moves backwards | Replay test `billing-replay.e2e-spec` |
 
 ---
 
@@ -585,7 +711,7 @@ Acceptance criteria:
 
 | # | Decision | Reason |
 |---|---|---|
-| A-01 | Two plans, `FREE` and `PRO`, provided by the platform in the JWT claim `plan`. This module does not handle payments or plan changes. | The brief says users are already logged in through the platform; billing belongs to the platform too. |
+| A-01 | **Superseded in v0.5 by A-14.** ~~Two plans, `FREE` and `PRO`, provided by the platform in the JWT claim `plan`. This module does not handle payments or plan changes.~~ | Kept for history. The Round 2 change makes Resume Pro a paid plan sold through Razorpay, which this module must manage. |
 | A-02 | The platform login sets an httpOnly cookie `sb_session` (RS256 JWT) on `.surfingbear.com`. The platform publishes its public keys at `https://auth.surfingbear.com/.well-known/jwks.json`. | Lets the module verify users without calling the platform on every request. |
 | A-03 | Frontend runs at `https://resume.surfingbear.com`, API at `https://resume.surfingbear.com/api/v1` (same origin). | Same origin means the cookie is sent automatically and CORS is not needed for the browser. |
 | A-04 | The file check and text extraction run synchronously in the upload request. Only the AI step runs in the background. | Users see file errors at once, and bad files never use quota or queue capacity. |
@@ -598,6 +724,13 @@ Acceptance criteria:
 | A-11 | The job-role catalogue is managed through database migrations. There is no admin screen in v1. | Roles change rarely; an admin UI would add security work for little value. |
 | A-12 | The original file is kept only until its analysis finishes, and the extracted text is never stored in the database. | DPDP data minimisation: no feature needs the file or full text afterwards. The results only quote the short lines being rewritten. |
 | A-13 | Emails and phone numbers are masked before text goes to the AI. | The AI only needs to know they exist (for the `FORMAT` score), so their values are never shared with a processor. |
+| A-14 | *(v0.5)* Resume Pro is sold and managed by this module through **Razorpay Subscriptions**. The plan comes from this module's subscription records (TBL-011). The JWT `plan` claim is ignored. | The change request names Razorpay and the ₹299 monthly price for this product. Keeping "Pro until the end of the paid month" correct needs the paid-period dates, which only the Razorpay events give us. |
+| A-15 | *(v0.5)* ₹299 includes GST. The Razorpay plan (₹299, monthly) is created once per environment in the Razorpay Dashboard. Razorpay generates and emails the invoice for each charge. | Indian consumer prices are shown GST-inclusive. Using the Dashboard plan means the price is not hard-coded in a Razorpay call, and Razorpay already produces compliant invoices. |
+| A-16 | *(v0.5)* Analyses created while Pro use no quota unit. When Pro ends, the Free limit counts only the Free analyses of that month. | A user who just lost Pro is treated exactly like any Free user (change request rule 5), not punished for analyses they ran while paying. |
+| A-17 | *(v0.5)* The history list (FR-013) stays available to Free users. Pro adds filters, dimension scores in the list and score comparison (FR-025, FR-026). | The history list already existed for every user in v0.4, and rule 5 says Free users stay exactly as they are. Taking it away would break that rule. |
+| A-18 | *(v0.5)* "Unlimited analyses" means no monthly cap. The upload rate limit (`UPLOADS_PER_HOUR`) and one active analysis per user still apply to Pro. | Protects AI cost (NFR-019) and capacity (NFR-005) from scripts, while no normal user hits 10 uploads an hour. |
+| A-19 | *(v0.5)* Razorpay webhooks are the source of truth. The checkout verify call (API-015) only speeds up activation, and a daily reconciliation repairs lost webhooks. | The browser can close before API-015 is called, and webhooks can be delayed or lost. Three paths that apply the same idempotent rules give one result. |
+| A-20 | *(v0.5)* No refunds or proration in the module. A cancellation cannot be undone, and a user can subscribe again only after their paid month ends. | Keeps the billing rules simple and matches "access continues until the end of the paid month". Razorpay has no "undo cancel", and subscribing again during a paid month would charge twice for the same days. |
 
 #### 3.3.2 Limits and constants
 
@@ -611,7 +744,7 @@ This is the single source of truth for every number in this spec. The backend re
 | `MIN_TEXT_CHARS` | 200 | FR-005 |
 | `MAX_TEXT_CHARS` | 30,000 | FR-005 |
 | `FREE_MONTHLY_ANALYSES` | 3 | FR-006 |
-| `PRO_MONTHLY_ANALYSES` | 30 | FR-006 |
+| `PRO_MONTHLY_ANALYSES` | **Deprecated in v0.5** (was 30). PRO has no monthly limit (FR-006). Not read by the code. | — |
 | `MAX_ACTIVE_ANALYSES_PER_USER` | 1 | FR-004 |
 | `FREE_VISIBLE_SUGGESTIONS` | 3 | FR-010 |
 | `FREE_VISIBLE_MISSING_SKILLS` | 5 | FR-010 |
@@ -630,6 +763,16 @@ This is the single source of truth for every number in this spec. The backend re
 | `RATE_LIMIT_PER_MINUTE` | 60 | NFR-015 |
 | `UPLOADS_PER_HOUR` | 10 | NFR-015 |
 | `CONSENT_VERSION` | `2026-10-v1` | FR-002 |
+| `PRO_PRICE_PAISE` | 29,900 (₹299, GST included, A-15) | FR-021, FR-022 |
+| `PRO_CURRENCY` | `INR` | FR-021, FR-022 |
+| `RAZORPAY_TOTAL_COUNT` | 120 (monthly cycles; Razorpay needs a finite number, and 10 years is effectively "until cancelled") | FR-021 |
+| `CHECKOUT_EXPIRY_MINUTES` | 30 | FR-021, FR-022 |
+| `SUBSCRIPTION_ACTIVATION_TIMEOUT_SECONDS` | 60 | FR-021 |
+| `RAZORPAY_TIMEOUT_SECONDS` | 10 | FR-021, FR-023 |
+| `RECONCILE_LOOKBACK_DAYS` | 3 | FR-022 |
+| `UNPAID_CHECKOUT_RETENTION_DAYS` | 30 | FR-018 |
+| `BILLING_RECORD_RETENTION_MONTHS` | 24 | FR-018 |
+| `WEBHOOK_EVENT_RETENTION_DAYS` | 90 | FR-018 |
 
 #### 3.3.3 Initial job-role catalogue
 
@@ -642,7 +785,11 @@ Software Engineer (Backend), Software Engineer (Frontend), Full Stack Developer,
 | Item | Why |
 |---|---|
 | Sign-up, login, password reset | Handled by the SurfingBear platform (brief) |
-| Payments, plan upgrades, invoices | Handled by the platform (A-01); this module only links to the pricing page |
+| ~~Payments, plan upgrades, invoices~~ | *(v0.5)* No longer out of scope: Resume Pro payments are handled by this module (FR-021 – FR-024, A-14). |
+| Refunds, proration, coupons, free trials, annual plans, pausing a subscription | Not in the change request. Refunds are handled by support in the Razorpay Dashboard (A-20). |
+| Invoice and GST document generation | Razorpay creates and emails invoices (A-15) |
+| Payment providers other than Razorpay; changing the payment method inside this module | Razorpay is the provider named in the change request. Razorpay's emails let the user update the mandate. |
+| Pro plan for teams or for several accounts | Not requested |
 | OCR for scanned or image-only PDFs | Adds cost and lowers accuracy; such files are rejected with `NO_TEXT_FOUND` |
 | Resumes not in English; `.doc`, `.rtf`, `.txt` and image files | See A-07 and FR-005 |
 | Editing the resume in the app or creating a new resume file | The product description asks for analysis and suggestions only |
