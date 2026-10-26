@@ -437,7 +437,7 @@ Priorities: **Must** = needed for go-live; **Should** = planned for go-live, may
 | FR-022 | Automatic retention | Data is deleted automatically when its retention period ends. | Must | 1. `RetentionJob` runs at minute 15 of every hour (`cron = "0 15 * * * *"`, zone UTC), guarded by ShedLock so only one instance runs it (`lockAtMostFor = 50m`). 2. It deletes, in batches of 500 rows per transaction: analyses with `expires_at <= now` that are not `QUEUED`/`PROCESSING`; resumes with `expires_at <= now` that have no `QUEUED`/`PROCESSING` analysis (their remaining analyses keep `resume_id = NULL` via `ON DELETE SET NULL`); consents withdrawn more than `AUDIT_RETENTION` ago; TBL-010 and TBL-011 rows older than `AUDIT_RETENTION`; TBL-007 rows whose period ended more than 13 months ago; *(v1.1)* TBL-013 rows with `ended_at <= now − PAYMENT_RETENTION` (their TBL-014 rows cascade); TBL-013 rows still `CREATED` whose `checkout_expires_at` passed more than 7 days ago (never paid, so no accounting record; their TBL-014 set is empty); TBL-015 rows with `received_at <= now − WEBHOOK_EVENT_RETENTION`. 3. It logs one `INFO` line with the deleted counts per table, and `ERROR` (plus metric `ro_retention_failures_total`) on failure; the next run retries. 4. Data is never kept more than 1 hour 15 minutes past its expiry (NFR-008). |
 | FR-023 | Manage job-role catalogue | An admin creates and edits job roles and their skills. Roles are deactivated, never deleted, because analyses reference them. | Should | 1. API-014 lists all roles including inactive ones, sorted by name. 2. API-015 creates a role; API-016 replaces a role's `name`, `description`, `isActive` and the full `skills` list. 3. Validation: `name` 3–100 characters, unique ignoring case (else `409 JOB_ROLE_NAME_TAKEN`, ERR-028); `description` 0–500 characters; `skills` 1–40 items, each `name` 1–60 characters, unique within the role ignoring case, `importance` ∈ `REQUIRED`, `PREFERRED`; at least one `REQUIRED` skill. 4. Creating the 201st role → `409 JOB_ROLE_LIMIT_REACHED` (ERR-035). 5. Changes affect only analyses created afterwards (FR-012 criterion 4). 6. Each create/update writes audit event `JOB_ROLE_CREATED` / `JOB_ROLE_UPDATED`. 7. Non-admins get `403 FORBIDDEN`. |
 | FR-024 | Upgrade prompt | *(changed in v1.1)* Free users are told what they are missing and where to upgrade. | Should | 1. When `suggestions.lockedCount > 0`, the analysis page shows "Get Resume Pro to see {lockedCount} more suggestions" (key `analysis.lockedCta`) linking to the in-Module page `PRO_PAGE_PATH` (`/resume-optimizer/pro`, FR-030) in the same tab. 2. When API-007 returns `QUOTA_EXCEEDED` for a FREE user, the page shows the error text plus the same link and the reset date (`details.resetsAt`, shown per CR-031). 3. PRO users never see an upgrade prompt. 4. *(replaced in v1.1)* ~~The Module does not handle payment (OOS-02).~~ Payment is handled by the Module through Razorpay (FR-026…029). 5. The places, wording and number of prompts are the same as in v1.0; only the product name and the link target changed, because the Platform pricing page (`UPGRADE_URL`, deprecated) does not sell Resume Pro. |
-| FR-025 | Resume Pro entitlement *(new in v1.1)* | The Module decides on every request whether the user is `PRO` or `FREE`, from the user's subscriptions. | Must | 1. For each of the user's TBL-013 rows, `access_until` = `paid_through + RENEWAL_GRACE` when `status = 'ACTIVE' AND cancel_at_period_end = false`, otherwise `paid_through` (null when never paid). 2. The user's plan is `PRO` if the largest `access_until` is later than now, otherwise `FREE`. The grace covers only a renewal webhook that arrives late; it never applies to a cancelled, past-due or ended subscription. 3. Computed by CMP-025 with one query on `ix_subscriptions_user_id_paid_through` (§5.3) once per request, after authentication; the result is used by every check of that request (FR-001, FR-008/009, FR-014, FR-018, FR-031). 4. `proUntil` in API-001 and API-018 is that largest `access_until` when `PRO`, else `null`. 5. Examples (now = `2026-11-26T10:00Z`, grace 24 h): ACTIVE renewing, `paid_through = 2026-11-26T09:00Z` → PRO until `2026-11-27T09:00Z`; same row with `cancel_at_period_end = true` → FREE; ENDED (`USER_CANCELLED`), `paid_through = 2026-11-30T00:00Z` → PRO until `2026-11-30T00:00Z`; PAST_DUE, `paid_through = 2026-11-26T09:00Z` → FREE; no row → FREE. 6. An admin is not PRO unless they have such a subscription (CR-006). |
+| FR-025 | Resume Pro entitlement *(new in v1.1)* | The Module decides on every request whether the user is `PRO` or `FREE`, from the user's subscriptions. | Must | 1. For each of the user's TBL-013 rows, `access_until` = `paid_through + RENEWAL_GRACE` when `status = 'ACTIVE' AND cancel_at_period_end = false`, otherwise `paid_through` (null when never paid). 2. The user's plan is `PRO` if the largest `access_until` is later than now, otherwise `FREE`. The grace covers only a renewal webhook that arrives late; it never applies to a cancelled, past-due or ended subscription. 3. Computed by CMP-025 with the TBL-013 entitlement query (§5.2) on `ix_subscriptions_user_id_created_at` (§5.3) once per request, after authentication; the result is used by every check of that request (FR-001, FR-008/009, FR-014, FR-018, FR-031). 4. `proUntil` in API-001 and API-018 is that largest `access_until` when `PRO`, else `null`. 5. Examples (now = `2026-11-26T10:00Z`, grace 24 h): ACTIVE renewing, `paid_through = 2026-11-26T09:00Z` → PRO until `2026-11-27T09:00Z`; same row with `cancel_at_period_end = true` → FREE; ENDED (`USER_CANCELLED`), `paid_through = 2026-11-30T00:00Z` → PRO until `2026-11-30T00:00Z`; PAST_DUE, `paid_through = 2026-11-26T09:00Z` → FREE; no row → FREE. 6. An admin is not PRO unless they have such a subscription (CR-006). |
 | FR-026 | Start a Resume Pro subscription *(new in v1.1)* | A FREE user accepts the Resume Pro terms and starts a Razorpay checkout for ₹299 per month. | Must | Checks in this order: 1. Body invalid: `acceptTerms` not `true` → `400 VALIDATION_FAILED` (`field = "acceptTerms"`, `code = "INVALID_VALUE"`); `termsVersion` missing → `400 VALIDATION_FAILED`. 2. `termsVersion ≠ PRO_TERMS_VERSION` → `409 PRO_TERMS_VERSION_MISMATCH` (ERR-038) with `details.currentVersion`. 3. The user is `PRO` (FR-025) → `409 SUBSCRIPTION_ALREADY_ACTIVE` (ERR-037) with `details = {status, proUntil}`. 4. The user has an open subscription with `status` `ACTIVE` or `PAST_DUE` → `409 SUBSCRIPTION_ALREADY_ACTIVE` (a past-due one must be cancelled first, FR-029). 5. The user has a `CREATED` subscription with `checkout_expires_at > now + 60 s` → return **that** one with `200` (no new Razorpay call), so double clicks and page reloads reuse one checkout. 6. A `CREATED` subscription with less than 60 s left → set `status = 'ENDED'`, `end_reason = 'CHECKOUT_EXPIRED'`, `ended_at = now` (no Razorpay call; Razorpay refuses payment after `expire_by`). 7. Create a Razorpay subscription per §4.6.7 (plan `RAZORPAY_PLAN_ID`, `total_count = PRO_TOTAL_COUNT`, `expire_by = now + CHECKOUT_TTL`, `customer_notify = 1`, `notes = {ro_user_id, ro_subscription_id}`); a Razorpay error or timeout → `502 PAYMENT_PROVIDER_UNAVAILABLE` (ERR-041) and nothing is stored. 8. Insert TBL-013 with `status = 'CREATED'`, `razorpay_status = 'created'`, `price_paise = PRO_PRICE_PAISE`, `currency = 'INR'`, `terms_version`, `terms_accepted_at = now`, `checkout_expires_at`; return `201` with the checkout parameters of §6.2 API-019. 9. Two concurrent requests: `ux_subscriptions_user_id_open` lets only one insert win; the loser re-reads and returns the winner's `CREATED` row with `200` (its own Razorpay subscription is left to expire). 10. The checkout never pre-fills the payer's name, e-mail or phone (CR-025, CR-042); Razorpay Checkout asks for them. |
 | FR-027 | Confirm the payment after checkout *(new in v1.1)* | After Razorpay Checkout reports success in the browser, the Module verifies it and grants Pro without waiting for the webhook. | Must | 1. The frontend's Checkout `handler` posts `razorpay_payment_id`, `razorpay_subscription_id` and `razorpay_signature` to API-020. 2. The subscription id must belong to the caller (TBL-013, any status), else `404 RESOURCE_NOT_FOUND`. 3. The signature must match CR-041 rule (3), else `400 PAYMENT_VERIFICATION_FAILED` (ERR-039) and nothing changes. 4. The Module then calls `syncFromProvider` (§4.6.7): it fetches the subscription and its invoices from Razorpay and applies them under a `SELECT … FOR UPDATE` on the TBL-013 row (paid invoices → TBL-014 rows and `paid_through = max(paid_through, billing_end)`; Razorpay status → our status per §4.6.7 table). Razorpay unreachable → `502 PAYMENT_PROVIDER_UNAVAILABLE`; the webhook (FR-028) or reconciliation (FR-032) will still finish the activation. 5. If afterwards the user is `PRO` → `200` with the API-018 body. If the payment is not captured yet → `202` with the same body (plan still `FREE`); the frontend then polls API-018 every 3 s for 60 s, then every 10 s for up to 10 minutes, showing "We are confirming your payment…" (key `pro.confirming`). 6. Calling API-020 again with the same values is harmless (idempotent: TBL-014 is unique on `razorpay_payment_id`, `paid_through` only grows). 7. The first time a subscription gets a paid invoice, `activated_at = now`, `status = 'ACTIVE'` and audit `SUBSCRIPTION_ACTIVATED` are written in the same transaction. |
 | FR-028 | Process Razorpay webhooks *(new in v1.1)* | Razorpay tells the Module about activations, renewals, failed payments and endings; the Module applies each event exactly once. | Must | 1. API-022 accepts only events with a valid signature (CR-041 rule 2) → otherwise `400 INVALID_WEBHOOK_SIGNATURE` (ERR-042), nothing stored. Header `x-razorpay-event-id` missing → `400 VALIDATION_FAILED`. Body over `WEBHOOK_MAX_BODY_BYTES`, or not valid JSON after the signature check → `400 MALFORMED_REQUEST`. 2. In one transaction: insert a TBL-015 row (`INSERT … ON CONFLICT (razorpay_event_id) DO NOTHING`); if 0 rows were inserted the event is a duplicate → return `200` and do nothing else. 3. The event is applied per the §4.6.7 event table: `subscription.activated` / `subscription.charged` / `subscription.pending` / `subscription.halted` / `subscription.cancelled` / `subscription.completed`; any other type is stored with `outcome = 'IGNORED_EVENT_TYPE'`. 4. The TBL-013 row is found by `razorpay_subscription_id`, locked `FOR UPDATE`; not found → outcome `IGNORED_UNKNOWN_SUBSCRIPTION`, `WARN` log, `200` (an event from another environment's subscription must not be retried for 24 hours). 5. Money always wins: `subscription.charged` always inserts its TBL-014 row (unique on `razorpay_payment_id`) and sets `paid_through = max(paid_through, subscription.current_end)`, in whatever order it arrives and even if the row is `ENDED`; a charge on an `ENDED` row also logs `ERROR billing_charge_after_end` and increments `ro_billing_anomalies_total`. 6. Status changes from all other events are applied only if the event's `created_at` is not older than `last_provider_event_at`; an older one is stored with `outcome = 'IGNORED_STALE'`. `ENDED` is final: no event moves a row out of `ENDED`. 7. Every applied event sets `razorpay_status`, `last_provider_event_at` and `updated_at`, and writes the CR-040 audit row where one applies. 8. The response is `200` with an empty JSON object within `WEBHOOK_RESPONSE_BUDGET` (NFR-019); the handler makes no outbound calls inside the request (the one Razorpay call that `subscription.halted` needs is made by FR-032). 9. Razorpay redelivers any non-2xx for up to 24 hours, so a `500` or `503` (database down) is safe: the event is applied on a later delivery. |
@@ -1478,7 +1478,7 @@ Dashboards: "RO — API" (traffic, latency, errors per endpoint), "RO — Analys
 
 ## 5. ERD and database design
 
-PostgreSQL 16, database `resume_optimizer`, one schema `ro`, created by Flyway `V1__create_schema.sql` (tables, constraints, indexes exactly as below) and `V2__seed_job_roles.sql` (§5.6). Configuration: `spring.flyway.schemas=ro`, `spring.flyway.default-schema=ro`, `spring.jpa.properties.hibernate.default_schema=ro`, and both database users have `search_path = ro`. Extension `pgcrypto` is not needed (`gen_random_uuid()` is built in since PostgreSQL 13).
+PostgreSQL 16, database `resume_optimizer`, one schema `ro`, created by Flyway `V1__create_schema.sql` (tables, constraints, indexes exactly as below), `V2__seed_job_roles.sql` (§5.6) and, since v1.1, `V3__resume_pro_billing.sql` (§5.7). Configuration: `spring.flyway.schemas=ro`, `spring.flyway.default-schema=ro`, `spring.jpa.properties.hibernate.default_schema=ro`, and both database users have `search_path = ro`. Extension `pgcrypto` is not needed (`gen_random_uuid()` is built in since PostgreSQL 13).
 
 Common rules for every table:
 - Primary keys are `uuid` with default `gen_random_uuid()` unless stated; the application never chooses ids except the fixed seed ids of §5.6.
@@ -1497,6 +1497,8 @@ erDiagram
   ANALYSES ||--o{ ANALYSIS_DIMENSION_SCORES : "has 0 or 6 (CASCADE)"
   ANALYSES ||--o{ ANALYSIS_SKILLS : "has 0..40 (CASCADE)"
   ANALYSES ||--o{ ANALYSIS_SUGGESTIONS : "has 0..10 (CASCADE)"
+  SUBSCRIPTIONS ||--o{ SUBSCRIPTION_PAYMENTS : "is paid by 0..120 (CASCADE)"
+  SUBSCRIPTIONS |o--o{ PAYMENT_WEBHOOK_EVENTS : "is changed by (SET NULL)"
 
   CONSENTS {
     uuid id PK
@@ -1615,9 +1617,59 @@ erDiagram
     timestamp locked_at
     varchar locked_by
   }
+  SUBSCRIPTIONS {
+    uuid id PK
+    uuid user_id
+    varchar razorpay_subscription_id UK
+    varchar razorpay_plan_id
+    varchar razorpay_status
+    varchar status
+    varchar end_reason
+    int price_paise
+    char currency
+    varchar terms_version
+    timestamptz terms_accepted_at
+    timestamptz checkout_expires_at
+    timestamptz current_period_start
+    timestamptz current_period_end
+    timestamptz paid_through
+    int paid_cycle_count
+    boolean cancel_at_period_end
+    timestamptz cancel_requested_at
+    timestamptz activated_at
+    timestamptz ended_at
+    timestamptz last_provider_event_at
+    timestamptz created_at
+    timestamptz updated_at
+  }
+  SUBSCRIPTION_PAYMENTS {
+    uuid id PK
+    uuid subscription_id FK
+    uuid user_id
+    varchar razorpay_payment_id UK
+    varchar razorpay_invoice_id
+    int amount_paise
+    char currency
+    timestamptz cycle_start
+    timestamptz cycle_end
+    timestamptz paid_at
+    varchar source
+    timestamptz created_at
+  }
+  PAYMENT_WEBHOOK_EVENTS {
+    uuid id PK
+    varchar razorpay_event_id UK
+    varchar event_type
+    varchar razorpay_subscription_id
+    varchar razorpay_payment_id
+    uuid subscription_id FK
+    timestamptz provider_created_at
+    timestamptz received_at
+    varchar outcome
+  }
 ```
 
-`CONSENTS`, `RESUMES`, `ANALYSES`, `USAGE_PERIODS`, `DATA_ERASURE_REQUESTS` and `AUDIT_EVENTS` are all keyed to the same Platform user through `user_id` / `actor_user_id`; that link is logical (no users table) and is what erasure (FR-021) and export (FR-020) filter on.
+`CONSENTS`, `RESUMES`, `ANALYSES`, `USAGE_PERIODS`, `DATA_ERASURE_REQUESTS`, `AUDIT_EVENTS` and (v1.1) `SUBSCRIPTIONS` and `SUBSCRIPTION_PAYMENTS` are all keyed to the same Platform user through `user_id` / `actor_user_id`; that link is logical (no users table) and is what erasure (FR-021) and export (FR-020) filter on. `PAYMENT_WEBHOOK_EVENTS` has no `user_id`: it reaches a user only through `subscription_id`.
 
 ### 5.2 Tables
 
@@ -1668,7 +1720,7 @@ Purpose: one analysis, its result header, and its queue state (FR-008…019).
 | status | varchar(12) | NO | | `'QUEUED'` | `ck_analyses_status`: `IN ('QUEUED','PROCESSING','COMPLETED','FAILED')` |
 | failure_code | varchar(30) | YES | | `NULL` | `ck_analyses_failure_code`: `failure_code IS NULL OR failure_code IN ('AI_UNAVAILABLE','AI_INVALID_RESPONSE','AI_REFUSED','PROCESSING_TIMEOUT')`; `ck_analyses_failure_code_iff_failed`: `(status = 'FAILED') = (failure_code IS NOT NULL)` |
 | overall_score | smallint | YES | | `NULL` | `ck_analyses_score_range`: `overall_score IS NULL OR overall_score BETWEEN 0 AND 100`; `ck_analyses_score_iff_completed`: `(status = 'COMPLETED') = (overall_score IS NOT NULL)` |
-| plan_at_creation | varchar(7) | NO | | — | `ck_analyses_plan`: `IN ('FREE','PREMIUM')`. Recorded for support and metrics; visibility uses the current plan (FR-014) |
+| plan_at_creation | varchar(7) | NO | | — | *(changed in v1.1)* `ck_analyses_plan`: `IN ('FREE','PRO','PREMIUM')`. v1.1 writes only `FREE` or `PRO` (FR-008 step 9); `PREMIUM` stays allowed because v1.0 rows and v1.0 tasks still running during the rolling deploy may hold it (CR-038), and it is read as "not FREE" in metrics. Recorded for support and metrics (NFR-013 Pro cost); visibility uses the current plan (FR-014) |
 | quota_period | char(7) | NO | | — | `YYYY-MM` in `Asia/Kolkata` (FR-009). `ck_analyses_quota_period`: `quota_period ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'` |
 | idempotency_key | uuid | NO | | — | From header `Idempotency-Key`. Unique per user (`ux_analyses_user_id_idempotency_key`) |
 | attempt_count | smallint | NO | | `0` | `ck_analyses_attempt_count`: `BETWEEN 0 AND 10` |
@@ -1727,7 +1779,7 @@ Purpose: the monthly quota counter per user (FR-009). Kept after erasure (FR-009
 | used_count | integer | NO | | `0` | Units reserved and not refunded. `ck_usage_periods_used_count`: `used_count >= 0` |
 | updated_at | timestamptz | NO | | `now()` | |
 
-The limit is **not** stored: it depends on the plan in the token at creation time (FR-009 criterion 3).
+The limit is **not** stored: it depends on the plan at creation time (FR-009 criterion 3; since v1.1 the FR-025 plan, and PRO has no limit but is still counted).
 
 #### TBL-008 `job_roles`
 Purpose: the job-role catalogue (FR-003, FR-023).
@@ -1776,21 +1828,97 @@ Purpose: append-only audit trail of the actions in CR-040. Never contains person
 | id | bigint | NO | PK `pk_audit_events` | `GENERATED ALWAYS AS IDENTITY` | |
 | occurred_at | timestamptz | NO | | `now()` | |
 | actor_user_id | uuid | NO | | — | Who did it |
-| action | varchar(30) | NO | | — | `ck_audit_events_action`: `IN ('CONSENT_ACCEPTED','CONSENT_WITHDRAWN','DATA_EXPORTED','DATA_ERASED','JOB_ROLE_CREATED','JOB_ROLE_UPDATED')` |
-| target_type | varchar(20) | NO | | — | `ck_audit_events_target_type`: `IN ('CONSENT','USER_DATA','JOB_ROLE')` |
-| target_id | uuid | YES | | `NULL` | Consent id, erasure id or job-role id; `NULL` for `DATA_EXPORTED` |
+| action | varchar(30) | NO | | — | `ck_audit_events_action`: `IN ('CONSENT_ACCEPTED','CONSENT_WITHDRAWN','DATA_EXPORTED','DATA_ERASED','JOB_ROLE_CREATED','JOB_ROLE_UPDATED','SUBSCRIPTION_ACTIVATED','SUBSCRIPTION_RENEWED','SUBSCRIPTION_CANCEL_REQUESTED','SUBSCRIPTION_ENDED')` (the last four added in v1.1) |
+| target_type | varchar(20) | NO | | — | `ck_audit_events_target_type`: `IN ('CONSENT','USER_DATA','JOB_ROLE','SUBSCRIPTION')` (`SUBSCRIPTION` added in v1.1) |
+| target_id | uuid | YES | | `NULL` | Consent id, erasure id, job-role id or (v1.1) TBL-013 subscription id; `NULL` for `DATA_EXPORTED` |
 | request_id | uuid | YES | | `NULL` | CR-011 request id |
-| metadata | jsonb | NO | | `'{}'::jsonb` | Only ids, counts, enum values and version strings, e.g. `{"noticeVersion":"2026-10-v1"}`, `{"deletedResumeCount":3,"deletedAnalysisCount":7}`, `{"skillCount":14,"isActive":true}` |
+| metadata | jsonb | NO | | `'{}'::jsonb` | Only ids, counts, enum values, amounts and version strings, e.g. `{"noticeVersion":"2026-10-v1"}`, `{"deletedResumeCount":3,"deletedAnalysisCount":7}`, `{"skillCount":14,"isActive":true}`, (v1.1) `{"razorpaySubscriptionId":"sub_O1aBcDeFgHiJkL","amountPaise":29900,"paidThrough":"2026-11-26T09:12:40.000Z","path":"verify"}`, `{"endReason":"USER_CANCELLED"}` |
 
 #### TBL-012 `shedlock`
 Purpose: ShedLock's lock table for the retention job (CMP-015). Standard ShedLock schema; the lock provider is configured with `usingDbTime()`.
 
 | Column | Type | Null | Key | Default | Constraint / note |
 |---|---|---|---|---|---|
-| name | varchar(64) | NO | PK `pk_shedlock` | — | Lock name, here `retentionJob` |
+| name | varchar(64) | NO | PK `pk_shedlock` | — | Lock name: `retentionJob`, and since v1.1 `subscriptionReconciliationJob` |
 | lock_until | timestamp | NO | | — | |
 | locked_at | timestamp | NO | | — | |
 | locked_by | varchar(255) | NO | | — | |
+
+#### TBL-013 `subscriptions` *(v1.1)*
+Purpose: one Razorpay subscription of one user, and the source of the user's plan (FR-025…030, FR-032).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK `pk_subscriptions` | — | Chosen by the application **before** calling Razorpay, so it can go into `notes.ro_subscription_id` (FR-026) |
+| user_id | uuid | NO | | — | Platform `sub` |
+| razorpay_subscription_id | varchar(40) | NO | UNIQUE `ux_subscriptions_razorpay_subscription_id` | — | `ck_subscriptions_razorpay_id`: `razorpay_subscription_id ~ '^sub_[A-Za-z0-9]{1,36}$'` |
+| razorpay_plan_id | varchar(40) | NO | | — | `RAZORPAY_PLAN_ID` at checkout time |
+| razorpay_status | varchar(15) | NO | | `'created'` | Last status seen from Razorpay. `ck_subscriptions_razorpay_status`: `IN ('created','authenticated','active','pending','halted','cancelled','completed','expired','paused')` |
+| status | varchar(10) | NO | | `'CREATED'` | Our status (§4.3.12). `ck_subscriptions_status`: `IN ('CREATED','ACTIVE','PAST_DUE','ENDED')` |
+| end_reason | varchar(25) | YES | | `NULL` | `ck_subscriptions_end_reason`: `end_reason IS NULL OR end_reason IN ('USER_CANCELLED','PAYMENT_FAILED','CHECKOUT_EXPIRED','COMPLETED','CANCELLED_EXTERNALLY')`; `ck_subscriptions_end_reason_iff_ended`: `(status = 'ENDED') = (end_reason IS NOT NULL)` |
+| price_paise | integer | NO | | — | `PRO_PRICE_PAISE` at checkout. `ck_subscriptions_price`: `price_paise > 0` |
+| currency | char(3) | NO | | `'INR'` | `ck_subscriptions_currency`: `currency = 'INR'` |
+| terms_version | varchar(30) | NO | | — | `PRO_TERMS_VERSION` the user accepted (FR-026) |
+| terms_accepted_at | timestamptz | NO | | `now()` | |
+| checkout_expires_at | timestamptz | NO | | — | `created_at + CHECKOUT_TTL`, also sent as `expire_by`. `ck_subscriptions_checkout_expiry`: `checkout_expires_at > created_at` |
+| current_period_start | timestamptz | YES | | `NULL` | Razorpay `current_start` |
+| current_period_end | timestamptz | YES | | `NULL` | Razorpay `current_end`. `ck_subscriptions_period`: `(current_period_start IS NULL AND current_period_end IS NULL) OR current_period_end > current_period_start` |
+| paid_through | timestamptz | YES | | `NULL` | End of the last **paid** cycle; only ever increases (§4.6.7). `ck_subscriptions_active_paid`: `status <> 'ACTIVE' OR paid_through IS NOT NULL` |
+| paid_cycle_count | integer | NO | | `0` | Number of TBL-014 rows. `ck_subscriptions_paid_cycle_count`: `>= 0` |
+| cancel_at_period_end | boolean | NO | | `false` | Set by FR-029 for an `ACTIVE` subscription |
+| cancel_requested_at | timestamptz | YES | | `NULL` | `ck_subscriptions_cancel_requested`: `cancel_at_period_end = false OR cancel_requested_at IS NOT NULL` |
+| activated_at | timestamptz | YES | | `NULL` | First paid cycle |
+| ended_at | timestamptz | YES | | `NULL` | `ck_subscriptions_ended_at_iff_ended`: `(status = 'ENDED') = (ended_at IS NOT NULL)` |
+| last_provider_event_at | timestamptz | YES | | `NULL` | `created_at` of the newest webhook applied (FR-028 criterion 6) |
+| created_at | timestamptz | NO | | `now()` | |
+| updated_at | timestamptz | NO | | `now()` | Set on every change; the reconciliation job processes the oldest first |
+
+At most one row per user has `status IN ('CREATED','ACTIVE','PAST_DUE')` (`ux_subscriptions_user_id_open`).
+
+**Entitlement query** (CMP-025, FR-025), with `:grace = RENEWAL_GRACE`:
+
+```sql
+SELECT max(CASE WHEN status = 'ACTIVE' AND NOT cancel_at_period_end
+                THEN paid_through + :grace
+                ELSE paid_through END) AS access_until
+FROM ro.subscriptions
+WHERE user_id = :userId;
+```
+
+`PRO` if `access_until > now()` (rows with a null `paid_through` give null and are ignored by `max`).
+
+#### TBL-014 `subscription_payments` *(v1.1)*
+Purpose: one row per paid billing cycle; the accounting record and the only source of `paid_through` (FR-027, FR-028, CR-042).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK `pk_subscription_payments` | `gen_random_uuid()` | |
+| subscription_id | uuid | NO | FK `fk_subscription_payments_subscription_id` → `subscriptions(id)` `ON DELETE CASCADE` | — | |
+| user_id | uuid | NO | | — | Copy of `subscriptions.user_id`, for the export (FR-020) |
+| razorpay_payment_id | varchar(40) | NO | UNIQUE `ux_subscription_payments_razorpay_payment_id` | — | `ck_subscription_payments_payment_id`: `razorpay_payment_id ~ '^pay_[A-Za-z0-9]{1,36}$'`. The uniqueness is what makes webhook and sync idempotent |
+| razorpay_invoice_id | varchar(40) | YES | | `NULL` | `inv_…` when Razorpay gives it |
+| amount_paise | integer | NO | | — | Amount Razorpay captured. `ck_subscription_payments_amount`: `amount_paise > 0` |
+| currency | char(3) | NO | | — | `ck_subscription_payments_currency`: `currency = 'INR'` |
+| cycle_start | timestamptz | NO | | — | |
+| cycle_end | timestamptz | NO | | — | `ck_subscription_payments_cycle`: `cycle_end > cycle_start` |
+| paid_at | timestamptz | NO | | — | Razorpay payment time |
+| source | varchar(7) | NO | | — | Which path recorded it first. `ck_subscription_payments_source`: `IN ('WEBHOOK','SYNC')` |
+| created_at | timestamptz | NO | | `now()` | |
+
+#### TBL-015 `payment_webhook_events` *(v1.1)*
+Purpose: the deduplication log of Razorpay webhook deliveries (FR-028). Holds ids and types only, never the body (CR-042).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK `pk_payment_webhook_events` | `gen_random_uuid()` | |
+| razorpay_event_id | varchar(64) | NO | UNIQUE `ux_payment_webhook_events_razorpay_event_id` | — | Header `x-razorpay-event-id` |
+| event_type | varchar(50) | NO | | — | Body `event`, e.g. `subscription.charged` |
+| razorpay_subscription_id | varchar(40) | YES | | `NULL` | `payload.subscription.entity.id` |
+| razorpay_payment_id | varchar(40) | YES | | `NULL` | `payload.payment.entity.id` |
+| subscription_id | uuid | YES | FK `fk_payment_webhook_events_subscription_id` → `subscriptions(id)` `ON DELETE SET NULL` | `NULL` | Null when the subscription is unknown |
+| provider_created_at | timestamptz | NO | | — | Body `created_at` |
+| received_at | timestamptz | NO | | `now()` | |
+| outcome | varchar(30) | NO | | `'RECEIVED'` | `ck_payment_webhook_events_outcome`: `IN ('RECEIVED','APPLIED','IGNORED_EVENT_TYPE','IGNORED_UNKNOWN_SUBSCRIPTION','IGNORED_STALE')`. Inserted as `RECEIVED` (that insert is the de-duplication) and set to the final value in the same transaction, so a committed row is never `RECEIVED`. `APPLIED` = something changed (a stale `subscription.charged` that still added a payment is `APPLIED`); `IGNORED_STALE` = nothing changed because the event was older than `last_provider_event_at` |
 
 ### 5.3 Indexes
 
@@ -1813,6 +1941,16 @@ Purpose: ShedLock's lock table for the retention job (CMP-015). Standard ShedLoc
 | data_erasure_requests | `ix_data_erasure_requests_expires_at` | `expires_at` | Retention |
 | audit_events | `ix_audit_events_occurred_at` | `occurred_at` | Retention; reading recent events |
 | audit_events | `ix_audit_events_actor_user_id_occurred_at` | `actor_user_id, occurred_at DESC` | Support/compliance lookup of a user's actions |
+| subscriptions *(v1.1)* | `ux_subscriptions_razorpay_subscription_id` (unique) | `razorpay_subscription_id` | Webhook and verify lookups by Razorpay id (FR-027, FR-028) |
+| subscriptions *(v1.1)* | `ux_subscriptions_user_id_open` (unique, partial `WHERE status IN ('CREATED','ACTIVE','PAST_DUE')`) | `user_id` | Enforces one open subscription per user (FR-026 check 9) and finds it for checkout and cancel |
+| subscriptions *(v1.1)* | `ix_subscriptions_user_id_created_at` | `user_id, created_at DESC` | The entitlement query on every request (FR-025, NFR-021), the "latest subscription" of API-018, and the export |
+| subscriptions *(v1.1)* | `ix_subscriptions_reconcile` (partial `WHERE status IN ('CREATED','ACTIVE','PAST_DUE') OR razorpay_status = 'halted'`) | `updated_at` | FR-032 scan, oldest first, over the few open rows |
+| subscriptions *(v1.1)* | `ix_subscriptions_ended_at` (partial `WHERE ended_at IS NOT NULL`) | `ended_at` | Retention after `PAYMENT_RETENTION` (FR-022) |
+| subscription_payments *(v1.1)* | `ux_subscription_payments_razorpay_payment_id` (unique) | `razorpay_payment_id` | Idempotent insert from webhook and sync |
+| subscription_payments *(v1.1)* | `ix_subscription_payments_subscription_id_cycle_start` | `subscription_id, cycle_start` | FK cascade, `paid_cycle_count`, export ordering |
+| payment_webhook_events *(v1.1)* | `ux_payment_webhook_events_razorpay_event_id` (unique) | `razorpay_event_id` | De-duplication (FR-028 criterion 2) |
+| payment_webhook_events *(v1.1)* | `ix_payment_webhook_events_received_at` | `received_at` | Retention after `WEBHOOK_EVENT_RETENTION` |
+| payment_webhook_events *(v1.1)* | `ix_payment_webhook_events_subscription_id` | `subscription_id` | FK `SET NULL` action when a subscription is deleted by retention |
 
 Primary keys provide the remaining lookups: `analysis_dimension_scores` and `analysis_skills` by `analysis_id` (PK prefix), `usage_periods` by `(user_id, period)`, `job_role_skills` by `job_role_id`.
 
@@ -1826,7 +1964,9 @@ Primary keys provide the remaining lookups: `analysis_dimension_scores` and `ana
 | `analysis_dimension_scores.analysis_id` | `analyses.id` | 0 or 6 to 1 | `CASCADE` | Part of the analysis. |
 | `analysis_skills.analysis_id` | `analyses.id` | 0..40 to 1 | `CASCADE` | Part of the analysis. |
 | `analysis_suggestions.analysis_id` | `analyses.id` | 0..10 to 1 | `CASCADE` | Part of the analysis. |
-| `consents`, `resumes`, `analyses`, `usage_periods`, `data_erasure_requests` `.user_id`; `audit_events.actor_user_id` | Platform user (no table) | many to 1 (logical) | — | Erasure (FR-021) deletes `analyses` (cascading to children) and `resumes`, sets `consents.withdrawn_at`, and keeps `usage_periods`, `data_erasure_requests` and `audit_events`, which hold no resume content and are needed to enforce the quota and prove compliance; they expire per CR-022. |
+| `subscription_payments.subscription_id` *(v1.1)* | `subscriptions.id` | 0..120 to 1 | `CASCADE` | A payment row has no meaning without its subscription; both are deleted together by retention after `PAYMENT_RETENTION`. |
+| `payment_webhook_events.subscription_id` *(v1.1)* | `subscriptions.id` | many to 0..1 | `SET NULL` | Event rows live only 90 days and must never block deleting a subscription. |
+| `consents`, `resumes`, `analyses`, `usage_periods`, `data_erasure_requests`, (v1.1) `subscriptions`, `subscription_payments` `.user_id`; `audit_events.actor_user_id` | Platform user (no table) | many to 1 (logical); (v1.1) at most 1 open subscription per user | — | Erasure (FR-021) deletes `analyses` (cascading to children) and `resumes`, sets `consents.withdrawn_at`, and keeps `usage_periods`, `data_erasure_requests`, `audit_events` and (v1.1) `subscriptions` and `subscription_payments`, which hold no resume content and are needed to enforce the quota, prove compliance and keep the accounts the law requires (CR-042); they expire per CR-022. |
 
 ### 5.5 Data volume estimate
 
@@ -1837,8 +1977,11 @@ Primary keys provide the remaining lookups: `analysis_dimension_scores` and `ana
 | analysis_suggestions | ~16,000 | ~2.9 M | ~0.8 KB |
 | analysis_skills | ~28,000 | ~5 M | ~0.1 KB |
 | analysis_dimension_scores | ~12,000 | ~2.2 M | ~0.3 KB |
+| subscriptions *(v1.1)* | ~10 (assuming 3% of ~10,000 monthly users subscribe, ~300 open) | ~4,000 after 8 years | ~0.4 KB |
+| subscription_payments *(v1.1)* | ~10 | ~30,000 after 8 years | ~0.3 KB |
+| payment_webhook_events *(v1.1)* | ~25 (about 2–3 events per payment) | ~2,500 (90 days) | ~0.3 KB |
 
-Total ≈ 6 GB including indexes; RDS starts at 50 GB gp3 storage with autoscaling on.
+Total ≈ 6 GB including indexes (the billing tables add less than 20 MB); RDS starts at 50 GB gp3 storage with autoscaling on.
 
 ### 5.6 Seed data (`V2__seed_job_roles.sql`)
 
@@ -1856,6 +1999,20 @@ Ten active roles, `created_by = updated_by = 00000000-0000-0000-0000-00000000000
 | `10000000-0000-0000-0000-000000000008` | Product Manager | Defines what to build and why, and leads delivery with engineering and design. | Product Roadmap, User Research, Stakeholder Management, Agile, Requirements Writing, Prioritization, Data Analysis, Go-to-Market | SQL, A/B Testing, Jira, Wireframing, OKRs, Pricing Strategy |
 | `10000000-0000-0000-0000-000000000009` | UI/UX Designer | Researches users and designs usable, attractive digital products. | Figma, User Research, Wireframing, Prototyping, Visual Design, Interaction Design, Usability Testing, Design Systems | Adobe XD, Web Accessibility, HTML, CSS, Motion Design, Information Architecture |
 | `10000000-0000-0000-0000-000000000010` | Business Analyst | Captures business needs and turns them into clear requirements and process improvements. | Requirements Gathering, Process Mapping, SQL, Excel, Stakeholder Management, User Stories, Documentation, Gap Analysis | Power BI, Jira, BPMN, UML, Tableau, Agile |
+
+### 5.7 Migration `V3__resume_pro_billing.sql` *(v1.1)*
+
+Expand-only (CR-038): v1.0 keeps working on the new schema during the rolling deploy. Statements, in order:
+
+1. `ALTER TABLE analyses DROP CONSTRAINT ck_analyses_plan, ADD CONSTRAINT ck_analyses_plan CHECK (plan_at_creation IN ('FREE','PRO','PREMIUM'));`
+2. `ALTER TABLE audit_events DROP CONSTRAINT ck_audit_events_action, ADD CONSTRAINT ck_audit_events_action CHECK (action IN (…the ten values of TBL-011…));` and the same for `ck_audit_events_target_type` with `SUBSCRIPTION` added.
+3. `CREATE TABLE subscriptions (…)` exactly as TBL-013, with every named constraint.
+4. `CREATE TABLE subscription_payments (…)` exactly as TBL-014.
+5. `CREATE TABLE payment_webhook_events (…)` exactly as TBL-015.
+6. The ten indexes marked *(v1.1)* in §5.3.
+7. No data is migrated: no subscription exists before v1.1 (A-11), and old `PREMIUM` values stay as they are.
+
+The `ro_app` database user gets `SELECT, INSERT, UPDATE, DELETE` on the three new tables (same grants as the v1.0 tables).
 
 ---
 
