@@ -14,6 +14,7 @@
 
 - This file is the **only** input needed to build the system. When this document and any other source disagree, this document wins.
 - **MUST / MUST NOT** are hard rules. **SHOULD** is a strong default that may be broken only with a reason written in the PR. Anything not marked is descriptive.
+- Version v1.1 (2026-10-26) adds the Resume Pro paid plan. Everything it added or changed is marked *(v1.1)*, *(new in v1.1)* or *(changed in v1.1)* where it appears; retired items are marked **Deprecated** and keep their IDs. The full list is the v1.1 row of §8, and §7.4 maps each Round 2 item to where it is specified.
 - IDs are permanent and never reused: `CR-` common requirement, `FR-` functional, `NFR-` non-functional, `CMP-` component, `TBL-` table, `API-` endpoint, `ERR-` error code, `A-` assumption, `OOS-` out of scope.
 - Every number that appears in more than one section is defined **once**, in [§3.4 Business constants](#34-business-constants), and referenced by name elsewhere. If a value changes, it changes there.
 - Glossary:
@@ -3038,69 +3039,87 @@ Every FR and NFR appears here. `—` is used only where the item genuinely has n
 
 | Requirement | Component(s) | Table(s) | API(s) | Verified by |
 |---|---|---|---|---|
-| FR-001 | CMP-003, CMP-004, CMP-009 | TBL-001, TBL-007 | API-001 | `MeIT`: FREE/PREMIUM limits, no-row usage = 0, `resetsAt` for period `2026-10` = `2026-10-31T18:30:00.000Z`, works without consent (AC 1–4) |
+| FR-001 | CMP-003, CMP-004, CMP-009, CMP-025 (v1.1) | TBL-001, TBL-007, TBL-013 (v1.1) | API-001 | `MeIT`: FREE limit 3; *(v1.1)* PRO → `limit`/`remaining` null and `proUntil` set; no-row usage = 0, `resetsAt` for period `2026-10` = `2026-10-31T18:30:00.000Z`, works without consent (AC 1–4) |
 | FR-002 | CMP-001 (`/consent`), CMP-004, CMP-017 | TBL-001, TBL-011 | API-001, API-002, API-004, API-007 | `ConsentIT`: accept, idempotent re-accept, old version → `CONSENT_VERSION_MISMATCH`, upload/analysis without consent → `CONSENT_REQUIRED`, audit row (AC 1–6) |
 | FR-003 | CMP-005 | TBL-008, TBL-009 | API-003 | `JobRoleIT`: only active roles, name order, skill order; `SeedDataIT`: 10 roles × 14 skills after migration (AC 1–4) |
 | FR-004 | CMP-006, CMP-007, CMP-016 | TBL-001, TBL-002 | API-004 | `UploadIT`: one test per check 1–15 using the §2.6 fixtures, including the exact 5,242,880-byte boundary and "nothing stored on failure" |
 | FR-005 | CMP-007 | TBL-002 | API-004 | `TextNormaliserTest`, `LanguageDetectorTest`, `PiiRedactorTest` (every §4.6.3 row + the example), `PdfTextExtractorTest`, `DocxTextExtractorTest` (signals) |
 | FR-006 | CMP-006 | TBL-002, TBL-003 | API-005 | `ResumeListIT`: ownership, order, paging, expired excluded, `analysisCount` (AC 1–4) |
 | FR-007 | CMP-006 | TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-007 | API-006 | `ResumeDeleteIT`: cascade of analyses, 409 when in progress, 404 for others, quota unchanged (AC 1–4) |
-| FR-008 | CMP-004, CMP-005, CMP-008, CMP-009 | TBL-001, TBL-002, TBL-003, TBL-007, TBL-008 | API-007 | `CreateAnalysisIT`: one test per step 1–9 in order; `ConcurrentCreateIT`: 20 parallel requests with distinct keys → exactly 1 created, 19 × `ANALYSIS_IN_PROGRESS` (AC 10) |
-| FR-009 | CMP-008, CMP-009, CMP-010 | TBL-003, TBL-007 | API-001, API-007 | `QuotaIT`: FREE 4th → `QUOTA_EXCEEDED` with details; period at `2026-10-31T18:29:59Z` vs `18:30:00Z`; refund on FAILED; no refund on delete/erasure; downgrade case (AC 1–8) |
+| FR-008 | CMP-004, CMP-005, CMP-008, CMP-009, CMP-025 (v1.1) | TBL-001, TBL-002, TBL-003, TBL-007, TBL-008, TBL-013 (v1.1) | API-007 | `CreateAnalysisIT`: one test per step 1–9 in order (v1.1: `plan_at_creation = PRO` for a Pro user); `ConcurrentCreateIT`: 20 parallel requests with distinct keys → exactly 1 created, 19 × `ANALYSIS_IN_PROGRESS` (AC 10) |
+| FR-009 | CMP-008, CMP-009, CMP-010, CMP-025 (v1.1) | TBL-003, TBL-007, TBL-013 (v1.1) | API-001, API-007 | `QuotaIT`: FREE 4th → `QUOTA_EXCEEDED` with details; *(v1.1)* PRO 11 analyses in a month all succeed (rate limit raised in the test) and are counted; Pro access ends mid-month with `used ≥ 3` → `QUOTA_EXCEEDED`; period at `2026-10-31T18:29:59Z` vs `18:30:00Z`; refund on FAILED; no refund on delete/erasure (AC 1–9) |
 | FR-010 | CMP-010, CMP-011, CMP-012 | TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-008, TBL-009 | — (background worker; the result is read through API-009) | `WorkerIT` (stub AI and WireMock'd Anthropic): claim order, child rows, token counts, invalid-then-valid retry, discard when the analysis was erased (AC 1–5) |
 | FR-011 | CMP-012 | TBL-003, TBL-004 | API-008, API-009, API-010 | `ScoreCalculatorTest`: the FR-011 example (75), the API-009 example (73), rounding at .5, band edges 49/50/74/75/89/90 |
 | FR-012 | CMP-010, CMP-012 | TBL-005, TBL-009 | API-009, API-010 | `SkillDerivationTest`: case-insensitive match, unknown names dropped, REQUIRED-first order; `CatalogueSnapshotIT`: editing a role does not change an old analysis |
 | FR-013 | CMP-012 | TBL-006 | API-009 | `AiOutputValidatorTest`: every V3/V4 row (not in text, equal to suggested, too long, duplicate, > 10), priorities 1…n, zero suggestions |
-| FR-014 | CMP-008, CMP-013, CMP-014 | TBL-006 | API-009, API-010, API-012 | `SuggestionVisibilityIT`: FREE sees priorities 1–3 and `lockedCount`, locked text absent from API-009 JSON and from the PDF text, PREMIUM sees all, export has all, upgrade takes effect on next read |
+| FR-014 | CMP-008, CMP-013, CMP-014, CMP-025 (v1.1) | TBL-006, TBL-013 (v1.1) | API-009, API-010, API-012 | `SuggestionVisibilityIT`: FREE sees priorities 1–3 and `lockedCount`, locked text absent from API-009 JSON and from the PDF text, PRO sees all, export has all; *(v1.1)* subscribing takes effect on the next read, and when `paid_through` passes the same analysis shows only 3 again |
 | FR-015 | CMP-001, CMP-008 | TBL-003, TBL-004, TBL-005, TBL-006 | API-009 | `AnalysisReadIT`: null result fields until COMPLETED, `failureCode` only when FAILED; Playwright `analysis-polling.spec.ts`: 3 s polling, slow message after 120 s, "Try again" sends a new key |
-| FR-016 | CMP-008 | TBL-003 | API-008 | `AnalysisListIT`: order, paging, status filter, no suggestion text, `resume.id` null after expiry |
+| FR-016 | CMP-001, CMP-008 | TBL-003 | API-008 | `AnalysisListIT`: order, paging, status filter, no suggestion text, `resume.id` null after expiry; *(v1.1)* same response for a FREE and a PRO user; Playwright `history-compare.spec.ts`: checkboxes only for PRO |
 | FR-017 | CMP-008 | TBL-003, TBL-004, TBL-005, TBL-006, TBL-007 | API-011 | `AnalysisDeleteIT`: children removed, 409 in progress, 404 not owned, quota unchanged |
-| FR-018 | CMP-008, CMP-013 | TBL-003, TBL-004, TBL-005, TBL-006 | API-010 | `ReportIT`: headers and filename, 409 when not completed, PDF text (read back with PDFBox) contains the §4.8 sections; FREE PDF lacks locked suggestions |
+| FR-018 | CMP-008, CMP-013, CMP-025 (v1.1) | TBL-003, TBL-004, TBL-005, TBL-006, TBL-013 (v1.1) | API-010 | `ReportIT`: headers and filename, 409 when not completed, PDF text (read back with PDFBox) contains the §4.8 sections; FREE PDF lacks locked suggestions and shows the Resume Pro link; PRO PDF has all |
 | FR-019 | CMP-009, CMP-010, CMP-011 | TBL-003, TBL-007 | API-009 (`failureCode`) | `WorkerFailureIT` (WireMock 503 ×2, timeout, `stop_reason: refusal`, circuit open, deadline via `STUB-SLOW-400`); `WorkerRecoveryIT` (expired lease → attempt 2 → FAILED on attempt 3; stale queue); each asserts the refund |
-| FR-020 | CMP-014, CMP-017 | TBL-001, TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-011 | API-012 | `DataExportIT`: every section present, all suggestions included for FREE, filename, audit row, 6th export in a day → 429 |
-| FR-021 | CMP-010, CMP-014, CMP-017 | TBL-001, TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-010, TBL-011 | API-001, API-013 | `DataErasureIT`: confirm phrase, all rows gone incl. in-progress, consent withdrawn, usage kept, TBL-010 + audit rows, then API-001 `accepted = false` |
-| FR-022 | CMP-015 | TBL-001, TBL-002, TBL-003, TBL-007, TBL-010, TBL-011, TBL-012 | — (scheduled job, no endpoint) | `RetentionJobIT` with a fixed `Clock`: each table's boundary, resume with in-progress analysis skipped, `resume_id` set to NULL on surviving analyses, ShedLock prevents a parallel run |
+| FR-020 | CMP-014, CMP-017 | TBL-001, TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-011, TBL-013 (v1.1), TBL-014 (v1.1) | API-012 | `DataExportIT`: every section present, all suggestions included for FREE, filename, audit row, 6th export in a day → 429; *(v1.1)* `subscriptions[]` with `payments[]`, `[]` for a never-subscribed user |
+| FR-021 | CMP-001, CMP-010, CMP-014, CMP-017 | TBL-001, TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-010, TBL-011, TBL-013 (v1.1), TBL-014 (v1.1) | API-001, API-013, API-018 (v1.1) | `DataErasureIT`: confirm phrase, all rows gone incl. in-progress, consent withdrawn, usage kept, TBL-010 + audit rows, then API-001 `accepted = false`; *(v1.1)* subscription and payment rows kept, no Razorpay cancel call (WireMock asserts none), user still PRO; Playwright: Pro note shown in the dialog |
+| FR-022 | CMP-015 | TBL-001, TBL-002, TBL-003, TBL-007, TBL-010, TBL-011, TBL-012, TBL-013 (v1.1), TBL-014 (v1.1), TBL-015 (v1.1) | — (scheduled job, no endpoint) | `RetentionJobIT` with a fixed `Clock`: each table's boundary (v1.1: subscription ended 8 years ago deleted with its payments, one ended a day less kept; unpaid `CREATED` 8 days after expiry deleted; webhook event 90 days old deleted), resume with in-progress analysis skipped, `resume_id` set to NULL on surviving analyses, ShedLock prevents a parallel run |
 | FR-023 | CMP-005, CMP-017 | TBL-008, TBL-009, TBL-011 | API-014, API-015, API-016 | `AdminJobRoleIT`: each validation rule, name taken (case-insensitive), 201st role, inactive role hidden from API-003, FREE → 403, audit rows |
-| FR-024 | CMP-001, CMP-008 | TBL-006, TBL-007 | API-001, API-007, API-009 | Playwright `upgrade-prompt.spec.ts`: locked-count banner and quota message link to `UPGRADE_URL` for FREE; absent for PREMIUM |
+| FR-024 | CMP-001, CMP-008, CMP-025 (v1.1) | TBL-006, TBL-007, TBL-013 (v1.1) | API-001, API-007, API-009 | Playwright `upgrade-prompt.spec.ts`: locked-count banner and quota message link to `/resume-optimizer/pro` (v1.1, was `UPGRADE_URL`) for FREE; absent for PRO |
+| FR-025 *(v1.1)* | CMP-003, CMP-025 | TBL-013 | API-001, API-018 (and every endpoint that depends on the plan: API-007, API-009, API-010, API-023) | `EntitlementServiceTest`: the five FR-025 examples, grace only for ACTIVE renewing, `sb_plan` ignored, admin without subscription is FREE; `EntitlementQueryIT` against PostgreSQL |
+| FR-026 *(v1.1)* | CMP-001 (`/pro`), CMP-024, CMP-025, CMP-027, CMP-030 | TBL-013 | API-019 | `CheckoutIT` (WireMock Razorpay): one test per check 1–10 in order, reuse within TTL, expired `CREATED` ended, 20 parallel requests → one Razorpay subscription used by all, Razorpay 500/timeout → 502 and no row, no `prefill` in the response |
+| FR-027 *(v1.1)* | CMP-001, CMP-017, CMP-024, CMP-027, CMP-030 | TBL-013, TBL-014, TBL-011 | API-020, API-018 | `VerifyIT`: wrong owner → 404, bad signature → 400 and no change, valid → 200 PRO with one payment row and audit `SUBSCRIPTION_ACTIVATED`, invoice not paid yet → 202, repeated call → no second payment row; Playwright `pro-checkout.spec.ts` (stub gateway) end to end |
+| FR-028 *(v1.1)* | CMP-017, CMP-026 | TBL-011, TBL-013, TBL-014, TBL-015 | API-022 | `RazorpayWebhookIT` with signed fixtures: every row of the §4.6.7 event table, duplicate delivery ×10, reverse order (cancelled before charged), stale pending after charged, unknown type, unknown subscription, bad signature, unknown JSON field, charge after `ENDED` (anomaly metric), amount mismatch |
+| FR-029 *(v1.1)* | CMP-001, CMP-017, CMP-024, CMP-027, CMP-030 | TBL-011, TBL-013 | API-021, API-018 | `CancelIT`: ACTIVE → `cancel_at_cycle_end = 1` sent, PRO until `paid_through` and not after (fixed `Clock`), repeat → 200 no call; PAST_DUE → immediate cancel, ENDED; none/CREATED → 409; Razorpay 500 → 502 and no change; Razorpay 400 "already cancelled" → synced 200 |
+| FR-030 *(v1.1)* | CMP-001, CMP-024, CMP-025 | TBL-013 | API-001, API-018, API-019, API-021 | `SubscriptionStatusIT`: `displayState` for each of the six cases; Playwright `pro-page.spec.ts`: each state's text and buttons, dismissing Checkout leaves `CHECKOUT_PENDING`, dashboard Pro card |
+| FR-031 *(v1.1)* | CMP-001 (`/history`, `/compare`), CMP-008, CMP-025, CMP-029 | TBL-003, TBL-004, TBL-005, TBL-013 | API-023, API-008 | `ComparisonIT`: one test per check 1–5 in order, the API-023 example values (62 → 73, deltas), `skills` null for different roles, `sameTarget` false for a different level, catalogue edited between analyses → `notComparableCount`, expired resume still comparable, Pro ended → 403; `ComparisonServiceTest` for §4.6.8 |
+| FR-032 *(v1.1)* | CMP-024, CMP-027, CMP-028, CMP-030 | TBL-012, TBL-013, TBL-014 | — (scheduled job, no endpoint; results visible through API-001/API-018) | `ReconciliationJobIT` with a fixed `Clock` and WireMock: each group a–d, a lost renewal webhook repaired within one run, Razorpay error skips only that row, ShedLock prevents a parallel run |
 | NFR-001 | CMP-006, CMP-007 | TBL-002 | API-004 | k6 `upload.js` in staging: p95 ≤ 3 s, p99 ≤ 5 s |
 | NFR-002 | CMP-003, CMP-004, CMP-005, CMP-006, CMP-008 | TBL-001, TBL-002, TBL-003, TBL-007, TBL-008, TBL-009 (via §5.3 indexes) | API-001, API-003, API-005, API-008, API-009 | k6 `read-mix.js`; prod `http_server_requests_seconds` |
 | NFR-003 | CMP-010, CMP-011, CMP-012 | TBL-003 | API-007, API-009 | `ro_analysis_duration_seconds`; staging eval run with the live model |
 | NFR-004 | CMP-013 | TBL-003, TBL-004, TBL-005, TBL-006 | API-010 | k6 `report.js` |
-| NFR-005 | CMP-002, CMP-003, CMP-019, CMP-020 | All tables (availability of the database) | All of API-001…016 | Monthly CloudWatch availability report |
+| NFR-005 | CMP-002, CMP-003, CMP-019, CMP-020 | All tables (availability of the database) | All of API-001…016 and (v1.1) API-018…023 | Monthly CloudWatch availability report |
 | NFR-006 | CMP-010, CMP-019, CMP-020 | TBL-003 (`ix_analyses_queue`), TBL-007 | API-007, API-009 | k6 `peak.js` (300 analyses/hour, stub AI with 20 s latency); autoscaling policy review |
-| NFR-007 | CMP-003, CMP-016, CMP-018 | — (a code and configuration property, no table) | All of API-001…017 | CI `dependency-check-maven` and `npm audit`; ZAP baseline scan |
-| NFR-008 | CMP-007, CMP-015 and all logging | TBL-002, TBL-003, TBL-007, TBL-010, TBL-011 | API-004 | `NoPersonalDataInLogsIT`, `PiiRedactorTest`, `RetentionJobIT`, weekly prod expiry query |
+| NFR-007 | CMP-003, CMP-016, CMP-018 | — (a code and configuration property, no table) | All of API-001…023 | CI `dependency-check-maven` and `npm audit`; ZAP baseline scan |
+| NFR-008 | CMP-007, CMP-015, CMP-026 (v1.1) and all logging | TBL-002, TBL-003, TBL-007, TBL-010, TBL-011, TBL-013…015 (v1.1) | API-004, API-022 (v1.1) | `NoPersonalDataInLogsIT`, `RazorpayWebhookIT` canary, `PiiRedactorTest`, `RetentionJobIT`, weekly prod expiry query |
 | NFR-009 | CMP-014 | TBL-001, TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-010 | API-013 | `DataErasureIT` with 20 resumes + 300 analyses, timed |
 | NFR-010 | CMP-003, CMP-023 | — (metrics and logs, no table) | All (`X-Request-Id`) | `ObservabilityIT` (metric names on `/actuator/prometheus`); staging alert test |
 | NFR-011 | CMP-010 | TBL-003 | API-009 | `WorkerRecoveryIT`; prod alert `ro_analysis_stuck` |
 | NFR-012 | CMP-019 | All tables | — (infrastructure property, no endpoint) | 6-monthly restore drill |
-| NFR-013 | CMP-011 | TBL-003 (`ai_input_tokens`, `ai_output_tokens`) | — (cost is measured from metrics, no endpoint) | Monthly cost review; cost alert (§4.9) |
+| NFR-013 | CMP-011, CMP-023 | TBL-003 (`ai_input_tokens`, `ai_output_tokens`, `plan_at_creation`), TBL-013 (v1.1, Pro subscriber count) | — (cost is measured from metrics, no endpoint) | Monthly cost review; cost alerts "AI cost" and "Pro AI cost" (§4.9) |
 | NFR-014 | All backend components (CMP-003…018) | — (code-quality property) | — (code-quality property) | `./mvnw verify` in CI (JaCoCo, ArchUnit, Checkstyle) |
 | NFR-015 | CMP-001 | — (frontend property) | — (frontend property) | `@axe-core/playwright` on every §4.7 route |
 | NFR-016 | CMP-001 | — (frontend property) | — (frontend property) | Playwright projects Chromium/Firefox/WebKit at 360 px and 1280 px |
 | NFR-017 | CMP-011, CMP-012 | TBL-004 | API-009 | `run-eval.sh` (20 resumes × 3 runs) attached to any PR changing `AI_MODEL`, `AI_EFFORT` or the prompt |
+| NFR-018 *(v1.1)* | CMP-024, CMP-025, CMP-026, CMP-028 | TBL-013, TBL-014 | API-018, API-020, API-022 | `BillingFlowIT` (verify path, webhook-only path, all-webhooks-lost path); weekly prod "paid_through without payment" query = 0 |
+| NFR-019 *(v1.1)* | CMP-026 | TBL-013, TBL-014, TBL-015 | API-022 | `RazorpayWebhookIT` (duplicates, reverse order); `http_server_requests_seconds{uri=".../webhooks/razorpay"}` p99 |
+| NFR-020 *(v1.1)* | CMP-001, CMP-024, CMP-026, CMP-027 | — (a code and configuration property; no card data is stored anywhere) | API-019, API-020, API-022 | `RazorpaySignatureTest`, `RazorpayWebhookIT`, gitleaks, ZAP scan |
+| NFR-021 *(v1.1)* | CMP-025, CMP-029 | TBL-013 (`ix_subscriptions_user_id_created_at`), TBL-003…005 | API-018, API-023 (and the plan lookup on every endpoint) | k6 `read-mix.js` with API-018 and API-023; `ro_entitlement_lookup_seconds` |
 
 ### 7.2 Endpoints → requirements (reverse check)
 
 | API | Requirements |
 |---|---|
-| API-001 `GET /me` | FR-001, FR-002, FR-021, FR-024 |
+| API-001 `GET /me` | FR-001, FR-002, FR-021, FR-024, FR-025, FR-030 |
 | API-002 `POST /me/consent` | FR-002 |
 | API-003 `GET /job-roles` | FR-003 |
 | API-004 `POST /resumes` | FR-002, FR-004, FR-005 |
 | API-005 `GET /resumes` | FR-006 |
 | API-006 `DELETE /resumes/{resumeId}` | FR-007 |
-| API-007 `POST /analyses` | FR-002, FR-008, FR-009, FR-024 |
-| API-008 `GET /analyses` | FR-011, FR-016 |
-| API-009 `GET /analyses/{analysisId}` | FR-011, FR-012, FR-013, FR-014, FR-015, FR-019, FR-024 |
-| API-010 `GET /analyses/{analysisId}/report` | FR-011, FR-012, FR-014, FR-018 |
+| API-007 `POST /analyses` | FR-002, FR-008, FR-009, FR-024, FR-025 |
+| API-008 `GET /analyses` | FR-011, FR-016, FR-031 |
+| API-009 `GET /analyses/{analysisId}` | FR-011, FR-012, FR-013, FR-014, FR-015, FR-019, FR-024, FR-025 |
+| API-010 `GET /analyses/{analysisId}/report` | FR-011, FR-012, FR-014, FR-018, FR-025 |
 | API-011 `DELETE /analyses/{analysisId}` | FR-017 |
-| API-012 `GET /me/data-export` | FR-014, FR-020 |
-| API-013 `DELETE /me/data` | FR-021 |
+| API-012 `GET /me/data-export` | FR-014, FR-020, CR-042 |
+| API-013 `DELETE /me/data` | FR-021, CR-042 |
 | API-014 `GET /admin/job-roles` | FR-023 |
 | API-015 `POST /admin/job-roles` | FR-023 |
 | API-016 `PUT /admin/job-roles/{jobRoleId}` | FR-023 |
-| API-017 `POST /dev/token` | CR-001 (local-only exception), CR-033 |
+| API-017 `POST /dev/token` | CR-001 (local-only exception), CR-033, CR-006 (no plan since v1.1) |
+| API-018 `GET /me/subscription` *(v1.1)* | FR-021, FR-025, FR-027, FR-030 |
+| API-019 `POST /me/subscription/checkout` *(v1.1)* | FR-026, FR-030 |
+| API-020 `POST /me/subscription/verify` *(v1.1)* | FR-027 |
+| API-021 `POST /me/subscription/cancel` *(v1.1)* | FR-029, FR-030 |
+| API-022 `POST /webhooks/razorpay` *(v1.1)* | FR-028, CR-001 (signature instead of token), CR-041 |
+| API-023 `GET /analysis-comparisons` *(v1.1)* | FR-031 |
 
 ### 7.3 Tables → requirements (reverse check)
 
@@ -3108,16 +3127,29 @@ Every FR and NFR appears here. `—` is used only where the item genuinely has n
 |---|---|
 | TBL-001 `consents` | FR-001, FR-002, FR-004, FR-008, FR-020, FR-021, FR-022 |
 | TBL-002 `resumes` | FR-004, FR-005, FR-006, FR-007, FR-008, FR-010, FR-020, FR-021, FR-022 |
-| TBL-003 `analyses` | FR-008…FR-011, FR-015…FR-022 |
-| TBL-004 `analysis_dimension_scores` | FR-010, FR-011, FR-015, FR-018, FR-020 |
-| TBL-005 `analysis_skills` | FR-010, FR-012, FR-015, FR-018, FR-020 |
+| TBL-003 `analyses` | FR-008…FR-011, FR-015…FR-022, FR-031 (v1.1), NFR-013 |
+| TBL-004 `analysis_dimension_scores` | FR-010, FR-011, FR-015, FR-018, FR-020, FR-031 (v1.1) |
+| TBL-005 `analysis_skills` | FR-010, FR-012, FR-015, FR-018, FR-020, FR-031 (v1.1) |
 | TBL-006 `analysis_suggestions` | FR-010, FR-013, FR-014, FR-015, FR-018, FR-020, FR-024 |
 | TBL-007 `usage_periods` | FR-001, FR-009, FR-019, FR-020, FR-021, FR-022 |
 | TBL-008 `job_roles` | FR-003, FR-008, FR-010, FR-023 |
 | TBL-009 `job_role_skills` | FR-003, FR-010, FR-012, FR-023 |
 | TBL-010 `data_erasure_requests` | FR-021, FR-022 |
-| TBL-011 `audit_events` | CR-040, FR-002, FR-020, FR-021, FR-022, FR-023 |
-| TBL-012 `shedlock` | FR-022 |
+| TBL-011 `audit_events` | CR-040, FR-002, FR-020, FR-021, FR-022, FR-023, FR-027 (v1.1), FR-028 (v1.1), FR-029 (v1.1) |
+| TBL-012 `shedlock` | FR-022, FR-032 (v1.1) |
+| TBL-013 `subscriptions` *(v1.1)* | FR-001, FR-008, FR-009, FR-014, FR-018, FR-020, FR-021, FR-022, FR-024…FR-032, CR-006, CR-042 |
+| TBL-014 `subscription_payments` *(v1.1)* | FR-020, FR-021, FR-022, FR-027, FR-028, FR-032, CR-042, NFR-018 |
+| TBL-015 `payment_webhook_events` *(v1.1)* | FR-022, FR-028, CR-042, NFR-019 |
+
+### 7.4 Round 2 requirement → where it is specified *(v1.1)*
+
+| Round 2 item | Requirements | Architecture | DB | API |
+|---|---|---|---|---|
+| 1. Resume Pro, ₹299/month via Razorpay | FR-025, FR-026, FR-027, FR-028, FR-030, FR-032, CR-041, CR-042, NFR-018…020, A-14…16, `PRO_PRICE_PAISE` | CMP-024…028, CMP-030, §4.3.8–4.3.10, §4.3.12, §4.4, §4.6.7, §4.7 `/pro` | TBL-013, TBL-014, TBL-015, TBL-011 actions, §5.7 | API-018, API-019, API-020, API-022, ERR-037…039, ERR-041, ERR-042 |
+| 2. Unlimited analyses and all rewrite suggestions | FR-009, FR-014, FR-018, FR-008, FR-001, A-12, NFR-013 | CMP-008, CMP-009, CMP-025, §4.3.2 note, §4.8 | TBL-003 `plan_at_creation`, TBL-007 note | API-001, API-007, API-009, API-010, ERR-023 |
+| 3. Analysis history: list + comparison of two | FR-016 (list, unchanged for both plans, A-13), FR-031 (comparison, Pro only) | CMP-029, §4.3.11, §4.6.8, §4.7 `/history`, `/compare` | TBL-003…005 (read only, no new table) | API-008, API-023, ERR-026, ERR-036, ERR-043 |
+| 4. Cancel any time; access until end of paid month | FR-029, FR-025 (`paid_through`, no grace after cancel), OOS-11, OOS-13 | §4.3.9, §4.3.12, §4.6.7 | TBL-013 `cancel_at_period_end`, `paid_through` | API-021, ERR-040 |
+| 5. Free users unchanged | FR-009 (limit 3), FR-014 (3 visible), FR-016 (history kept), FR-024 (same prompts, new link), A-13 | No change to the FREE paths except the plan source (CMP-025) | No change to FREE data | API responses for FREE unchanged except the new `proUntil: null` field in API-001 |
 
 ---
 
@@ -3126,5 +3158,6 @@ Every FR and NFR appears here. `—` is used only where the item genuinely has n
 | Version | Date | Author | What changed | Why | Affected IDs |
 |---|---|---|---|---|---|
 | v1.0 | 2026-10-16 | Pranesh Ghosh | Initial version: sections 1–8 | Round 1 submission | All: CR-001…040, FR-001…024, NFR-001…017, CMP-001…023, TBL-001…012, API-001…017, ERR-001…035, A-01…10, OOS-01…10 |
+| v1.1 | 2026-10-26 | Pranesh Ghosh | **Resume Pro paid plan.** (1) New monthly subscription of ₹299 sold through Razorpay Subscriptions and Checkout: checkout, payment confirmation, webhooks, cancellation, reconciliation and a `/pro` page. (2) The plan is now `FREE`/`PRO`, worked out per request from the Module's own subscriptions (`paid_through`, 24 h renewal grace), no longer from the Platform token claim `sb_plan`; the v1.0 `PREMIUM` plan and its 50-a-month cap are retired. (3) PRO: no monthly analysis limit (rate limit and one-in-progress still apply), all suggestions. (4) New Pro-only comparison of two completed analyses; the history list stays available to everyone. (5) Cancel any time: no further charge, Pro until the end of the paid cycle, no refund. (6) Billing records kept 8 years and excluded from erasure; export includes them. (7) Three new tables, one migration (V3, expand-only), six new endpoints, eight new error codes, frontend CSP opened for Razorpay Checkout. | Round 2 requirement change (announced 2026-10-24 in #ai-spec-homework): SurfingBear adds the paid plan "Resume Pro". Decisions the change did not state are recorded as A-11…A-16 and OOS-11…OOS-15, each with its reason. | **New:** CR-041, CR-042; FR-025…FR-032; NFR-018…NFR-021; CMP-024…CMP-030; TBL-013…TBL-015; API-018…API-023; ERR-036…ERR-043; A-11…A-16; OOS-11…OOS-15; constants `PRO_PRICE_PAISE`, `PRO_CURRENCY`, `RAZORPAY_PLAN_ID`, `RAZORPAY_KEY_ID`, `PRO_TOTAL_COUNT`, `PRO_TERMS_VERSION`, `CHECKOUT_TTL`, `RENEWAL_GRACE`, `RECONCILE_INTERVAL`, `RAZORPAY_TIMEOUT`, `WEBHOOK_MAX_BODY_BYTES`, `WEBHOOK_RESPONSE_BUDGET`, `PAYMENT_RETENTION`, `WEBHOOK_EVENT_RETENTION`, `PRO_PAGE_PATH`, `CONFIRM_POLL`; §4.3.8–4.3.12, §4.6.7, §4.6.8, §5.7, §7.4. **Changed:** CR-001, CR-005, CR-006, CR-010, CR-016, CR-018, CR-020, CR-021, CR-022, CR-024, CR-033, CR-040; FR-001, FR-008, FR-009, FR-014, FR-016, FR-018, FR-020, FR-021, FR-022, FR-024; NFR-013; CMP-003, CMP-008, CMP-009, CMP-014, CMP-015; TBL-003 (`ck_analyses_plan`), TBL-007 (note), TBL-011 (`ck_audit_events_action`, `ck_audit_events_target_type`), TBL-012 (lock name); API-001, API-007, API-009, API-010, API-012, API-013, API-017; ERR-023, ERR-026; glossary; §1.2 permission table; §1.7 environments; §2.2, §2.4, §2.6; §4.1, §4.4, §4.5, §4.7, §4.8, §4.9; §5.1, §5.3, §5.4, §5.5; §6.1. **Deprecated (kept, not renumbered):** A-02, A-06, OOS-02, constants `PREMIUM_MONTHLY_ANALYSES` and `UPGRADE_URL`, plan value `PREMIUM` (still accepted by `ck_analyses_plan` for old rows). **Checked, unchanged:** all other IDs. |
 
 Rules for later entries: a new version is added for every change to behaviour, data or API; existing IDs are never renumbered; a removed requirement keeps its row and is marked **Deprecated** with the version that deprecated it; the "Affected IDs" column lists every FR, NFR, CMP, TBL, API and ERR that changed, and each of those places in the document is updated in the same commit.
