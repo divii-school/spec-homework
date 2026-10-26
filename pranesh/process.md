@@ -36,3 +36,14 @@
 - "Unlimited" means no monthly cap; the per-hour rate limit and one-analysis-at-a-time rule still apply because they protect the AI budget and queue (A-12).
 - Activation has three paths that end in the same state: the browser confirmation (API-020), the webhook (API-022) and a 10-minute reconciliation job (FR-032).
 - Billing records are kept 8 years for Indian accounting law and are not removed by erasure (CR-042).
+
+**Things the review found and I corrected** (an independent read of the whole spec after the edits, plus a script that checks every cited ID exists and is in the traceability matrix):
+
+- The Pro rule was written three ways (with and without the renewal grace). It is now one definition, `access_until`, used in the glossary, CR-006, FR-001 and FR-025.
+- A delayed `subscription.pending` webhook could undo a renewal that the reconciliation job had already repaired. Now every sync moves `last_provider_event_at` forward, so that event counts as stale.
+- The 24-hour renewal grace was too short for e-mandate debits, which confirm T+1 to T+3 working days later. Raised to 72 hours.
+- Cancel held a row lock during the Razorpay call, against the spec's own "no lock during HTTP" rule. Razorpay is now called first.
+- Unpaid, expired checkouts would have been kept 8 years. They are now deleted 7 days after they end.
+- The reconciliation job could keep picking the same rows. Every attempt now bumps `updated_at`.
+- Missing transitions were added to the state machine. Message keys were added for new UI texts. The webhook body-size check now runs before the signature. Missed items were added to the change log (FR-012, CR-023, CR-030, CMP-001/016/017/018).
+- One table row had been merged by an edit, and three Round 1 regexes broke their tables; all fixed.
