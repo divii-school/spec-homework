@@ -3,9 +3,9 @@
 | Field | Value |
 |---|---|
 | Author | Nikky Navvya |
-| Version | v1.0 |
-| Last updated | 2026-10-19 |
-| Status | Draft |
+| Version | v1.1 |
+| Last updated | 2026-10-26 |
+| Status | Review |
 
 > **How to read this document**
 > - This file is the single source of truth. A developer must be able to build the whole module from it without asking the author anything. Where the product brief was silent, the decision is written here with its reason (see section 3.3).
@@ -35,7 +35,7 @@ SurfingBear users, already logged in on the platform, open the Resume Optimizer 
 - the list of **missing skills** for that role and level, taken from the role's skill catalogue;
 - **rewrite suggestions** for weak lines (original line, suggested line, reason).
 
-Plans come from the platform: `free` or `pro`. Free users get **3 analyses per calendar month (IST)** and see only the **first 3 missing skills** and the **first 2 rewrite suggestions**; the rest are shown as locked with a count. Pro users get **50 analyses per month** and see everything. Any user can download the analysis as a **PDF**. Resume files and extracted text are **deleted 30 days** after upload; analysis results are kept **365 days** or until the user deletes them. Users can **export** or **erase** all their module data at any time (DPDP Act rights). The module stores all data in **AWS ap-south-1 (Mumbai)**.
+There are two plans, `free` and `pro`. Free users get **3 analyses per calendar month (IST)** and see only the **first 3 missing skills** and the **first 2 rewrite suggestions**; the rest are shown as locked with a count. **Resume Pro** (added in v1.1) is a **monthly subscription of ₹299 paid through Razorpay** inside this module: Pro users get **unlimited analyses**, see **all missing skills and all rewrite suggestions**, and get an **analysis history with a score comparison between any two of their analyses**. A Pro user can **cancel at any time** and keeps Pro access **until the end of the paid month**. Free users are unchanged from v1.0. Any user can download the analysis as a **PDF**. Resume files and extracted text are **deleted 30 days** after upload; analysis results are kept **365 days** or until the user deletes them. Users can **export** or **erase** all their module data at any time (DPDP Act rights). The module stores all data in **AWS ap-south-1 (Mumbai)**.
 
 ---
 
@@ -48,7 +48,7 @@ Rules every Divii / Hanriver project must follow. Each rule has an ID and must b
 | CR-001 | Authentication | Every request to the module API, except `GET /health` and the `/internal/*` webhooks, must carry a platform session JWT (RS256) either in the httpOnly cookie `sb_session` or in `Authorization: Bearer <jwt>`. The JWT is verified against the platform JWKS (`PLATFORM_JWKS_URL`), issuer must equal `PLATFORM_JWT_ISSUER`, and `exp` must be in the future. Invalid or missing token → `401 UNAUTHENTICATED`. | Integration test: request without token, with expired token, with wrong issuer, with tampered signature → all 401 |
 | CR-002 | Authentication | The module never stores passwords, emails, names or phone numbers. The only user identifier stored is the platform user UUID (`sub` claim). | DB schema review: no such columns exist (section 5) |
 | CR-003 | Authentication | `/internal/*` webhooks from the platform are authenticated with HMAC-SHA256 over the raw body using `PLATFORM_WEBHOOK_SECRET`, sent in header `X-SurfingBear-Signature: sha256=<hex>`, plus header `X-SurfingBear-Timestamp` (unix seconds) that must be within ±300 s of server time. Failure → `401 INVALID_SIGNATURE`. | Integration test with valid, stale and wrong-secret signatures |
-| CR-004 | Roles | Roles are `user` and `admin`, taken from the JWT claim `role`. Plan is `free` or `pro`, taken from the JWT claim `plan` and mirrored into `users.plan` (TBL-001) on every authenticated request. The role × permission table in 1.2 is enforced in the auth middleware (CMP-003), not in handlers. | Integration test: `user` calling an `/admin/*` endpoint → `403 FORBIDDEN` |
+| CR-004 | Roles | Roles are `user` and `admin`, taken from the JWT claim `role`. Plan is `free` or `pro` and is derived by the module itself: `pro` while `users.pro_until > now()` (TBL-001, set by the Resume Pro subscription, FR-022 / FR-023), otherwise `free`. The JWT `plan` claim is ignored since v1.1. The role × permission table in 1.2 is enforced in the auth middleware (CMP-003), not in handlers. | Integration test: `user` calling an `/admin/*` endpoint → `403 FORBIDDEN`; a user whose `pro_until` is in the past is treated as `free` |
 | CR-005 | Roles | A user can read, download or delete only rows whose `user_id` equals their own `sub`. Accessing another user's resource returns `404 NOT_FOUND` (not 403), so resource IDs cannot be enumerated. | Integration test: user B requests user A's analysis id → 404 |
 | CR-006 | Logging | Logs are JSON, one object per line, written to stdout, with fields `ts` (RFC 3339 UTC), `level` (`debug`/`info`/`warn`/`error`), `request_id`, `user_id`, `method`, `path`, `status`, `duration_ms`, `msg`. Personal data (resume text, file contents, original file names, AI prompt or response bodies) is **never** logged. | Code review + grep of log sample for `extracted_text`, `original_filename`, `suggested_line` fields → none found |
 | CR-007 | Logging | Every request gets a `request_id` (UUID v4) generated in middleware or taken from an incoming `X-Request-Id` header, returned in the response header `X-Request-Id`, included in every log line and in every error body. | Integration test checks the header on success and error responses |
@@ -65,6 +65,8 @@ Rules every Divii / Hanriver project must follow. Each rule has an ID and must b
 | CR-018 | Environments | Four environments: `local`, `dev`, `staging`, `prod` (env var `APP_ENV`). The differences are listed in 1.7. Code must not branch on environment name except for the items in that table. | Code review: `APP_ENV` referenced only in `config/` |
 | CR-019 | Deployment | Every merge to `main` runs CI (lint, tests, build, image push). Deploy to `dev` is automatic; `staging` and `prod` are manual approvals in GitHub Actions. DB migrations run as a separate job before the new version starts and must be backward compatible with the previous version (expand/contract). | Pipeline definition `.github/workflows/ci.yml`, `deploy.yml` |
 | CR-020 | Deployment | Rollback = redeploy the previous image tag (tags are the git SHA). Migrations are never rolled back automatically; a failed migration stops the deploy and alerts `#alerts-resume-optimizer`. | Runbook `docs/runbook.md` and a rehearsed rollback on staging |
+| CR-021 | Payments | *(v1.1)* Payment instrument data (card number, UPI id, bank details) is entered only in Razorpay Checkout, hosted by Razorpay. The module never receives, stores or logs it; it stores only Razorpay ids, amount, currency, status and payment method name (TBL-014). Razorpay keys are secrets under CR-010. | Code review of `utils/payments/`; DB schema review; log scan for `card`, `vpa`, `upi` fields → none |
+| CR-022 | Payments | *(v1.1)* Every inbound Razorpay webhook is verified with HMAC-SHA256 over the raw body (`X-Razorpay-Signature`, secret `RAZORPAY_WEBHOOK_SECRET`) and deduplicated by the `x-razorpay-event-id` header in TBL-015. A replayed event is acknowledged with `200` and does nothing. Subscription state is applied only from Razorpay data (webhook payload or `GET /v1/subscriptions/{id}`), never from client input. | Integration test: wrong signature → 401; same event twice → one state change |
 
 ### 1.1 Authentication
 
@@ -77,7 +79,7 @@ Rules every Divii / Hanriver project must follow. Each rule has an ID and must b
 | `iss` | string | Must equal `PLATFORM_JWT_ISSUER` (prod: `https://auth.surfingbear.com`). |
 | `exp`, `iat` | number | Standard. Clock skew tolerance 60 s. |
 | `role` | `"user"` \| `"admin"` | Authorization role (1.2). Missing → treated as `user`. |
-| `plan` | `"free"` \| `"pro"` | Billing plan. Missing → treated as `free`. |
+| `plan` | string | **Deprecated (v1.1).** Ignored if present. Plan is derived from `users.pro_until` (CR-004). |
 
 - JWKS is fetched from `PLATFORM_JWKS_URL`, cached in Redis key `jwks:platform` for 3600 s. On a `kid` not in cache, the module refetches once, then fails with 401.
 - The module does not issue tokens, refresh tokens or sessions of its own.
@@ -89,14 +91,17 @@ Rules every Divii / Hanriver project must follow. Each rule has an ID and must b
 | Record consent, view own profile and usage (API-001, API-002) | ✔ | ✔ | ✔ |
 | Browse job roles and skills (API-003, API-004) | ✔ | ✔ | ✔ |
 | Upload, list, view, delete own resumes (API-005–API-008) | ✔ | ✔ | ✔ |
-| Create analyses (API-009) | ✔ up to 3 / month | ✔ up to 50 / month | ✔ up to 50 / month (admins are treated as `pro`) |
+| Create analyses (API-009) | ✔ up to 3 / month | ✔ unlimited | ✔ unlimited (admins are treated as `pro`) |
 | View own analyses (API-010, API-011) | ✔ partial results (FR-014) | ✔ full | ✔ full |
 | Download PDF of own analysis (API-012) | ✔ partial | ✔ full | ✔ full |
 | Delete own analysis (API-013) | ✔ | ✔ | ✔ |
 | Export / erase own data (API-014, API-015) | ✔ | ✔ | ✔ |
+| View own subscription and payments, subscribe, verify, cancel (API-022–API-026) *(v1.1)* | ✔ | ✔ | ✔ |
+| Compare two own analyses (API-028) *(v1.1)* | ✘ (`403 PLAN_REQUIRED`) | ✔ | ✔ |
 | Manage job roles and skills (API-017, API-018) | ✘ | ✘ | ✔ |
 | Change plan limits (API-019) | ✘ | ✘ | ✔ |
-| Internal webhooks (API-020, API-021) | platform only (HMAC) | platform only | platform only |
+| Internal webhooks (API-021; API-020 deprecated) | platform only (HMAC) | platform only | platform only |
+| Razorpay webhook (API-027) *(v1.1)* | Razorpay only (signature) | Razorpay only | Razorpay only |
 
 Admins never see other users' resumes or analyses through this module (there is no admin read endpoint for user data). Support cases are handled on the platform side.
 
@@ -146,6 +151,7 @@ Successful responses are always wrapped: `{ "data": <object or array> }`, plus `
 | AI provider | Resume text is sent to Anthropic over TLS. The account is configured with zero data retention (ZDR). No user identifier is sent; only the text and the role catalogue. |
 | Uploads | Files are stored under a server-generated key (`resumes/{user_id}/{resume_id}.{pdf\|docx}`), never under the original filename. The original filename is stored only for display, sanitised to 255 characters. |
 | Headers | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` on all API responses. |
+| Payments *(v1.1)* | CR-021 and CR-022. Razorpay Checkout runs in the browser with the public `RAZORPAY_KEY_ID`; the secret key is used only server side to create subscriptions, verify checkout signatures and cancel. Webhook payloads are stored in TBL-015 with `email`, `contact`, `card`, `vpa` and `bank` fields redacted, and purged after 90 days. |
 
 ### 1.6 Internationalization (i18n)
 
@@ -161,6 +167,7 @@ CR-017. v1 is English only. The design keeps the door open: all UI strings in `w
 | Object storage | MinIO container (`S3_ENDPOINT` set) | S3 bucket `sb-resume-dev` | S3 bucket `sb-resume-staging` | S3 bucket `sb-resume-prod` |
 | AI provider | Real Anthropic API with a dev key, or `AI_PROVIDER=fake` which returns a fixed canned result | Real, dev key, `AI_MODEL=claude-haiku-5-5` | Real, staging key, `AI_MODEL=claude-sonnet-5-5` | Real, prod key, `AI_MODEL=claude-sonnet-5-5` |
 | Platform auth | Local JWKS served from `web/dev/jwks.json` and a helper script `make dev-token` that mints a test JWT | Platform dev issuer | Platform staging issuer | Platform prod issuer |
+| Razorpay *(v1.1)* | Test-mode keys; webhooks reach the laptop through an `ngrok` tunnel, or `PAYMENTS_PROVIDER=fake` which activates a subscription without calling Razorpay | Test-mode keys, test plan | Test-mode keys, test plan | Live keys, live plan `RAZORPAY_PLAN_ID_PRO` |
 | `LOG_LEVEL` | `debug` | `debug` | `info` | `info` |
 | CORS origins | `http://localhost:3000` | `https://dev.surfingbear.com` | `https://staging.surfingbear.com` | `https://www.surfingbear.com` |
 | Retention scheduler | runs, 30 / 365 days | runs | runs | runs |
@@ -181,7 +188,12 @@ Configuration variables (all read in `config/config.go`, app refuses to start if
 | `PLATFORM_JWKS_URL` | yes | `https://auth.surfingbear.com/.well-known/jwks.json` | API |
 | `PLATFORM_JWT_ISSUER` | yes | `https://auth.surfingbear.com` | API |
 | `PLATFORM_WEBHOOK_SECRET` | yes | 32+ random chars | API |
-| `PLATFORM_UPGRADE_URL` | yes | `https://www.surfingbear.com/pricing` | API (returned in API-001), web |
+| `PLATFORM_UPGRADE_URL` | **Deprecated (v1.1)**, ignored | — | Upgrade now happens inside the module at `/resume-optimizer/upgrade` |
+| `PAYMENTS_PROVIDER` *(v1.1)* | no, default `razorpay` | `razorpay` \| `fake` | API, scheduler |
+| `RAZORPAY_KEY_ID` *(v1.1)* | yes unless `fake` | `rzp_test_...` | API (also sent to the web client) |
+| `RAZORPAY_KEY_SECRET` *(v1.1)* | yes unless `fake` | | API |
+| `RAZORPAY_WEBHOOK_SECRET` *(v1.1)* | yes unless `fake` | | API |
+| `RAZORPAY_PLAN_ID_PRO` *(v1.1)* | yes unless `fake` | `plan_...` (monthly, ₹299, created in the Razorpay dashboard) | API |
 | `AI_PROVIDER` | no, default `anthropic` | `anthropic` \| `fake` | worker |
 | `ANTHROPIC_API_KEY` | yes unless `AI_PROVIDER=fake` | | worker |
 | `AI_MODEL` | no, default `claude-sonnet-5-5` | | worker |
@@ -254,9 +266,12 @@ resume-optimizer-api/
 │   ├── analysis_controller.go
 │   ├── report_controller.go
 │   ├── privacy_controller.go
+│   ├── subscription_controller.go   # v1.1: API-022..API-026
+│   ├── comparison_controller.go     # v1.1: API-028
 │   ├── health_controller.go
-│   ├── internal/               # platform webhooks (API-020, API-021)
-│   │   └── platform_webhook_controller.go
+│   ├── internal/               # webhooks (API-021; API-020 deprecated)
+│   │   ├── platform_webhook_controller.go
+│   │   └── razorpay_webhook_controller.go   # v1.1: API-027
 │   └── admin/
 │       ├── job_role_admin_controller.go
 │       └── plan_limit_admin_controller.go
@@ -282,7 +297,10 @@ resume-optimizer-api/
 │   ├── rewrite_suggestion.go
 │   ├── usage_counter.go
 │   ├── plan_limit.go
-│   └── audit_log.go
+│   ├── audit_log.go
+│   ├── subscription.go         # v1.1
+│   ├── payment.go              # v1.1
+│   └── webhook_event.go        # v1.1
 ├── repositories/               # DB access only, no business rules
 │   ├── user_repo.go
 │   ├── consent_repo.go
@@ -291,7 +309,10 @@ resume-optimizer-api/
 │   ├── analysis_repo.go
 │   ├── usage_repo.go
 │   ├── plan_limit_repo.go
-│   └── audit_repo.go
+│   ├── audit_repo.go
+│   ├── subscription_repo.go    # v1.1
+│   ├── payment_repo.go         # v1.1
+│   └── webhook_event_repo.go   # v1.1
 ├── services/                   # business rules
 │   ├── consent_service.go
 │   ├── job_role_service.go
@@ -302,6 +323,8 @@ resume-optimizer-api/
 │   ├── report_service.go       # PDF
 │   ├── privacy_service.go      # export, erase
 │   ├── retention_service.go
+│   ├── subscription_service.go # v1.1: create, verify, cancel, apply Razorpay state, expiry
+│   ├── comparison_service.go   # v1.1: score comparison between two analyses
 │   └── admin/
 │       ├── job_role_admin_service.go
 │       └── plan_limit_admin_service.go
@@ -315,6 +338,7 @@ resume-optimizer-api/
 │   ├── ai/                     # AIClient interface, anthropic.go, fake.go, prompt.go
 │   ├── storage/                # ObjectStore interface, s3.go
 │   ├── pdfgen/                 # report layout with go-pdf/fpdf
+│   ├── payments/               # v1.1: PaymentProvider interface, razorpay.go, fake.go
 │   └── clock/                  # Clock interface for tests
 ├── migrations/                 # golang-migrate SQL files 000001_init.up.sql ...
 ├── seed/
@@ -344,7 +368,11 @@ resume-optimizer-web/
 │       ├── new/page.tsx                      # upload + role + level
 │       ├── resumes/page.tsx                  # my resumes
 │       ├── analyses/[id]/page.tsx            # result (polls while running)
-│       └── privacy/page.tsx                  # export / erase my data
+│       ├── privacy/page.tsx                  # export / erase my data
+│       ├── upgrade/page.tsx                  # v1.1: Resume Pro pricing + Razorpay Checkout
+│       ├── subscription/page.tsx             # v1.1: status, cancel, payment history
+│       ├── history/page.tsx                  # v1.1: analysis history, pick two to compare
+│       └── compare/page.tsx                  # v1.1: ?base=<id>&target=<id>
 ├── components/resume-optimizer/
 │   ├── ConsentDialog.tsx
 │   ├── UsageBanner.tsx
@@ -357,7 +385,12 @@ resume-optimizer-web/
 │   ├── RewriteSuggestions.tsx
 │   ├── LockedItems.tsx                       # "N more, upgrade" block
 │   ├── AnalysisList.tsx
-│   └── ErrorMessage.tsx
+│   ├── ErrorMessage.tsx
+│   ├── PricingCard.tsx                       # v1.1
+│   ├── SubscriptionStatus.tsx                # v1.1
+│   ├── PaymentHistory.tsx                    # v1.1
+│   ├── HistoryTable.tsx                      # v1.1
+│   └── CompareView.tsx                       # v1.1
 ├── lib/
 │   ├── api/
 │   │   ├── client.ts                         # fetch wrapper: credentials, X-Request-Id, error mapping
@@ -368,7 +401,9 @@ resume-optimizer-web/
 │       ├── useJobRoles.ts
 │       ├── useResumes.ts
 │       ├── useAnalysis.ts                    # refetchInterval 2000 ms while QUEUED/PROCESSING
-│       └── useAnalyses.ts
+│       ├── useAnalyses.ts
+│       ├── useSubscription.ts                # v1.1
+│       └── useCompare.ts                     # v1.1
 ├── messages/en.json
 ├── dev/jwks.json
 ├── public/
@@ -428,15 +463,20 @@ resume-optimizer-web/
 | FR-010 | List missing skills | The analysis lists the catalogue skills for the chosen role and level that the resume does not evidence. | Must | 1. Candidate set = skills from FR-006 rule 2 for the role and level. 2. The AI returns the subset it judges absent; any name not in the candidate set is dropped (case-insensitive match); duplicates are removed. 3. Stored in TBL-008 with `rank` 1..n ordered `required` before `preferred`, then catalogue `sort_order`. 4. Each row carries `importance` copied from the catalogue. 5. An empty list is valid (`missing_skills: []`, `missing_skills_total: 0`). 6. Maximum stored: 50. |
 | FR-011 | Suggest rewrites for weak lines | The analysis provides up to 10 rewrite suggestions, each with the original line, the suggested line and a reason. | Must | 1. The AI returns 0–10 suggestions; more than 10 are truncated to the first 10. 2. `original_line` must appear in the normalised resume text (compared after collapsing whitespace and ignoring case); otherwise the suggestion is dropped. 3. `original_line` and `suggested_line` are 1–300 characters; `reason` 1–300 characters; `section` is one of `summary`, `experience`, `education`, `skills`, `projects`, `other`. 4. Stored in TBL-009 with `rank` 1..n in the order returned. 5. Suggestions are returned in `rank` order. |
 | FR-012 | Track analysis status | A user can see whether an analysis is queued, processing, completed or failed, and the UI polls until it is final. | Must | 1. `GET /analyses/{id}` always returns `status`, `created_at`, `started_at`, `completed_at`, `error_code` (null unless `FAILED`). 2. While `QUEUED` or `PROCESSING` the result fields (`overall_score`, `dimension_scores`, `missing_skills`, `rewrite_suggestions`) are `null`. 3. The web client polls every 2 s while not final and stops after 150 s, then shows "still running, check back later". 4. A `FAILED` analysis shows the error code mapped to a message and a "Try again" button that calls `POST /analyses` again. 5. `GET /analyses/{id}/report.pdf` on a non-completed analysis → `409 ANALYSIS_NOT_READY`. |
-| FR-013 | Monthly quota per plan | The number of analyses a user may start per calendar month depends on the plan: `free` 3, `pro` 50 (TBL-012). | Must | 1. Period key is `YYYY-MM` of the current time in `Asia/Kolkata`; the quota resets at 00:00 IST on the 1st. 2. Reservation: `INSERT ... ON CONFLICT (user_id, period) DO UPDATE SET analyses_count = usage_counters.analyses_count + 1 WHERE usage_counters.analyses_count < <limit> RETURNING analyses_count`; no row returned → `429 QUOTA_EXCEEDED`. 3. The limit is read from TBL-012 for `users.plan` at request time; a plan change (FR-019) applies immediately, including to the current period. 4. `GET /me` returns `usage.period`, `usage.used`, `usage.limit`, `usage.remaining`, `usage.resets_at`. 5. Refund: when an analysis ends `FAILED` because of `AI_UNAVAILABLE` or `AI_INVALID_RESPONSE`, the worker decrements `analyses_count` for `analyses.quota_period` (not below 0) and sets `analyses.quota_refunded = true`. 6. Deleting an analysis does not refund quota. 7. Admins use the `pro` limits. |
-| FR-014 | Free plan visibility limits | Free users see partial results; pro users see everything. The same gating applies to the JSON API and the PDF. | Must | 1. Limits are read from TBL-012: `free` → `visible_missing_skills = 3`, `visible_rewrite_suggestions = 2`; `pro` → both `null` (unlimited). 2. For a free user `missing_skills` contains only rows with `rank <= 3`; `missing_skills_total` is the full count; `missing_skills_locked = total − shown`. 3. Same for `rewrite_suggestions`, `rewrite_suggestions_total`, `rewrite_suggestions_locked`; locked suggestions are not sent in any form (not even `section`). 4. `overall_score` and all six dimension scores are always fully visible. 5. The response field `plan_gated` is `true` when anything was hidden, and `upgrade_url` (from `PLATFORM_UPGRADE_URL`) is included. 6. Gating is evaluated at read time with the user's current plan, so upgrading unlocks past analyses without re-running them. |
+| FR-013 | Monthly quota per plan | The number of analyses a user may start per calendar month depends on the plan: `free` 3, `pro` unlimited (TBL-012; *changed in v1.1, was 50*). | Must | 1. Period key is `YYYY-MM` of the current time in `Asia/Kolkata`; the quota resets at 00:00 IST on the 1st. 2. Reservation (only when the plan's `analyses_per_month` is not NULL): `INSERT ... ON CONFLICT (user_id, period) DO UPDATE SET analyses_count = usage_counters.analyses_count + 1 WHERE usage_counters.analyses_count < <limit> RETURNING analyses_count`; no row returned → `429 QUOTA_EXCEEDED`. 3. When `analyses_per_month` is NULL (pro), no reservation and no `429`; the counter is still incremented for statistics. 4. The limit is read from TBL-012 for the user's effective plan (`pro` if `users.pro_until > now()`, CR-004) at request time; a plan change applies immediately, including to the current period. 5. `GET /me` returns `usage.period`, `usage.used`, `usage.limit`, `usage.remaining`, `usage.resets_at`; for pro, `limit` and `remaining` are `null`. 6. Refund: when an analysis ends `FAILED` because of `AI_UNAVAILABLE` or `AI_INVALID_RESPONSE`, the worker decrements `analyses_count` for `analyses.quota_period` (not below 0) and sets `analyses.quota_refunded = true`. 7. Deleting an analysis does not refund quota. 8. Admins use the `pro` limits. |
+| FR-014 | Free plan visibility limits | Free users see partial results; pro users see everything. The same gating applies to the JSON API and the PDF. | Must | 1. Limits are read from TBL-012 for the effective plan (CR-004): `free` → `visible_missing_skills = 3`, `visible_rewrite_suggestions = 2`; `pro` → both `null` (unlimited), so Pro users see **all** missing skills and **all** rewrite suggestions (Round 2 requirement 2). 2. For a free user `missing_skills` contains only rows with `rank <= 3`; `missing_skills_total` is the full count; `missing_skills_locked = total − shown`. 3. Same for `rewrite_suggestions`, `rewrite_suggestions_total`, `rewrite_suggestions_locked`; locked suggestions are not sent in any form (not even `section`). 4. `overall_score` and all six dimension scores are always fully visible. 5. The response field `plan_gated` is `true` when anything was hidden, and `upgrade_url` (`/resume-optimizer/upgrade`, the module's own upgrade page since v1.1) is included. 6. Gating is evaluated at read time with the user's effective plan, so subscribing unlocks past analyses without re-running them, and expiry re-locks them. |
 | FR-015 | Download the analysis as PDF | A user downloads a PDF report of a completed analysis. | Must | 1. `GET /analyses/{id}/report.pdf` returns `200` with `Content-Type: application/pdf` and `Content-Disposition: attachment; filename="resume-analysis-<first 8 chars of id>.pdf"`. 2. Layout (A4, portrait, Helvetica): title "SurfingBear Resume Analysis"; role title and level; generated date (UTC); overall score; a table of the six dimensions with score and feedback; missing skills (required first); rewrite suggestions as "Original / Suggested / Why" blocks; footer "Resume data is processed under India's DPDP Act. Request export or deletion at surfingbear.com/resume-optimizer/privacy". 3. The PDF contains exactly what the JSON (FR-014) would show for the user's current plan; locked items appear as one line "N more suggestions available on Pro". 4. The PDF is generated on each request (no caching) with `github.com/go-pdf/fpdf`, must be under 2 MiB, and the resume file itself is never embedded. 5. Audit row `REPORT_DOWNLOADED`. 6. Non-completed analysis → `409 ANALYSIS_NOT_READY`; generation error → `500 REPORT_GENERATION_FAILED`. |
 | FR-016 | List, view and delete own analyses | A user can see all their analyses, open one, and delete one. | Must | 1. `GET /analyses` lists the user's analyses newest first, paginated, optional filters `status`, `resume_id`; each item is the summary shape (no child lists). 2. `GET /analyses/{id}` returns the full shape with gating (FR-014). 3. `DELETE /analyses/{id}` hard-deletes the analysis and its child rows (ON DELETE CASCADE), returns 204, audit row `ANALYSIS_DELETED`; `QUEUED`/`PROCESSING` → `409 ANALYSIS_IN_PROGRESS`. 4. Another user's id → `404 NOT_FOUND`. |
 | FR-017 | Retention purge | A scheduled job deletes resume files and text 30 days after upload and analyses 365 days after completion. | Must | 1. Scheduler runs daily at 02:00 IST (`0 2 * * *` with TZ `Asia/Kolkata`). 2. Step 1: for each resume with `status = 'READY'` and `purge_at <= now()`, or with `purge_error = true`: delete object, set `status='PURGED'`, `extracted_text = NULL`, `storage_key = NULL`, `purged_at = now()`, `purge_error = false`; if the S3 delete fails, set `purge_error = true` and leave the row for the next run. 3. Step 2: for each analysis with `status IN ('COMPLETED','FAILED')` and `completed_at < now() − RETENTION_ANALYSIS_DAYS`: delete row (cascade). 4. Step 3: delete `audit_logs` older than 365 days. 5. Each step is batched 500 rows at a time; failures of one row are logged and skipped, not fatal. 6. One audit row per run: `RETENTION_PURGE` with counts in `metadata`. 7. `resumes.purge_at` (= `created_at + RETENTION_RESUME_DAYS`) is shown to users so they know when the file disappears. |
-| FR-018 | Export and erase my data (DPDP rights) | A user can download everything the module holds about them as JSON and can erase all of it. | Must | 1. `GET /me/data-export` returns `200 application/json` with `Content-Disposition: attachment; filename="resume-optimizer-export.json"` containing `user`, `consents`, `resumes` (metadata plus the decrypted `extracted_text`, not the binary file), `analyses` (full, ungated), `audit_logs`. 2. Export is limited to 1 request per user per 10 minutes (Redis key `export:{sub}`, TTL 600 s) → `429 RATE_LIMITED`. 3. `DELETE /me/data` deletes all S3 objects for the user, all resumes, analyses (cascade), usage counters, and sets `consents.withdrawn_at = now()` on the active consent; the `users` row stays with `erased_at = now()` so the audit trail is preserved; the audit row `DATA_ERASED` is written; returns 204. 4. Erasure is synchronous and completes within 30 s for up to 10 resumes and 500 analyses. 5. In-flight analyses are cancelled: their rows are deleted and the worker drops the job (FR-008 rule 1). 6. After erasure the user can start again by giving consent (FR-001); giving consent clears `users.erased_at`. |
-| FR-019 | Plan sync from the platform | The platform notifies the module when a user's plan changes, so quotas and gating follow the billing state without waiting for a new JWT. | Should | 1. `POST /internal/users/{id}/plan` with HMAC (CR-003), body `{ "plan": "free" \| "pro", "changed_at": <ISO 8601> }`. 2. Upserts `users.plan` and `plan_updated_at = changed_at`; if the row does not exist it is created. 3. Returns `204`; invalid plan → `400 VALIDATION_ERROR`. 4. Audit row `PLAN_CHANGED` with old and new plan. 5. Independently, the auth middleware also updates `users.plan` from the JWT `plan` claim on every request when it differs and the JWT `iat` is newer than `users.plan_updated_at`. |
+| FR-018 | Export and erase my data (DPDP rights) | A user can download everything the module holds about them as JSON and can erase all of it. | Must | 1. `GET /me/data-export` returns `200 application/json` with `Content-Disposition: attachment; filename="resume-optimizer-export.json"` containing `user`, `consents`, `resumes` (metadata plus the decrypted `extracted_text`, not the binary file), `analyses` (full, ungated), `audit_logs`. 2. Export is limited to 1 request per user per 10 minutes (Redis key `export:{sub}`, TTL 600 s) → `429 RATE_LIMITED`. 3. `DELETE /me/data` deletes all S3 objects for the user, all resumes, analyses (cascade), usage counters, and sets `consents.withdrawn_at = now()` on the active consent; the `users` row stays with `erased_at = now()` so the audit trail is preserved; the audit row `DATA_ERASED` is written; returns 204. 3a. *(v1.1)* A subscription in `ACTIVE`, `PAST_DUE` or `CANCEL_SCHEDULED` is cancelled at Razorpay immediately (`cancel_at_cycle_end = 0`, no refund), its row set to `CANCELLED`, and `users.pro_until = now()`. `subscriptions` and `payments` rows are kept for the legal retention period (NFR-016) because they are financial records; they hold no personal data beyond the platform UUID and Razorpay ids. The export (rule 1) includes them under `subscriptions` and `payments`. 4. Erasure is synchronous and completes within 30 s for up to 10 resumes and 500 analyses. 5. In-flight analyses are cancelled: their rows are deleted and the worker drops the job (FR-008 rule 1). 6. After erasure the user can start again by giving consent (FR-001); giving consent clears `users.erased_at`. |
+| FR-019 | **Deprecated (v1.1)** Plan sync from the platform | *v1.0:* the platform notified the module of plan changes via webhook and JWT claim. *v1.1:* the plan is owned by this module through the Resume Pro subscription (FR-022, FR-023), so this requirement is withdrawn. API-020 is removed from the router (unknown route → `404 NOT_FOUND`); the JWT `plan` claim is ignored. Row kept for history; ID not reused. | — | 1. No code path reads the JWT `plan` claim or serves `POST /internal/users/{id}/plan`. 2. `users.plan_updated_at` is kept and now records the last change of the derived plan. |
 | FR-020 | Admin manages job roles and plan limits | An admin can create and update job roles, their skills, and the plan limits. | Should | 1. `POST /admin/job-roles` creates a role with its skills in one request; duplicate `slug` → `409 CONFLICT`. 2. `PUT /admin/job-roles/{slug}` replaces title, category, `is_active` and the full skill list; existing analyses keep their copied data. 3. `PUT /admin/plan-limits/{plan}` updates the three limit values; `analyses_per_month` 1–1000; visibility limits 0–100 or `null`. 4. All require role `admin` → otherwise `403 FORBIDDEN`. 5. Audit rows `JOB_ROLE_CHANGED`, `PLAN_LIMIT_CHANGED`. |
-| FR-021 | Account deletion propagation | When a platform account is deleted, the platform calls the module so the user's data is erased. | Should | 1. `POST /internal/users/{id}/deleted` with HMAC. 2. Performs exactly FR-018 rules 3 and 5 for that user; unknown user → `204` (idempotent). 3. Audit row `DATA_ERASED` with `actor = "platform"`. |
+| FR-021 | Account deletion propagation | When a platform account is deleted, the platform calls the module so the user's data is erased. | Should | 1. `POST /internal/users/{id}/deleted` with HMAC. 2. Performs exactly FR-018 rules 3, 3a and 5 for that user; unknown user → `204` (idempotent). 3. Audit row `DATA_ERASED` with `actor = "platform"`. |
+| FR-022 | Subscribe to Resume Pro *(v1.1)* | A free user starts a monthly Resume Pro subscription of ₹299 (INR, taxes included) paid through Razorpay Checkout. The module creates the Razorpay subscription, the browser completes payment in Razorpay Checkout, and the module verifies the result and activates Pro. | Must | 1. `POST /subscriptions` (API-023) requires an active consent and no subscription in `ACTIVE`, `PAST_DUE` or `CANCEL_SCHEDULED` → otherwise `409 SUBSCRIPTION_ALREADY_ACTIVE`. 2. If a `CREATED` subscription for the user is younger than 30 minutes it is returned again (idempotent); older `CREATED` rows are set to `EXPIRED` first. 3. The module calls Razorpay `POST /v1/subscriptions` with `plan_id = RAZORPAY_PLAN_ID_PRO`, `total_count = 120`, `customer_notify = 0`, `notes.user_id = <sub>`, timeout 10 s; failure → `503 PAYMENT_PROVIDER_UNAVAILABLE`, nothing stored. 4. Row in TBL-013 with `status = 'CREATED'`, `amount_paise = 29900`, `currency = 'INR'`; response `201` with `razorpay_subscription_id` and `razorpay_key_id` for Checkout. 5. `POST /subscriptions/{id}/verify` (API-024) with `razorpay_payment_id` and `razorpay_signature`: the module checks `HMAC_SHA256(razorpay_payment_id + "\|" + razorpay_subscription_id, RAZORPAY_KEY_SECRET)` equals the signature → otherwise `400 PAYMENT_VERIFICATION_FAILED`. 6. On a valid signature the module fetches `GET /v1/subscriptions/{razorpay_subscription_id}` and applies the remote state exactly as FR-023 rule 3 does, so verify and webhook can arrive in any order and the result is the same. 7. The user is Pro from the moment `users.pro_until` is set; `GET /me` reflects it on the next call. 8. Price and plan id are configuration, not user input; the client never sends an amount. 9. Audit rows `SUBSCRIPTION_CREATED`, `SUBSCRIPTION_ACTIVATED`. |
+| FR-023 | Process Razorpay subscription events *(v1.1)* | Razorpay is the source of truth for subscription state. The module receives webhooks for activation, monthly renewal, payment failure and cancellation, and maps them to Pro access. | Must | 1. `POST /internal/razorpay/webhook` (API-027) verifies the signature (CR-022); the event id is inserted into TBL-015 first; a duplicate id → `200` with no further action. 2. Handled events: `subscription.activated`, `subscription.charged`, `subscription.pending`, `subscription.halted`, `subscription.cancelled`, `subscription.completed`, `payment.failed`. Any other event is stored and acknowledged with `200`. 3. State mapping applied from the subscription entity: `active`/`authenticated` → `ACTIVE`, `pro_until = current_end`; `pending` or `halted` → `PAST_DUE`, `pro_until` unchanged (access continues to the end of the paid period, Razorpay keeps retrying); `cancelled` → `CANCELLED`, `pro_until` unchanged; `completed`/`expired` → `EXPIRED`, `pro_until = min(pro_until, now())`. `current_period_start/end` are copied from `current_start`/`current_end` (unix seconds → timestamptz). 4. `subscription.charged` also upserts a TBL-014 row from `payment.entity` with `status = 'CAPTURED'`, `method` (e.g. `card`, `upi`) and period; `payment.failed` upserts a row with `status = 'FAILED'` and `failure_reason = error_description`. Dedup key: `razorpay_payment_id`. 5. `users.plan` is recomputed from `pro_until` after every applied event; if it changed, `plan_updated_at = now()` and audit `SUBSCRIPTION_ACTIVATED` / `SUBSCRIPTION_RENEWED` / `PAYMENT_FAILED` / `SUBSCRIPTION_CANCELLED` / `SUBSCRIPTION_EXPIRED` as appropriate. 6. Processing is synchronous and completes within 5 s (NFR-015); on an internal error the module returns `500` so Razorpay retries, and the TBL-015 row records `processing_error`. 7. Expiry job: the scheduler runs hourly (`0 * * * *`), sets `status = 'EXPIRED'` for `CANCELLED`/`PAST_DUE` rows whose `current_period_end <= now()`, and sets `users.plan = 'free'` where `pro_until <= now()` and `plan = 'pro'`, so access ends at most 1 hour after the paid month even if a webhook was missed; the effective-plan check in CR-004 is exact regardless. |
+| FR-024 | Cancel Resume Pro *(v1.1)* | A Pro user can cancel at any time. Pro access continues until the end of the already paid month; no further charge is made. | Must | 1. `POST /subscriptions/{id}/cancel` (API-025) on an own subscription in `ACTIVE` or `PAST_DUE`; any other status → `409 SUBSCRIPTION_NOT_CANCELLABLE`. 2. The module calls Razorpay `POST /v1/subscriptions/{id}/cancel` with `cancel_at_cycle_end = 1`; failure → `503 PAYMENT_PROVIDER_UNAVAILABLE`, status unchanged. 3. On success: `status = 'CANCEL_SCHEDULED'`, `cancel_requested_at = now()`, `pro_until` unchanged (= `current_period_end`), audit `SUBSCRIPTION_CANCEL_REQUESTED`. 4. When Razorpay sends `subscription.cancelled` at cycle end, FR-023 sets `CANCELLED`; the expiry job then sets `EXPIRED` and `plan = 'free'`. 5. `GET /me` and `GET /subscriptions/me` show `cancel_at_period_end = true` and `current_period_end` so the UI can say "Pro until 18 Nov 2026". 6. Undoing a cancellation is not supported in v1.1; the user can subscribe again after `current_period_end` (FR-022 rule 1). 7. No refunds through the module (section 3.3). |
+| FR-025 | Analysis history and score comparison *(v1.1)* | Pro users get an analysis history page and can compare any two of their completed analyses: overall and per-dimension score differences, skills gained, skills still missing. Free users keep the plain list they already have (FR-016); comparison is Pro-only. | Must | 1. The history page `/resume-optimizer/history` uses API-010 (unchanged) and shows, per analysis, date, resume name, role, level, status and overall score, newest first. 2. `GET /analyses/{base_id}/compare/{target_id}` (API-028) requires effective plan `pro` → otherwise `403 PLAN_REQUIRED`. 3. Both analyses must belong to the user (`404 NOT_FOUND` otherwise), be `COMPLETED` (`409 ANALYSIS_NOT_READY` otherwise) and differ (`400 VALIDATION_ERROR` if equal). 4. Response: `overall_delta = target.overall_score − base.overall_score`; `dimension_deltas` for the six dimensions (`base`, `target`, `delta`); `skills_gained` = names in base's missing skills and not in target's; `skills_still_missing` = in both; `skills_newly_missing` = in target's only; `same_job_role`, `same_resume` booleans; `rewrite_suggestions_total` for both. Name comparison is case-insensitive. 5. Analyses with different roles can be compared; the response flags it with `same_job_role = false` and the UI shows a note. 6. The compare page `/resume-optimizer/compare?base=&target=` renders the result; the history page lets the user select exactly two completed analyses and opens it. 7. Deleting either analysis (FR-016) makes the comparison `404`. |
+| FR-026 | View subscription and payment history *(v1.1)* | A user can see their current subscription state and the list of payments made for Resume Pro. | Must | 1. `GET /subscriptions/me` (API-022) returns the latest subscription (any status) or `null`, with `status`, `current_period_start`, `current_period_end`, `cancel_at_period_end`, `amount_paise`, `currency`, `next_charge_at` (= `current_period_end` while `ACTIVE`, else `null`). 2. `GET /payments` (API-026) lists TBL-014 rows of the user newest first, paginated, with `status`, `amount_paise`, `method`, `paid_at`, `period_start`, `period_end`, `razorpay_payment_id` (shown as the receipt reference). 3. Payment rows are never deleted by the user; they stay for the legal period (NFR-016). 4. The subscription page shows a "Cancel" button only when FR-024 rule 1 allows it. |
 
 ### 3.2 Non-functional requirements
 
@@ -456,6 +496,10 @@ resume-optimizer-web/
 | NFR-012 | Reliability | Backup and recovery | RDS automated backups daily, 7-day retention, RPO 24 h, RTO 4 h; S3 versioning off (files are short-lived) | Restore rehearsal on staging once per quarter |
 | NFR-013 | Maintainability | Automated test coverage | ≥ 70 % line coverage on `services/` and `repositories/`; every FR acceptance criterion has at least one test referencing its ID in the test name | CI coverage gate; `grep -r "FR-0" ./...` in test files |
 | NFR-014 | Compatibility | Supported browsers for the web client | Last 2 versions of Chrome, Edge, Firefox, Safari; mobile Safari and Chrome | Playwright smoke test on CI (Chromium, WebKit, Firefox) |
+| NFR-015 | Reliability *(v1.1)* | Razorpay webhook processing is exactly-once and fast | Each event id applied at most once; p95 processing ≤ 2 s, max 5 s; a replayed event returns `200` and changes nothing; a user is never charged without a matching `payments` row within 60 s of the `subscription.charged` event | Integration test replaying the same event twice; metric `webhook_processing_seconds`; reconciliation job compares Razorpay payments with TBL-014 daily |
+| NFR-016 | Compliance *(v1.1)* | Financial records retention | `subscriptions` and `payments` rows kept 7 years from `created_at` (Indian accounting and tax record rules), exempt from FR-017 and FR-018 deletion; they contain only the platform UUID and Razorpay ids, no card or contact data | Schema review; erasure test shows rows remain |
+| NFR-017 | Performance *(v1.1)* | Score comparison (API-028) | p95 ≤ 500 ms | k6 `perf/compare.js` |
+| NFR-018 | Availability *(v1.1)* | Payment provider dependency | Razorpay outage never blocks analysis for existing Pro users: plan is read from `users.pro_until`, not from Razorpay, on every request; subscribe/cancel return `503 PAYMENT_PROVIDER_UNAVAILABLE` within 10 s | Chaos test with Razorpay host blocked: API-009 and API-011 unaffected |
 
 ### 3.3 Assumptions and out of scope
 
@@ -466,7 +510,7 @@ resume-optimizer-web/
 | A1 | Backend in **Go** (Gin + GORM), frontend Next.js, PostgreSQL 16, Redis 7 | Go is the author's main stack and the GoTalk layout is reused; low memory per worker is useful for many parallel AI calls. |
 | A2 | AI provider **Anthropic Claude**, model `claude-sonnet-5-5` in prod, `claude-haiku-5-5` in dev | Strong structured JSON output, 200k context, zero-data-retention option for DPDP. Accessed behind an `AIClient` interface so it can be swapped. |
 | A3 | File storage **AWS S3 ap-south-1** (MinIO locally) | Same region as the DB keeps personal data inside India; S3 API is widely supported. |
-| A4 | Free plan: **3 analyses / month**, sees **3 missing skills** and **2 suggestions**; Pro: **50 / month**, sees everything | Three runs is enough to try the product; two suggestions shows the value without giving the whole rewrite. Numbers live in TBL-012 so marketing can change them without a deploy. |
+| A4 | Free plan: **3 analyses / month**, sees **3 missing skills** and **2 suggestions**; Pro: **unlimited analyses**, sees everything *(v1.1: Pro was 50 / month in v1.0; Round 2 made it unlimited)* | Three runs is enough to try the product; two suggestions shows the value without giving the whole rewrite. Numbers live in TBL-012 so marketing can change them without a deploy. |
 | A5 | Quota month is the **calendar month in IST** | Users are in India; a calendar month is easy to explain in the UI. |
 | A6 | Six scoring dimensions with fixed weights (FR-009) | Covers the usual ATS checks (keywords, impact, sections, length, formatting, readability); weights make the overall score deterministic in the backend rather than trusting the AI. |
 | A7 | Fixed **job role catalogue** with per-level skills, admin editable | Free-text roles would make "missing skills" non-comparable; a catalogue lets the AI work from a known list. |
@@ -476,15 +520,22 @@ resume-optimizer-web/
 | A11 | File limits: 5 MiB, 10 pages, 200–30,000 characters | Resumes are 1–3 pages; 10 pages is generous; 30,000 chars keeps AI cost bounded (NFR-011). |
 | A12 | Retention: files and text **30 days**, analyses **365 days**, audit logs 365 days | DPDP requires deletion once the purpose is served; 30 days lets a user re-run against other roles; results are small and users compare over time. |
 | A13 | PDF built with `go-pdf/fpdf`, generated per request | No headless browser in the container; reports are small and rarely downloaded twice. |
-| A14 | Platform JWT contains `plan` and `role`; platform also sends plan-change and account-deleted webhooks | The brief says login is on the platform; the JWT is the only shared contract we control. Webhooks make billing changes immediate. If the platform cannot add claims, section 4.4 explains the fallback. |
+| A14 | *(revised v1.1)* Platform JWT contains `role`; the platform sends only the account-deleted webhook. The **plan is owned by this module** (`users.pro_until`, set by the Razorpay subscription). *v1.0 assumed the plan came from the platform via JWT claim and webhook (FR-019, now deprecated).* | Round 2 puts billing for Resume Pro inside this module, so the module is the only place that knows whether the month is paid. Deriving the plan from `pro_until` makes "access until the end of the paid month" exact and keeps the platform untouched. |
 | A15 | Consent is captured by the module (FR-001) even though login is on the platform | DPDP requires purpose-specific consent; the platform's general terms may not cover sending resumes to an AI provider. |
 | A16 | Scanned (image-only) PDFs are rejected, no OCR | OCR adds cost and a large dependency; most resumes are text PDFs. The error message tells the user to upload a text version. |
 | A17 | No virus scanning | Files are never executed or served back to other users; the only readers are `pdftotext` and the DOCX XML parser, which run with a timeout. |
 | A18 | English only (CR-017) | Target market and the AI prompt are English; adding languages needs a product decision. |
+| A19 | *(v1.1)* **Razorpay Subscriptions** (recurring plan created in the Razorpay dashboard), not one-off orders | The requirement is a monthly subscription that renews and can be cancelled at cycle end; Razorpay Subscriptions does the renewal, retry and cancel-at-cycle-end logic, so the module only mirrors state from webhooks. |
+| A20 | *(v1.1)* Price **₹299 per month, INR only, taxes included**; amount stored as `29900` paise | The brief gives ₹299 as the customer price; INR because Razorpay and the user base are Indian. Tax invoicing is done by finance from Razorpay's dashboard, not by this module. |
+| A21 | *(v1.1)* Pro access = `users.pro_until > now()`, where `pro_until` is Razorpay's `current_end` | One timestamp answers "is this user Pro right now", "until when", and "cancel but keep access until month end" without a state machine in the auth middleware. |
+| A22 | *(v1.1)* Failed renewal keeps access until the paid period ends, then the user becomes free; Razorpay's own retries may reactivate | Matches "access continues until the end of the paid month" and avoids cutting off a user who already paid for the current period. |
+| A23 | *(v1.1)* The analysis list (API-010) stays available to free users; only the **comparison** is Pro-only | Round 2 says free users stay exactly as today, and the list already existed for them in v1.0. Taking it away would change the free plan. |
+| A24 | *(v1.1)* No refunds, no undo-cancel, no yearly plan, no coupons in the module | Not in the requirement; refunds are handled by support in the Razorpay dashboard. Listed as out of scope so nothing is left to guess. |
 
 **Out of scope for v1:**
 
-- Sign-up, login, password reset, billing, plan upgrade flow (platform). The module only links to `PLATFORM_UPGRADE_URL`.
+- Sign-up, login, password reset (platform). *(v1.1: billing for Resume Pro is now inside the module, FR-022–FR-024, FR-026.)*
+- *(v1.1)* Refunds, undoing a scheduled cancellation, yearly or discounted plans, coupons, plan changes other than free ↔ pro, GST invoice PDF generation (Razorpay's payment id is the receipt reference).
 - Resume editing or building inside the module; applying a suggestion automatically.
 - Comparing two analyses or tracking score history charts.
 - OCR, images, scanned resumes; file types other than PDF and DOCX.
