@@ -467,7 +467,7 @@ resume-optimizer-web/
 | FR-014 | Free plan visibility limits | Free users see partial results; pro users see everything. The same gating applies to the JSON API and the PDF. | Must | 1. Limits are read from TBL-012 for the effective plan (CR-004): `free` → `visible_missing_skills = 3`, `visible_rewrite_suggestions = 2`; `pro` → both `null` (unlimited), so Pro users see **all** missing skills and **all** rewrite suggestions (Round 2 requirement 2). 2. For a free user `missing_skills` contains only rows with `rank <= 3`; `missing_skills_total` is the full count; `missing_skills_locked = total − shown`. 3. Same for `rewrite_suggestions`, `rewrite_suggestions_total`, `rewrite_suggestions_locked`; locked suggestions are not sent in any form (not even `section`). 4. `overall_score` and all six dimension scores are always fully visible. 5. The response field `plan_gated` is `true` when anything was hidden, and `upgrade_url` (`/resume-optimizer/upgrade`, the module's own upgrade page since v1.1) is included. 6. Gating is evaluated at read time with the user's effective plan, so subscribing unlocks past analyses without re-running them, and expiry re-locks them. |
 | FR-015 | Download the analysis as PDF | A user downloads a PDF report of a completed analysis. | Must | 1. `GET /analyses/{id}/report.pdf` returns `200` with `Content-Type: application/pdf` and `Content-Disposition: attachment; filename="resume-analysis-<first 8 chars of id>.pdf"`. 2. Layout (A4, portrait, Helvetica): title "SurfingBear Resume Analysis"; role title and level; generated date (UTC); overall score; a table of the six dimensions with score and feedback; missing skills (required first); rewrite suggestions as "Original / Suggested / Why" blocks; footer "Resume data is processed under India's DPDP Act. Request export or deletion at surfingbear.com/resume-optimizer/privacy". 3. The PDF contains exactly what the JSON (FR-014) would show for the user's current plan; locked items appear as one line "N more suggestions available on Pro". 4. The PDF is generated on each request (no caching) with `github.com/go-pdf/fpdf`, must be under 2 MiB, and the resume file itself is never embedded. 5. Audit row `REPORT_DOWNLOADED`. 6. Non-completed analysis → `409 ANALYSIS_NOT_READY`; generation error → `500 REPORT_GENERATION_FAILED`. |
 | FR-016 | List, view and delete own analyses | A user can see all their analyses, open one, and delete one. | Must | 1. `GET /analyses` lists the user's analyses newest first, paginated, optional filters `status`, `resume_id`; each item is the summary shape (no child lists). 2. `GET /analyses/{id}` returns the full shape with gating (FR-014). 3. `DELETE /analyses/{id}` hard-deletes the analysis and its child rows (ON DELETE CASCADE), returns 204, audit row `ANALYSIS_DELETED`; `QUEUED`/`PROCESSING` → `409 ANALYSIS_IN_PROGRESS`. 4. Another user's id → `404 NOT_FOUND`. |
-| FR-017 | Retention purge | A scheduled job deletes resume files and text 30 days after upload and analyses 365 days after completion. | Must | 1. Scheduler runs daily at 02:00 IST (`0 2 * * *` with TZ `Asia/Kolkata`). 2. Step 1: for each resume with `status = 'READY'` and `purge_at <= now()`, or with `purge_error = true`: delete object, set `status='PURGED'`, `extracted_text = NULL`, `storage_key = NULL`, `purged_at = now()`, `purge_error = false`; if the S3 delete fails, set `purge_error = true` and leave the row for the next run. 3. Step 2: for each analysis with `status IN ('COMPLETED','FAILED')` and `completed_at < now() − RETENTION_ANALYSIS_DAYS`: delete row (cascade). 4. Step 3: delete `audit_logs` older than 365 days. 5. Each step is batched 500 rows at a time; failures of one row are logged and skipped, not fatal. 6. One audit row per run: `RETENTION_PURGE` with counts in `metadata`. 7. `resumes.purge_at` (= `created_at + RETENTION_RESUME_DAYS`) is shown to users so they know when the file disappears. |
+| FR-017 | Retention purge | A scheduled job deletes resume files and text 30 days after upload and analyses 365 days after completion. | Must | 1. Scheduler runs daily at 02:00 IST (`0 2 * * *` with TZ `Asia/Kolkata`). 2. Step 1: for each resume with `status = 'READY'` and `purge_at <= now()`, or with `purge_error = true`: delete object, set `status='PURGED'`, `extracted_text = NULL`, `storage_key = NULL`, `purged_at = now()`, `purge_error = false`; if the S3 delete fails, set `purge_error = true` and leave the row for the next run. 3. Step 2: for each analysis with `status IN ('COMPLETED','FAILED')` and `completed_at < now() − RETENTION_ANALYSIS_DAYS`: delete row (cascade). 4. Step 3: delete `audit_logs` older than 365 days. 4a. *(v1.1)* Step 4: delete `webhook_events` older than 90 days. `subscriptions` and `payments` are never purged by this job (NFR-016). 5. Each step is batched 500 rows at a time; failures of one row are logged and skipped, not fatal. 6. One audit row per run: `RETENTION_PURGE` with counts in `metadata`. 7. `resumes.purge_at` (= `created_at + RETENTION_RESUME_DAYS`) is shown to users so they know when the file disappears. |
 | FR-018 | Export and erase my data (DPDP rights) | A user can download everything the module holds about them as JSON and can erase all of it. | Must | 1. `GET /me/data-export` returns `200 application/json` with `Content-Disposition: attachment; filename="resume-optimizer-export.json"` containing `user`, `consents`, `resumes` (metadata plus the decrypted `extracted_text`, not the binary file), `analyses` (full, ungated), `audit_logs`. 2. Export is limited to 1 request per user per 10 minutes (Redis key `export:{sub}`, TTL 600 s) → `429 RATE_LIMITED`. 3. `DELETE /me/data` deletes all S3 objects for the user, all resumes, analyses (cascade), usage counters, and sets `consents.withdrawn_at = now()` on the active consent; the `users` row stays with `erased_at = now()` so the audit trail is preserved; the audit row `DATA_ERASED` is written; returns 204. 3a. *(v1.1)* A subscription in `ACTIVE`, `PAST_DUE` or `CANCEL_SCHEDULED` is cancelled at Razorpay immediately (`cancel_at_cycle_end = 0`, no refund), its row set to `CANCELLED`, and `users.pro_until = now()`. `subscriptions` and `payments` rows are kept for the legal retention period (NFR-016) because they are financial records; they hold no personal data beyond the platform UUID and Razorpay ids. The export (rule 1) includes them under `subscriptions` and `payments`. 4. Erasure is synchronous and completes within 30 s for up to 10 resumes and 500 analyses. 5. In-flight analyses are cancelled: their rows are deleted and the worker drops the job (FR-008 rule 1). 6. After erasure the user can start again by giving consent (FR-001); giving consent clears `users.erased_at`. |
 | FR-019 | **Deprecated (v1.1)** Plan sync from the platform | *v1.0:* the platform notified the module of plan changes via webhook and JWT claim. *v1.1:* the plan is owned by this module through the Resume Pro subscription (FR-022, FR-023), so this requirement is withdrawn. API-020 is removed from the router (unknown route → `404 NOT_FOUND`); the JWT `plan` claim is ignored. Row kept for history; ID not reused. | — | 1. No code path reads the JWT `plan` claim or serves `POST /internal/users/{id}/plan`. 2. `users.plan_updated_at` is kept and now records the last change of the derived plan. |
 | FR-020 | Admin manages job roles and plan limits | An admin can create and update job roles, their skills, and the plan limits. | Should | 1. `POST /admin/job-roles` creates a role with its skills in one request; duplicate `slug` → `409 CONFLICT`. 2. `PUT /admin/job-roles/{slug}` replaces title, category, `is_active` and the full skill list; existing analyses keep their copied data. 3. `PUT /admin/plan-limits/{plan}` updates the three limit values; `analyses_per_month` 1–1000; visibility limits 0–100 or `null`. 4. All require role `admin` → otherwise `403 FORBIDDEN`. 5. Audit rows `JOB_ROLE_CHANGED`, `PLAN_LIMIT_CHANGED`. |
@@ -558,8 +558,11 @@ flowchart LR
   end
 
   subgraph Platform["SurfingBear platform (external)"]
-    AUTH[CMP-013 Auth / JWKS]
-    BILL[Billing webhooks]
+    AUTH[CMP-013 Auth / JWKS<br/>+ account-deleted webhook]
+  end
+
+  subgraph Razorpay["Razorpay (external, v1.1)"]
+    RZP[Subscriptions API + Checkout]
   end
 
   subgraph Module["Resume Optimizer (AWS ap-south-1)"]
@@ -569,6 +572,9 @@ flowchart LR
     AS[CMP-005 Analysis service]
     RP[CMP-008 Report service]
     PV[CMP-014 Privacy service]
+    SB[CMP-015 Subscription service]
+    PC[CMP-016 Payment client]
+    CP[CMP-017 Comparison service]
     WK[CMP-006 Analysis worker]
     AI[CMP-007 AI client]
     SC[CMP-009 Retention scheduler]
@@ -580,10 +586,16 @@ flowchart LR
   ANTH[Anthropic Messages API]
 
   WEB -- HTTPS JSON, cookie sb_session --> API
+  WEB -- Razorpay Checkout JS --> RZP
   API --> MW
   MW -- JWKS fetch, cached --> AUTH
-  BILL -- HMAC webhooks --> API
-  API --> RS & AS & RP & PV
+  AUTH -- HMAC webhook: account deleted --> API
+  RZP -- signed webhooks --> API
+  API --> RS & AS & RP & PV & SB & CP
+  SB --> PC --> RZP
+  SB --> PG
+  CP --> PG
+  SC -- hourly expiry --> SB
   RS --> S3 & PG
   AS --> PG
   AS -- enqueue analysis:run --> RD
@@ -608,12 +620,15 @@ flowchart LR
 | CMP-006 | Analysis worker | Consumes `analysis:run`, orchestrates CMP-007, validates and persists results, handles retries, refunds quota (FR-008). Process `cmd/worker`. | Go, `hibiken/asynq` server, concurrency 20 per task |
 | CMP-007 | AI client | Builds the prompt (4.6), calls Anthropic Messages API, parses and validates JSON, counts tokens. `fake` implementation for local and tests. | Go, `anthropic-sdk-go` |
 | CMP-008 | Report service | Renders the PDF report (FR-015) from the gated analysis view. | Go, `go-pdf/fpdf` |
-| CMP-009 | Retention scheduler | Daily purge (FR-017). Process `cmd/scheduler`, single replica. | Go, `robfig/cron/v3` with TZ `Asia/Kolkata` |
+| CMP-009 | Retention scheduler | Daily purge (FR-017); *(v1.1)* hourly subscription expiry (FR-023 rule 7) and daily payment reconciliation (NFR-015). Process `cmd/scheduler`, single replica. | Go, `robfig/cron/v3` with TZ `Asia/Kolkata` |
 | CMP-010 | PostgreSQL | System of record for all tables in section 5. | PostgreSQL 16 (RDS) |
 | CMP-011 | Redis | Job queue (asynq), rate-limit windows, JWKS cache, export cool-down key. No data is only in Redis; losing Redis loses queued jobs, which stay `QUEUED` in PostgreSQL and are re-enqueued by the worker's startup sweep (4.3, flow F). | Redis 7 (ElastiCache) |
 | CMP-012 | Object storage | Resume binaries under `resumes/{user_id}/{resume_id}.{ext}`; private bucket, SSE-KMS, region ap-south-1. | AWS S3 (MinIO locally) |
-| CMP-013 | Platform integration | Inbound: JWKS endpoint for JWT verification; plan and deletion webhooks (FR-019, FR-021). Outbound: none except the upgrade link. | HTTPS, HMAC-SHA256 |
-| CMP-014 | Privacy service | Data export and erasure (FR-018), audit log writes. | Go |
+| CMP-013 | Platform integration | Inbound: JWKS endpoint for JWT verification; account-deletion webhook (FR-021). *(v1.1: the plan webhook FR-019 is deprecated.)* Outbound: none. | HTTPS, HMAC-SHA256 |
+| CMP-014 | Privacy service | Data export and erasure (FR-018, including immediate subscription cancel in v1.1), audit log writes. | Go |
+| CMP-015 | Subscription service *(v1.1)* | Create / verify / cancel Resume Pro subscriptions (FR-022, FR-024), apply Razorpay state from webhooks or API (FR-023), recompute `users.plan` / `pro_until`, expiry job, payment history (FR-026). | Go, GORM |
+| CMP-016 | Payment client *(v1.1)* | `PaymentProvider` interface: `CreateSubscription`, `FetchSubscription`, `CancelSubscription`, `VerifyCheckoutSignature`, `VerifyWebhookSignature`. Razorpay implementation and `fake` for local/tests. | Go, `razorpay/razorpay-go`, `crypto/hmac` |
+| CMP-017 | Comparison service *(v1.1)* | Loads two completed analyses with children and computes the comparison in FR-025 rule 4. | Go |
 
 ### 4.3 Main flows
 
@@ -761,7 +776,7 @@ sequenceDiagram
   V-->>U: 204
 ```
 
-**Flow E — Platform plan change (FR-019)**
+**Flow E — Platform plan change (FR-019) — Deprecated in v1.1, kept for history; replaced by flows G and H**
 
 ```mermaid
 sequenceDiagram
@@ -781,12 +796,117 @@ sequenceDiagram
 
 On start, and every 5 minutes, the worker selects analyses with `status = 'QUEUED'` and `created_at < now() − 2 min` that have no pending asynq task (checked with the asynq inspector by task id `analysis:{id}`) and re-enqueues them. Analyses `PROCESSING` for more than 10 minutes are marked `FAILED` with `error_code = AI_UNAVAILABLE` and refunded. This covers Redis restarts and worker crashes.
 
+**Flow G — Subscribe to Resume Pro (FR-022) *(v1.1)***
+
+```mermaid
+sequenceDiagram
+  participant U as User (Web)
+  participant A as API + Subscription service (CMP-002/015)
+  participant P as Payment client (CMP-016)
+  participant R as Razorpay
+  participant D as PostgreSQL
+  U->>A: POST /subscriptions
+  A->>D: active/past_due/cancel_scheduled subscription exists?
+  alt yes
+    A-->>U: 409 SUBSCRIPTION_ALREADY_ACTIVE
+  end
+  A->>P: CreateSubscription(plan RAZORPAY_PLAN_ID_PRO, notes.user_id)
+  P->>R: POST /v1/subscriptions (timeout 10 s)
+  alt Razorpay error / timeout
+    R-->>P: error
+    A-->>U: 503 PAYMENT_PROVIDER_UNAVAILABLE
+  end
+  R-->>P: { id: sub_xxx, status: created }
+  A->>D: INSERT subscriptions (CREATED, 29900 INR); audit SUBSCRIPTION_CREATED
+  A-->>U: 201 { subscription_id, razorpay_subscription_id, razorpay_key_id }
+  U->>R: Razorpay Checkout (subscription_id) - card/UPI entered on Razorpay
+  R-->>U: { razorpay_payment_id, razorpay_subscription_id, razorpay_signature }
+  U->>A: POST /subscriptions/{id}/verify {payment_id, signature}
+  A->>P: VerifyCheckoutSignature(payment_id|subscription_id)
+  alt mismatch
+    A-->>U: 400 PAYMENT_VERIFICATION_FAILED
+  end
+  A->>P: FetchSubscription(sub_xxx)
+  P->>R: GET /v1/subscriptions/sub_xxx
+  R-->>P: { status: active, current_start, current_end }
+  A->>D: apply state: ACTIVE, period, users.pro_until = current_end, plan = pro; audit SUBSCRIPTION_ACTIVATED
+  A-->>U: 200 { subscription }
+  Note over R,A: webhook subscription.activated / charged arrives too (flow H) and is idempotent
+```
+
+**Flow H — Renewal, failure, cancel at cycle end (FR-023, FR-024) *(v1.1)***
+
+```mermaid
+sequenceDiagram
+  participant R as Razorpay
+  participant A as API (CMP-002, HMAC check)
+  participant S as Subscription service (CMP-015)
+  participant D as PostgreSQL
+  participant C as Scheduler (CMP-009)
+  participant U as User (Web)
+  R->>A: POST /internal/razorpay/webhook (X-Razorpay-Signature, x-razorpay-event-id)
+  A->>A: HMAC valid?
+  alt invalid
+    A-->>R: 401 INVALID_SIGNATURE
+  end
+  A->>D: INSERT webhook_events (provider, event id)
+  alt duplicate id
+    A-->>R: 200 (no-op)
+  end
+  A->>S: Apply(event)
+  alt subscription.charged (monthly renewal)
+    S->>D: ACTIVE, period = current_start..current_end, pro_until = current_end; UPSERT payments CAPTURED; audit SUBSCRIPTION_RENEWED
+  else subscription.pending / halted (renewal failed)
+    S->>D: PAST_DUE, pro_until unchanged; payments FAILED; audit PAYMENT_FAILED
+  else subscription.cancelled (after cancel_at_cycle_end)
+    S->>D: CANCELLED, pro_until unchanged; audit SUBSCRIPTION_CANCELLED
+  else subscription.completed / expired
+    S->>D: EXPIRED, pro_until = min(pro_until, now)
+  end
+  S->>D: recompute users.plan from pro_until
+  A-->>R: 200
+  U->>A: POST /subscriptions/{id}/cancel
+  A->>R: POST /v1/subscriptions/{id}/cancel { cancel_at_cycle_end: 1 }
+  R-->>A: ok
+  A->>D: CANCEL_SCHEDULED, cancel_requested_at; audit SUBSCRIPTION_CANCEL_REQUESTED
+  A-->>U: 200 { status: CANCEL_SCHEDULED, current_period_end }
+  loop hourly
+    C->>D: EXPIRED where CANCELLED/PAST_DUE and current_period_end <= now; users.plan = free where pro_until <= now
+  end
+```
+
+**Flow I — Compare two analyses (FR-025) *(v1.1)***
+
+```mermaid
+sequenceDiagram
+  participant U as User (Web)
+  participant A as API (CMP-002/003)
+  participant C as Comparison service (CMP-017)
+  participant D as PostgreSQL
+  U->>A: GET /analyses/{base}/compare/{target}
+  A->>A: effective plan pro? (users.pro_until > now)
+  alt free
+    A-->>U: 403 PLAN_REQUIRED
+  end
+  A->>C: Compare(userID, base, target)
+  C->>D: load both analyses (own) + scores + missing skills
+  alt not found / not own
+    C-->>U: 404 NOT_FOUND
+  end
+  alt either not COMPLETED
+    C-->>U: 409 ANALYSIS_NOT_READY
+  end
+  C->>C: deltas, skills gained / still missing / newly missing
+  C-->>U: 200 { comparison }
+```
+
 ### 4.4 External integrations
 
 | System | Purpose | Protocol / auth | Failure handling |
 |---|---|---|---|
 | SurfingBear platform auth (JWKS) | Verify user JWTs | HTTPS GET `PLATFORM_JWKS_URL`; public, cached in Redis 1 h | If JWKS cannot be fetched and the cache is empty: `503 AUTH_UNAVAILABLE`, alert. If the cache exists, keep using it up to 24 h. **Fallback if the platform cannot add `plan`/`role` claims:** treat missing claims as `free`/`user` and rely solely on the webhooks (FR-019) for plan. |
-| SurfingBear platform billing / accounts | Plan changes, account deletion | Inbound HTTPS webhooks with HMAC-SHA256 (CR-003) | The platform retries on non-2xx with exponential backoff (platform's responsibility). Handlers are idempotent. |
+| SurfingBear platform accounts | Account deletion (FR-021). *(v1.1: plan-change webhook deprecated with FR-019.)* | Inbound HTTPS webhook with HMAC-SHA256 (CR-003) | The platform retries on non-2xx with exponential backoff (platform's responsibility). Handler is idempotent. |
+| Razorpay *(v1.1)* | Resume Pro subscription: create, fetch, cancel; browser Checkout; webhooks for activation, renewal, failure, cancellation | Outbound HTTPS to `https://api.razorpay.com/v1/`, Basic auth `RAZORPAY_KEY_ID:RAZORPAY_KEY_SECRET`, timeout 10 s, 1 retry on network error only (create is not retried to avoid duplicate subscriptions). Inbound webhooks verified with HMAC-SHA256 (`X-Razorpay-Signature`, `RAZORPAY_WEBHOOK_SECRET`), deduplicated by `x-razorpay-event-id` (CR-022). | Create/cancel failure → `503 PAYMENT_PROVIDER_UNAVAILABLE`, DB unchanged; user retries. Webhook processing error → `500` so Razorpay retries (it retries for 24 h). Missed webhooks are covered by: verify endpoint fetching state (FR-022 rule 6), hourly expiry job (FR-023 rule 7) and daily reconciliation (NFR-015). Razorpay outage never affects existing Pro access (NFR-018). |
 | Anthropic Messages API | Resume scoring, missing skills, rewrites | HTTPS POST `https://api.anthropic.com/v1/messages`, header `x-api-key`, `anthropic-version: 2023-06-01`; model `AI_MODEL`; timeout 60 s | 429/5xx/timeout → retried per FR-008; after 3 attempts the analysis is `FAILED (AI_UNAVAILABLE)` and quota refunded; the user sees "AI service busy, try again" with a retry button. Metric `analysis_total{status="FAILED"}` alerts at > 10 % over 10 min. |
 | AWS S3 (MinIO locally) | Store resume binaries | AWS SDK v2, IAM task role (local: access keys), SSE-KMS | Put failure on upload → `500 INTERNAL_ERROR`, nothing persisted. Delete failure during purge → `purge_error = true`, retried next scheduler run (FR-017 rule 2). Delete failure during erasure → `500 INTERNAL_ERROR`, the user retries; rows are deleted only after S3 succeeds. |
 | poppler-utils (`pdftotext`, `pdfinfo`) | PDF text and page count | Local binary in the API container, `os/exec` with 10 s timeout | Timeout or non-zero exit → `422 RESUME_UNREADABLE`. |
@@ -809,6 +929,7 @@ On start, and every 5 minutes, the worker selects analyses with `status = 'QUEUE
 | PDF generation | `go-pdf/fpdf` | Pure Go, no browser; the report is text and tables only. |
 | Frontend | Next.js 15 + TypeScript + TanStack Query | Required by the brief; TanStack Query gives polling (`refetchInterval`) and cache invalidation for the analysis flow with little code. |
 | Styling | Tailwind CSS | Matches the platform's existing frontend conventions. |
+| Payments *(v1.1)* | Razorpay Subscriptions + Razorpay Checkout (`razorpay-go` SDK server side, `checkout.js` in the browser) | Required by Round 2; Subscriptions handles monthly renewal, retries and cancel-at-cycle-end; Checkout keeps card and UPI data out of the module (CR-021). Behind a `PaymentProvider` interface with a `fake` for local and tests. |
 | Hosting | AWS ECS Fargate + RDS + ElastiCache, ap-south-1 | Managed services in the Mumbai region; separate services for API, worker and scheduler allow independent scaling. |
 | CI/CD | GitHub Actions | Repo is on GitHub; manual approval gates for staging and prod. |
 
@@ -854,7 +975,11 @@ Validation rules: exactly the six dimensions, each once; `score` integer 0–100
 | `/resume-optimizer/new` | Upload or pick an existing resume, choose role and level, start | API-001, API-003, API-004, API-006, API-005, API-009 | On `202` redirect to the analysis page. On `429 QUOTA_EXCEEDED` show the reset date and the upgrade link. |
 | `/resume-optimizer/analyses/[id]` | Poll until final; show gauge, dimensions, missing skills, suggestions, locked block, PDF button | API-011, API-012, API-013 | Polling: `refetchInterval` 2000 ms while `QUEUED`/`PROCESSING`, stop after 150 s. |
 | `/resume-optimizer/resumes` | List resumes with purge date; delete | API-006, API-008 | |
-| `/resume-optimizer/privacy` | Consent status, export button, erase button with confirmation | API-001, API-014, API-015 | Erase requires typing `DELETE`. |
+| `/resume-optimizer/privacy` | Consent status, export button, erase button with confirmation | API-001, API-014, API-015 | Erase requires typing `DELETE`. *(v1.1)* Warns that an active Resume Pro subscription is cancelled without refund. |
+| `/resume-optimizer/upgrade` *(v1.1)* | Resume Pro pricing card (₹299 / month, unlimited analyses, all suggestions, history and comparison, cancel anytime), "Subscribe" button | API-001, API-023, API-024 | Loads `https://checkout.razorpay.com/v1/checkout.js`; opens Checkout with `key = razorpay_key_id`, `subscription_id`; on the success callback calls API-024 then redirects to `/resume-optimizer/subscription`. On dismiss, nothing is called (the `CREATED` row expires after 30 min). Pro users are redirected to the subscription page. |
+| `/resume-optimizer/subscription` *(v1.1)* | Current status, next charge or "Pro until <date>", cancel button with confirmation, payment history table | API-022, API-025, API-026 | Cancel button shown only for `ACTIVE` / `PAST_DUE`. `PAST_DUE` shows "Payment failed, Razorpay will retry; Pro until <date>". |
+| `/resume-optimizer/history` *(v1.1)* | Analysis history with checkboxes to pick two completed analyses, "Compare" button | API-010, API-001 | Free users see the list and a disabled Compare button with an upgrade link. |
+| `/resume-optimizer/compare` *(v1.1)* | Side-by-side scores, delta per dimension, skills gained / still missing / newly missing | API-028 | Query `?base=<id>&target=<id>`. `403 PLAN_REQUIRED` redirects to the upgrade page. |
 
 ---
 
@@ -876,14 +1001,48 @@ erDiagram
   ANALYSES ||--|{ ANALYSIS_SCORES : has
   ANALYSES ||--o{ MISSING_SKILLS : lists
   ANALYSES ||--o{ REWRITE_SUGGESTIONS : lists
+  USERS ||--o{ SUBSCRIPTIONS : "subscribes (v1.1)"
+  SUBSCRIPTIONS ||--o{ PAYMENTS : "is paid by (v1.1)"
+  USERS ||--o{ PAYMENTS : "pays (v1.1)"
 
   USERS {
     uuid id PK
     text plan
     text role
+    timestamptz pro_until
+    text razorpay_customer_id
     timestamptz plan_updated_at
     timestamptz erased_at
     timestamptz created_at
+  }
+  SUBSCRIPTIONS {
+    uuid id PK
+    uuid user_id FK
+    text razorpay_subscription_id UK
+    text status
+    int amount_paise
+    char currency
+    timestamptz current_period_start
+    timestamptz current_period_end
+    timestamptz cancel_requested_at
+  }
+  PAYMENTS {
+    uuid id PK
+    uuid user_id FK
+    uuid subscription_id FK
+    text razorpay_payment_id UK
+    text status
+    int amount_paise
+    text method
+    timestamptz paid_at
+  }
+  WEBHOOK_EVENTS {
+    uuid id PK
+    text provider
+    text provider_event_id
+    text event_type
+    jsonb payload
+    timestamptz processed_at
   }
   CONSENTS {
     uuid id PK
@@ -988,9 +1147,11 @@ Purpose: one row per platform user who has used the module; mirrors plan; never 
 | Column | Type | Null | Key | Default | Constraint / note |
 |---|---|---|---|---|---|
 | id | uuid | NO | PK | — | Equals the platform JWT `sub`. Not generated here. |
-| plan | text | NO | FK → plan_limits.plan | `'free'` | `CHECK (plan IN ('free','pro'))` |
+| plan | text | NO | FK → plan_limits.plan | `'free'` | `CHECK (plan IN ('free','pro'))`. *(v1.1)* Derived cache of `pro_until > now()`, recomputed by CMP-015 on every subscription change and by the hourly expiry job; the authoritative check is `pro_until` (CR-004) |
 | role | text | NO | | `'user'` | `CHECK (role IN ('user','admin'))`; mirrored from JWT |
-| plan_updated_at | timestamptz | NO | | `now()` | Set when `plan` changes (JWT or webhook) |
+| pro_until | timestamptz | YES | | NULL | *(v1.1)* End of the paid Resume Pro period (Razorpay `current_end`). NULL or past = free |
+| razorpay_customer_id | text | YES | | NULL | *(v1.1)* Razorpay customer id returned with the first subscription; reused for later subscriptions |
+| plan_updated_at | timestamptz | NO | | `now()` | Set when the derived `plan` changes |
 | erased_at | timestamptz | YES | | NULL | Set by FR-018 / FR-021; cleared when the user gives consent again |
 | last_seen_at | timestamptz | NO | | `now()` | Updated at most once per hour by the auth middleware |
 | created_at | timestamptz | NO | | `now()` | |
@@ -1145,7 +1306,7 @@ Purpose: DPDP accountability trail of processing events; no resume content.
 | id | uuid | NO | PK | gen_random_uuid() | |
 | user_id | uuid | YES | FK → users.id | — | ON DELETE SET NULL; NULL for admin catalogue changes and retention runs |
 | actor | text | NO | | — | `CHECK (actor IN ('user','admin','platform','system'))` |
-| action | text | NO | | — | `CHECK (action IN ('CONSENT_GIVEN','RESUME_UPLOADED','RESUME_DELETED','ANALYSIS_CREATED','ANALYSIS_DELETED','REPORT_DOWNLOADED','DATA_EXPORTED','DATA_ERASED','PLAN_CHANGED','RETENTION_PURGE','JOB_ROLE_CHANGED','PLAN_LIMIT_CHANGED'))` |
+| action | text | NO | | — | `CHECK (action IN ('CONSENT_GIVEN','RESUME_UPLOADED','RESUME_DELETED','ANALYSIS_CREATED','ANALYSIS_DELETED','REPORT_DOWNLOADED','DATA_EXPORTED','DATA_ERASED','PLAN_CHANGED','RETENTION_PURGE','JOB_ROLE_CHANGED','PLAN_LIMIT_CHANGED','SUBSCRIPTION_CREATED','SUBSCRIPTION_ACTIVATED','SUBSCRIPTION_RENEWED','SUBSCRIPTION_CANCEL_REQUESTED','SUBSCRIPTION_CANCELLED','SUBSCRIPTION_EXPIRED','PAYMENT_FAILED'))` *(the last seven added in v1.1)* |
 | entity_id | uuid | YES | | NULL | Resume, analysis or role id |
 | metadata | jsonb | NO | | `'{}'` | Small facts only (counts, old/new plan, size). Never text content or filenames. |
 | request_id | uuid | YES | | NULL | |
@@ -1157,12 +1318,71 @@ Purpose: configurable limits per plan (seeded, admin editable).
 | Column | Type | Null | Key | Default | Constraint / note |
 |---|---|---|---|---|---|
 | plan | text | NO | PK | — | `CHECK (plan IN ('free','pro'))` |
-| analyses_per_month | int | NO | | — | `CHECK (analyses_per_month BETWEEN 1 AND 1000)` |
+| analyses_per_month | int | YES | | NULL | *(v1.1: made nullable)* NULL = unlimited; `CHECK (analyses_per_month IS NULL OR analyses_per_month BETWEEN 1 AND 1000)` |
 | visible_missing_skills | int | YES | | NULL | NULL = unlimited; `CHECK (visible_missing_skills IS NULL OR visible_missing_skills BETWEEN 0 AND 100)` |
 | visible_rewrite_suggestions | int | YES | | NULL | NULL = unlimited; same range |
 | updated_at | timestamptz | NO | | `now()` | trigger |
 
-Seed rows: `('free', 3, 3, 2)`, `('pro', 50, NULL, NULL)`.
+Seed rows: `('free', 3, 3, 2)`, `('pro', NULL, NULL, NULL)` *(v1.1: pro was `50` in v1.0; migration `000002_resume_pro.up.sql` alters the column and updates the row)*.
+
+#### TBL-013 `subscriptions` *(v1.1)*
+Purpose: one row per Resume Pro subscription attempt; mirrors Razorpay subscription state.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | FK → users.id | — | ON DELETE RESTRICT (financial record; users rows are never deleted) |
+| razorpay_subscription_id | text | NO | UK | — | `sub_...` from Razorpay |
+| razorpay_plan_id | text | NO | | — | Copy of `RAZORPAY_PLAN_ID_PRO` at creation |
+| status | text | NO | | `'CREATED'` | `CHECK (status IN ('CREATED','ACTIVE','PAST_DUE','CANCEL_SCHEDULED','CANCELLED','EXPIRED'))` |
+| amount_paise | int | NO | | 29900 | `CHECK (amount_paise > 0)`; ₹299.00 |
+| currency | char(3) | NO | | `'INR'` | `CHECK (currency = 'INR')` |
+| current_period_start | timestamptz | YES | | NULL | Razorpay `current_start`; NULL while CREATED |
+| current_period_end | timestamptz | YES | | NULL | Razorpay `current_end`; drives `users.pro_until` |
+| activated_at | timestamptz | YES | | NULL | First time status became ACTIVE |
+| cancel_requested_at | timestamptz | YES | | NULL | Set by FR-024 |
+| cancelled_at | timestamptz | YES | | NULL | Set when Razorpay reports `cancelled` |
+| last_event_at | timestamptz | YES | | NULL | `created_at` of the last applied Razorpay event; older events are ignored (out-of-order delivery) |
+| created_at | timestamptz | NO | | `now()` | |
+| updated_at | timestamptz | NO | | `now()` | trigger |
+
+Partial unique index `uq_subscriptions_user_open` on `(user_id) WHERE status IN ('CREATED','ACTIVE','PAST_DUE','CANCEL_SCHEDULED')` enforces at most one open subscription per user (FR-022 rule 1).
+
+#### TBL-014 `payments` *(v1.1)*
+Purpose: every charge attempt for a subscription; the receipt list shown to the user (FR-026).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | FK → users.id | — | ON DELETE RESTRICT |
+| subscription_id | uuid | NO | FK → subscriptions.id | — | ON DELETE RESTRICT |
+| razorpay_payment_id | text | NO | UK | — | `pay_...`; dedup key for webhooks |
+| razorpay_invoice_id | text | YES | | NULL | `inv_...` when Razorpay provides it |
+| status | text | NO | | — | `CHECK (status IN ('CAPTURED','FAILED','REFUNDED'))`; `REFUNDED` is set only by support via Razorpay webhook `refund.processed` (stored, no module logic) |
+| amount_paise | int | NO | | — | `CHECK (amount_paise > 0)` |
+| currency | char(3) | NO | | `'INR'` | |
+| method | text | YES | | NULL | Razorpay `method` (`card`, `upi`, `netbanking`, `wallet`); never instrument details (CR-021) |
+| period_start | timestamptz | YES | | NULL | Billing period this payment covers |
+| period_end | timestamptz | YES | | NULL | |
+| paid_at | timestamptz | YES | | NULL | Razorpay `created_at` of the payment; NULL when FAILED |
+| failure_reason | text | YES | | NULL | Razorpay `error_description`, max 300 chars |
+| created_at | timestamptz | NO | | `now()` | |
+
+#### TBL-015 `webhook_events` *(v1.1)*
+Purpose: idempotency and audit of inbound webhooks (Razorpay and platform).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| provider | text | NO | | — | `CHECK (provider IN ('razorpay','platform'))` |
+| provider_event_id | text | NO | | — | Razorpay `x-razorpay-event-id`; platform: `X-SurfingBear-Timestamp` + path |
+| event_type | text | NO | | — | e.g. `subscription.charged` |
+| payload | jsonb | NO | | — | Raw body with `email`, `contact`, `card`, `vpa`, `bank`, `notes.*` except `user_id` redacted (1.5) |
+| received_at | timestamptz | NO | | `now()` | |
+| processed_at | timestamptz | YES | | NULL | NULL = failed or ignored |
+| processing_error | text | YES | | NULL | Last error message, max 500 chars |
+
+Unique: `uq_webhook_events_provider_event (provider, provider_event_id)`. Rows older than 90 days are deleted by the retention scheduler (FR-017 step 4, extended).
 
 ### 5.3 Indexes
 
@@ -1187,6 +1407,15 @@ Seed rows: `('free', 3, 3, 2)`, `('pro', 50, NULL, NULL)`.
 | usage_counters | PK | (user_id, period) | Atomic upsert in FR-013 |
 | audit_logs | `idx_audit_logs_user_created` | (user_id, created_at DESC) | Export (FR-018) |
 | audit_logs | `idx_audit_logs_created` | (created_at) | 365-day purge |
+| users *(v1.1)* | `idx_users_pro_until` | (pro_until) WHERE plan = 'pro' | Hourly expiry job (FR-023 rule 7) |
+| subscriptions *(v1.1)* | `uq_subscriptions_razorpay_id` | (razorpay_subscription_id) | Webhook lookup by Razorpay id (FR-023) |
+| subscriptions *(v1.1)* | `uq_subscriptions_user_open` | (user_id) WHERE status IN ('CREATED','ACTIVE','PAST_DUE','CANCEL_SCHEDULED') | One open subscription per user (FR-022 rule 1) |
+| subscriptions *(v1.1)* | `idx_subscriptions_user_created` | (user_id, created_at DESC) | Latest subscription for `GET /subscriptions/me` (API-022) |
+| subscriptions *(v1.1)* | `idx_subscriptions_period_end` | (current_period_end) WHERE status IN ('CANCELLED','PAST_DUE') | Expiry job selection |
+| payments *(v1.1)* | `uq_payments_razorpay_id` | (razorpay_payment_id) | Webhook dedup (FR-023 rule 4) |
+| payments *(v1.1)* | `idx_payments_user_created` | (user_id, created_at DESC) | Payment history (API-026) |
+| webhook_events *(v1.1)* | `uq_webhook_events_provider_event` | (provider, provider_event_id) | Exactly-once processing (CR-022) |
+| webhook_events *(v1.1)* | `idx_webhook_events_received` | (received_at) | 90-day purge |
 
 ### 5.4 Relationships and delete rules
 
@@ -1204,8 +1433,11 @@ Seed rows: `('free', 3, 3, 2)`, `('pro', 50, NULL, NULL)`.
 | usage_counters.user_id | users.id | N:1 | CASCADE. |
 | audit_logs.user_id | users.id | N:1 | SET NULL (never triggered in practice). |
 | users.plan | plan_limits.plan | N:1 | RESTRICT. |
+| subscriptions.user_id *(v1.1)* | users.id | N:1 | RESTRICT. Financial record, kept 7 years (NFR-016). |
+| payments.user_id *(v1.1)* | users.id | N:1 | RESTRICT. Same. |
+| payments.subscription_id *(v1.1)* | subscriptions.id | N:1 | RESTRICT. |
 
-**What happens when a user asks to delete their data (FR-018):** S3 objects deleted → `analyses` (and children by cascade), `resumes`, `usage_counters` deleted → active consent withdrawn → `users.erased_at` set → audit row written. The `users` and `audit_logs` rows remain because DPDP requires an accountability record of the erasure itself; they contain no personal data beyond the platform UUID.
+**What happens when a user asks to delete their data (FR-018):** S3 objects deleted → `analyses` (and children by cascade), `resumes`, `usage_counters` deleted → active consent withdrawn → *(v1.1)* open subscription cancelled at Razorpay immediately and `pro_until = now()` → `users.erased_at` set → audit row written. The `users`, `audit_logs`, `subscriptions` and `payments` rows remain: DPDP requires an accountability record of the erasure itself, and payment records are a legal obligation (NFR-016); they contain no personal data beyond the platform UUID and Razorpay ids.
 
 ### 5.5 Seed data
 
