@@ -1473,6 +1473,8 @@ Unique: `uq_webhook_events_provider_event (provider, provider_event_id)`. Rows o
 - **Date / time:** ISO 8601 with milliseconds in UTC, e.g. `2026-10-19T09:30:00.000Z`. Exception: `usage.resets_at` is given with the IST offset (`+05:30`) because it is a calendar boundary.
 - **Standard error format:** section 1.4. Every error below is listed in 6.3.
 - **Common errors on every authenticated endpoint** (not repeated in each block): `401 UNAUTHENTICATED`, `403 FORBIDDEN` (role), `429 RATE_LIMITED`, `500 INTERNAL_ERROR`, `503 AUTH_UNAVAILABLE`.
+- **Pro-only endpoints** *(v1.1)* return `403 PLAN_REQUIRED` when the effective plan is `free` (CR-004). Only API-028 is Pro-only.
+- **Money** *(v1.1)*: amounts are integers in paise (`amount_paise`), currency is a 3-letter code; the API never accepts an amount from the client.
 - **Headers on every response:** `X-Request-Id`, security headers from 1.5.
 - **Idempotency:** `POST /consents` and the internal webhooks are idempotent by design. `POST /analyses` is not; the duplicate guard (FR-007 rule 4) prevents double runs.
 
@@ -1516,8 +1518,36 @@ Shared schemas used below:
   "rewrite_suggestions_total": 6,
   "rewrite_suggestions_locked": 4,
   "plan_gated": true,
-  "upgrade_url": "https://www.surfingbear.com/pricing" | null,
+  "upgrade_url": "/resume-optimizer/upgrade" | null,
   "ai_model": "claude-sonnet-5-5" | null
+}
+
+// Subscription (v1.1)
+{
+  "id": "uuid",
+  "status": "CREATED" | "ACTIVE" | "PAST_DUE" | "CANCEL_SCHEDULED" | "CANCELLED" | "EXPIRED",
+  "razorpay_subscription_id": "sub_...",
+  "amount_paise": 29900,
+  "currency": "INR",
+  "current_period_start": "..." | null,
+  "current_period_end": "..." | null,
+  "cancel_at_period_end": false,
+  "next_charge_at": "..." | null,
+  "created_at": "..."
+}
+
+// Payment (v1.1)
+{
+  "id": "uuid",
+  "razorpay_payment_id": "pay_...",
+  "status": "CAPTURED" | "FAILED" | "REFUNDED",
+  "amount_paise": 29900,
+  "currency": "INR",
+  "method": "card" | "upi" | "netbanking" | "wallet" | null,
+  "period_start": "..." | null,
+  "period_end": "..." | null,
+  "paid_at": "..." | null,
+  "failure_reason": "..." | null
 }
 ```
 
@@ -1541,12 +1571,14 @@ Shared schemas used below:
     "consent": { "status": "active", "version": "v1", "required_version": "v1", "accepted_at": "2026-10-19T09:00:00.000Z" },
     "usage": { "period": "2026-10", "used": 1, "limit": 3, "remaining": 2, "resets_at": "2026-11-01T00:00:00.000+05:30" },
     "limits": { "analyses_per_month": 3, "visible_missing_skills": 3, "visible_rewrite_suggestions": 2, "max_resumes": 10, "max_file_bytes": 5242880 },
-    "upgrade_url": "https://www.surfingbear.com/pricing"
+    "pro_until": null,
+    "subscription": null,
+    "upgrade_url": "/resume-optimizer/upgrade"
   }
 }
 ```
 
-`consent.status` is `active` or `required`; `version` and `accepted_at` are null when required. `upgrade_url` is null for `pro`.
+`consent.status` is `active` or `required`; `version` and `accepted_at` are null when required. `upgrade_url` is null for `pro`. *(v1.1)* `plan` is the effective plan (CR-004); for `pro`, `usage.limit`, `usage.remaining` and `limits.analyses_per_month` are `null`, `pro_until` is set, and `subscription` is the Subscription object of the latest subscription (or `null` if the user never subscribed, e.g. an admin).
 
 **Errors** — common only.
 
@@ -1790,7 +1822,7 @@ Sorted `created_at DESC`.
     { "rank": 2, "section": "summary", "original_line": "Hardworking developer looking for opportunities.", "suggested_line": "Backend engineer with 3 years of Go and PostgreSQL experience building payment APIs.", "reason": "Replaces a generic statement with role-specific facts." }
   ],
   "rewrite_suggestions_total": 6, "rewrite_suggestions_locked": 4,
-  "plan_gated": true, "upgrade_url": "https://www.surfingbear.com/pricing",
+  "plan_gated": true, "upgrade_url": "/resume-optimizer/upgrade",
   "ai_model": "claude-sonnet-5-5",
   "created_at": "2026-10-19T09:31:00.000Z", "started_at": "2026-10-19T09:31:02.000Z", "completed_at": "2026-10-19T09:31:31.000Z" } }
 ```
@@ -1933,35 +1965,22 @@ Audit row `DATA_EXPORTED` is written. The body is not wrapped in `data` because 
 | Field | In | Type | Required | Validation |
 |---|---|---|---|---|
 | plan | path | string | yes | `free` \| `pro` |
-| analyses_per_month | body | int | yes | 1–1000 |
+| analyses_per_month | body | int \| null | yes | 1–1000 or null (*v1.1*: null = unlimited) |
 | visible_missing_skills | body | int \| null | yes | 0–100 or null |
 | visible_rewrite_suggestions | body | int \| null | yes | 0–100 or null |
 
 **Response 200:** `{ "data": { "plan": "free", "analyses_per_month": 3, "visible_missing_skills": 3, "visible_rewrite_suggestions": 2, "updated_at": "..." } }`
 
+Note *(v1.1)*: changing `pro` limits here changes what Pro subscribers get; the price stays ₹299 (configuration, not data).
+
 **Errors:** `400 VALIDATION_ERROR`, `403 FORBIDDEN`, `404 NOT_FOUND` (unknown plan).
 
-#### API-020 `POST /internal/users/{id}/plan`
-- **Purpose:** Platform notifies a plan change.
-- **Auth / role:** HMAC (CR-003)
-- **Implements:** FR-019
+#### API-020 `POST /internal/users/{id}/plan` — **Deprecated (v1.1)**
+- **Purpose:** *(v1.0)* Platform notified a plan change. *(v1.1)* Removed from the router; the plan is owned by the module (FR-022, FR-023). Calling it returns `404 NOT_FOUND` like any unknown route.
+- **Auth / role:** —
+- **Implements:** FR-019 (deprecated)
 
-**Request**
-
-| Field | In | Type | Required | Validation |
-|---|---|---|---|---|
-| id | path | UUID | yes | |
-| plan | body | string | yes | `free` \| `pro` |
-| changed_at | body | string (ISO 8601) | yes | ignored if older than `users.plan_updated_at` (out-of-order delivery) |
-
-**Response 204**
-
-**Errors**
-
-| HTTP | Error code | When |
-|---|---|---|
-| 400 | VALIDATION_ERROR | body rules |
-| 401 | INVALID_SIGNATURE | bad or stale signature |
+Block kept for history; the ID is not reused.
 
 #### API-021 `POST /internal/users/{id}/deleted`
 - **Purpose:** Platform notifies account deletion; the module erases the user's data.
@@ -1973,6 +1992,167 @@ Audit row `DATA_EXPORTED` is written. The body is not wrapped in `data` because 
 **Response 204** (also for unknown users).
 
 **Errors:** `400 VALIDATION_ERROR` (bad UUID), `401 INVALID_SIGNATURE`.
+
+#### API-022 `GET /subscriptions/me` *(v1.1)*
+- **Purpose:** The user's latest Resume Pro subscription, for the subscription page.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-026, FR-024
+
+**Request** — no parameters.
+
+**Response 200**
+
+```json
+{ "data": { "id": "f1a2...", "status": "ACTIVE", "razorpay_subscription_id": "sub_PqR7...", "amount_paise": 29900, "currency": "INR",
+  "current_period_start": "2026-10-26T06:10:00.000Z", "current_period_end": "2026-11-26T06:10:00.000Z",
+  "cancel_at_period_end": false, "next_charge_at": "2026-11-26T06:10:00.000Z", "created_at": "2026-10-26T06:09:40.000Z" } }
+```
+
+`{ "data": null }` when the user never subscribed. `cancel_at_period_end` is `true` for `CANCEL_SCHEDULED`; `next_charge_at` is non-null only for `ACTIVE`.
+
+**Errors** — common only.
+
+#### API-023 `POST /subscriptions` *(v1.1)*
+- **Purpose:** Start a Resume Pro subscription; returns what the browser needs to open Razorpay Checkout.
+- **Auth / role:** `user`, `admin`; active consent required
+- **Implements:** FR-022
+
+**Request** — empty body `{}` (price and plan are server configuration).
+
+**Response 201** (200 when an existing `CREATED` subscription younger than 30 minutes is returned)
+
+```json
+{ "data": { "subscription_id": "f1a2...", "razorpay_subscription_id": "sub_PqR7...", "razorpay_key_id": "rzp_live_abc123",
+  "amount_paise": 29900, "currency": "INR", "status": "CREATED", "checkout": { "name": "SurfingBear Resume Pro", "description": "Monthly subscription, cancel anytime" } } }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 403 | CONSENT_REQUIRED | no active consent |
+| 409 | SUBSCRIPTION_ALREADY_ACTIVE | a subscription is `ACTIVE`, `PAST_DUE` or `CANCEL_SCHEDULED` |
+| 503 | PAYMENT_PROVIDER_UNAVAILABLE | Razorpay create failed or timed out |
+
+#### API-024 `POST /subscriptions/{id}/verify` *(v1.1)*
+- **Purpose:** Verify the Razorpay Checkout result and activate Pro without waiting for the webhook.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-022
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| id | path | UUID | yes | own subscription |
+| razorpay_payment_id | body | string | yes | `^pay_[A-Za-z0-9]{14,}$` |
+| razorpay_signature | body | string | yes | 64 hex chars; must equal `HMAC_SHA256(razorpay_payment_id + "\|" + razorpay_subscription_id, RAZORPAY_KEY_SECRET)` |
+
+**Response 200:** `{ "data": Subscription }` with the state fetched from Razorpay (normally `ACTIVE`). Idempotent: verifying an already active subscription returns 200.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | field rules |
+| 400 | PAYMENT_VERIFICATION_FAILED | signature mismatch |
+| 404 | NOT_FOUND | subscription not found or not owned |
+| 503 | PAYMENT_PROVIDER_UNAVAILABLE | Razorpay fetch failed |
+
+#### API-025 `POST /subscriptions/{id}/cancel` *(v1.1)*
+- **Purpose:** Cancel at the end of the current paid month.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-024
+
+**Request:** `id` path UUID; empty body `{}`.
+
+**Response 200:** `{ "data": Subscription }` with `status = "CANCEL_SCHEDULED"`, `cancel_at_period_end = true`, `next_charge_at = null`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 404 | NOT_FOUND | not found or not owned |
+| 409 | SUBSCRIPTION_NOT_CANCELLABLE | status is not `ACTIVE` or `PAST_DUE` |
+| 503 | PAYMENT_PROVIDER_UNAVAILABLE | Razorpay cancel failed |
+
+#### API-026 `GET /payments` *(v1.1)*
+- **Purpose:** Payment history for Resume Pro.
+- **Auth / role:** `user`, `admin`
+- **Implements:** FR-026
+
+**Request:** `page`, `page_size` (6.1). Sorted `created_at DESC`.
+
+**Response 200:** `{ "data": [ Payment, ... ], "page": {...} }`
+
+**Errors:** `400 VALIDATION_ERROR`.
+
+#### API-027 `POST /internal/razorpay/webhook` *(v1.1)*
+- **Purpose:** Receive Razorpay subscription and payment events.
+- **Auth / role:** Razorpay signature (CR-022); no JWT
+- **Implements:** FR-023
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| X-Razorpay-Signature | header | string | yes | HMAC-SHA256 hex of the raw body with `RAZORPAY_WEBHOOK_SECRET` |
+| x-razorpay-event-id | header | string | yes | 1–64 chars; dedup key |
+| body | body | Razorpay event JSON | yes | `event` (string), `payload.subscription.entity` and/or `payload.payment.entity` as sent by Razorpay |
+
+**Response 200:** `{ "data": { "received": true, "duplicate": false } }` — also `200` with `"duplicate": true` for a replay, and `200` for unhandled event types.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | body is not valid Razorpay event JSON or event id header missing |
+| 401 | INVALID_SIGNATURE | signature mismatch |
+| 500 | INTERNAL_ERROR | processing failed; Razorpay retries |
+
+#### API-028 `GET /analyses/{base_id}/compare/{target_id}` *(v1.1)*
+- **Purpose:** Score comparison between two completed analyses (Pro feature).
+- **Auth / role:** `user` with effective plan `pro`, `admin`
+- **Implements:** FR-025
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| base_id | path | UUID | yes | own, COMPLETED |
+| target_id | path | UUID | yes | own, COMPLETED, ≠ base_id |
+
+**Response 200**
+
+```json
+{ "data": {
+  "base":   { "id": "c3d4...", "created_at": "2026-10-19T09:31:00.000Z", "overall_score": 72, "job_role": { "slug": "backend-engineer-go", "title": "Backend Engineer (Go)" }, "experience_level": "mid", "resume": { "id": "9b2f...", "original_filename": "Nikky_Resume.pdf" }, "rewrite_suggestions_total": 6 },
+  "target": { "id": "e5f6...", "created_at": "2026-10-25T14:02:00.000Z", "overall_score": 81, "job_role": { "slug": "backend-engineer-go", "title": "Backend Engineer (Go)" }, "experience_level": "mid", "resume": { "id": "a7b8...", "original_filename": "Nikky_Resume_v2.pdf" }, "rewrite_suggestions_total": 3 },
+  "same_job_role": true, "same_resume": false,
+  "overall_delta": 9,
+  "dimension_deltas": [
+    { "dimension": "keyword_match", "base": 80, "target": 88, "delta": 8 },
+    { "dimension": "impact_quantification", "base": 60, "target": 75, "delta": 15 },
+    { "dimension": "section_completeness", "base": 70, "target": 85, "delta": 15 },
+    { "dimension": "length_relevance", "base": 90, "target": 90, "delta": 0 },
+    { "dimension": "formatting", "base": 50, "target": 70, "delta": 20 },
+    { "dimension": "readability", "base": 70, "target": 75, "delta": 5 }
+  ],
+  "skills_gained": ["Redis", "Message queues"],
+  "skills_still_missing": ["Concurrency patterns", "Kubernetes"],
+  "skills_newly_missing": []
+} }
+```
+
+Check: target overall = (88·30+75·20+85·15+90·15+70·10+75·10)/100 = 81.15 → 81.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | ids not UUIDs, or base_id = target_id |
+| 403 | PLAN_REQUIRED | effective plan is `free` |
+| 404 | NOT_FOUND | either analysis not found or not owned |
+| 409 | ANALYSIS_NOT_READY | either analysis is not `COMPLETED` |
 
 ### 6.3 Error code list
 
@@ -2003,8 +2183,13 @@ Audit row `DATA_EXPORTED` is written. The body is not wrapped in `data` because 
 | ERR-023 | AUTH_UNAVAILABLE | 503 | "Authentication service unavailable." | JWKS unreachable with empty cache (4.4) |
 | ERR-024 | AI_UNAVAILABLE | — (stored in `analyses.error_code`, never an HTTP status) | "The AI service was unavailable. Your quota was not used." | FR-008 rule 5 |
 | ERR-025 | AI_INVALID_RESPONSE | — (stored in `analyses.error_code`) | "The AI returned an unusable result. Your quota was not used." | FR-008 rule 5 |
+| ERR-026 *(v1.1)* | PLAN_REQUIRED | 403 | "This feature is available on Resume Pro." | API-028 called with effective plan `free` |
+| ERR-027 *(v1.1)* | SUBSCRIPTION_ALREADY_ACTIVE | 409 | "You already have an active Resume Pro subscription." | FR-022 rule 1 |
+| ERR-028 *(v1.1)* | SUBSCRIPTION_NOT_CANCELLABLE | 409 | "This subscription cannot be cancelled in its current state." | FR-024 rule 1 |
+| ERR-029 *(v1.1)* | PAYMENT_VERIFICATION_FAILED | 400 | "Payment could not be verified. If you were charged, Pro will activate automatically within a few minutes." | FR-022 rule 5 |
+| ERR-030 *(v1.1)* | PAYMENT_PROVIDER_UNAVAILABLE | 503 | "Payment service is temporarily unavailable. Please try again." | Razorpay create / fetch / cancel failed (FR-022, FR-024) |
 
-Frontend mapping: `messages/en.json` has a key `errors.<CODE>` for every row; `AI_UNAVAILABLE` and `AI_INVALID_RESPONSE` are shown on the analysis page with a retry button.
+Frontend mapping: `messages/en.json` has a key `errors.<CODE>` for every row; `AI_UNAVAILABLE` and `AI_INVALID_RESPONSE` are shown on the analysis page with a retry button; `PLAN_REQUIRED` redirects to `/resume-optimizer/upgrade`.
 
 ---
 
