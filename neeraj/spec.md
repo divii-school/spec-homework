@@ -268,7 +268,7 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`: `userId` and `isAdmi
 | `error.code` | string | Yes | One of §6.3. |
 | `error.message` | string | Yes | Localized (`en`, `hi` or `ko`). |
 | `error.details` | array of `{ field: string, issue: string }` | Yes (may be empty `[]`) | For `VALIDATION_FAILED`, one entry per invalid field. `field` is the dotted path of the input (`coreSkills.1.matchTerms.0`), the parameter name for path and query parameters, `body` for malformed JSON, and the multipart field name for upload errors. `issue` is the class-validator constraint key (for example `isUuid`, `maxLength`, `whitelistValidation`) or, for other codes, the text given in §6.3. Cases not produced by class-validator: malformed JSON → `{ field: "body", issue: "invalidJson" }`; Multer errors → `{ field: <multipart field name, or "file">, issue: <Multer error code, e.g. "LIMIT_UNEXPECTED_FILE"> }`; empty API-018 body → `{ field: "body", issue: "isNotEmptyObject" }`; duplicate skill names in `coreSkills` → `{ field: "coreSkills", issue: "uniqueSkillNames" }`. |
-| `error.meta` | object | Only for `QUOTA_EXCEEDED` and `RESUME_LIMIT_REACHED` (`{ "limit": 15 }`) | `{ "limit": 3, "used": 2, "inProgress": 1, "resetsAt": "2026-10-31T18:30:00.000Z" }` (`used` = consumed, `inProgress` = reserved, as in API-001). |
+| `error.meta` | object | Only for `QUOTA_EXCEEDED`, `RESUME_LIMIT_REACHED` (`{ "limit": 15 }`) and, since v2.0, `ALREADY_PRO` (`{ "proUntil": "<date-time>" }`) | `{ "limit": 3, "used": 2, "inProgress": 1, "resetsAt": "2026-10-31T18:30:00.000Z" }` (`used` = consumed, `inProgress` = reserved, as in API-001). |
 | `error.requestId` | string (UUID) | Yes | Same as the `X-Request-Id` header. |
 | `error.timestamp` | string (ISO 8601 UTC) | Yes | Server time. |
 
@@ -2450,8 +2450,8 @@ Every place where personal data lives, with its retention and what erasure (FR-0
 ### 6.1 Common rules
 
 - **Base path:** `/api/v1` on the same origin as the web app (prod: `https://resume.surfingbear.com/api/v1`). The major version is in the path; breaking changes require `/api/v2`.
-- **Auth:** platform JWT in the `sb_access_token` cookie, or `Authorization: Bearer <jwt>` (CR-001 to CR-003). Every endpoint is protected except API-019 and API-020.
-- **CSRF:** `POST`, `PATCH`, `PUT` and `DELETE` require `X-Requested-With: SurfingBearRO` and `Origin: <APP_ORIGIN>` (CR-004).
+- **Auth:** platform JWT in the `sb_access_token` cookie, or `Authorization: Bearer <jwt>` (CR-001 to CR-003). Every endpoint is protected except API-019, API-020 and API-025 (the Razorpay webhook, checked by its signature, CR-037).
+- **CSRF:** `POST`, `PATCH`, `PUT` and `DELETE` require `X-Requested-With: SurfingBearRO` and `Origin: <APP_ORIGIN>` (CR-004), except API-025.
 - **Expired rows:** every read of resumes and analyses filters `expires_at > $now`; an expired row behaves exactly like a deleted one (404) until FR-020 removes it (FR-014.3). `$now` is the Clock time (§2.2 rule 6).
 - **Consent:** endpoints marked "Consent: required" return 403 `CONSENT_REQUIRED` when the user has no active consent for `NOTICE_VERSION` (FR-002.2).
 - **Content types:** requests `application/json` (except API-005: `multipart/form-data`); responses `application/json; charset=utf-8` (except API-012: `application/pdf`).
@@ -2469,12 +2469,12 @@ Every place where personal data lives, with its retention and what erasure (FR-0
 |---|---|---|
 | 401 | `AUTH_REQUIRED` | every protected endpoint |
 | 401 | `AUTH_TOKEN_INVALID` | every protected endpoint |
-| 403 | `CSRF_CHECK_FAILED` | every `POST`, `PUT`, `PATCH`, `DELETE` |
+| 403 | `CSRF_CHECK_FAILED` | every `POST`, `PUT`, `PATCH`, `DELETE` except API-025 |
 | 403 | `CONSENT_REQUIRED` | endpoints marked "Consent: required" |
 | 400 | `VALIDATION_FAILED` | every endpoint with path params, query params or a body |
 | 413 | `PAYLOAD_TOO_LARGE` | every JSON body endpoint (body > `JSON_BODY_LIMIT`) |
 | 404 | `NOT_FOUND` | unknown routes, and resource IDs that do not exist or belong to another user |
-| 429 | `RATE_LIMITED` | every endpoint except API-019 and API-020 |
+| 429 | `RATE_LIMITED` | every endpoint except API-019, API-020 and API-025 |
 | 500 | `INTERNAL_ERROR` | every endpoint |
 | 503 | `SERVICE_UNAVAILABLE` | every endpoint that uses PostgreSQL, Redis, S3 or the JWKS |
 
@@ -2532,7 +2532,7 @@ Every place where personal data lives, with its retention and what erasure (FR-0
 #### API-001 `GET /api/v1/me`
 - **Purpose:** the caller's plan, consent state, usage and limits, for the web app to decide what to show.
 - **Auth / role:** any user. **Consent:** not required. **Rate limit:** default.
-- **Implements:** FR-001, FR-002, FR-007
+- **Implements:** FR-001, FR-002, FR-007, FR-023
 
 **Request:** no parameters.
 
@@ -2543,6 +2543,8 @@ Every place where personal data lives, with its retention and what erasure (FR-0
   "data": {
     "userId": "usr_01J9Z3K7Q2W8E5R1T6Y4U0I9OP",
     "plan": "FREE",
+    "proUntil": null,
+    "cancelAtPeriodEnd": false,
     "isAdmin": false,
     "consent": {
       "required": false,
@@ -2564,12 +2566,12 @@ Every place where personal data lives, with its retention and what erasure (FR-0
       "freeVisibleSuggestions": 3,
       "maxConcurrentAnalyses": 2
     },
-    "upgradeUrl": "https://surfingbear.com/pricing?ref=resume-optimizer"
+    "upgradeUrl": "https://resume.surfingbear.com/en/pro"
   }
 }
 ```
 
-Rules: `consent.acceptedVersion` and `acceptedAt` come from the user's `ACTIVE` consent (null if none); `required = (acceptedVersion !== currentVersion)`. `usage` reads the TBL-008 row of the current period month (all counts 0 if there is none; the row is not created by this call). `upgradeUrl` is null for PRO.
+Rules: `consent.acceptedVersion` and `acceptedAt` come from the user's `ACTIVE` consent (null if none); `required = (acceptedVersion !== currentVersion)`. `usage` reads the TBL-008 row of the current period month (all counts 0 if there is none; the row is not created by this call). Since v2.0: `plan`, `proUntil` and `cancelAtPeriodEnd` come from the entitlement (FR-023); for PRO, `usage.limit` and `usage.remaining` are `null` and `used` / `inProgress` are the PRO counters (FR-007.7); `upgradeUrl` is `<APP_ORIGIN>/<locale>/pro` for FREE and null for PRO.
 
 **Errors:** common errors only.
 
@@ -2816,7 +2818,7 @@ Sort: `created_at DESC, id DESC`. Filter: `user_id = caller AND expires_at > $no
 #### API-009 `POST /api/v1/analyses`
 - **Purpose:** start an analysis.
 - **Auth / role:** any user. **Consent:** required. **Rate limit:** 10 per hour per user.
-- **Implements:** FR-006, FR-007, FR-015 (reuse of a stored resume), FR-021 (inactive roles rejected)
+- **Implements:** FR-006, FR-007, FR-015 (reuse of a stored resume), FR-021 (inactive roles rejected), FR-023 (no limit for PRO)
 
 **Request**
 
@@ -2868,7 +2870,7 @@ Sort: `created_at DESC, id DESC`. Filter: `user_id = caller AND expires_at > $no
 | 422 | `JOB_ROLE_UNAVAILABLE` | Job role exists but `is_active = false` |
 | 409 | `DUPLICATE_ANALYSIS` | Same resume + role + level is already `QUEUED`/`PROCESSING`; `details: [{ "field": "analysisId", "issue": "<existing id>" }]` |
 | 409 | `CONCURRENT_ANALYSIS_LIMIT` | The user already has `MAX_CONCURRENT_ANALYSES` analyses `QUEUED`/`PROCESSING` |
-| 403 | `QUOTA_EXCEEDED` | `consumed + reserved >= limit`; `error.meta = { limit, used, inProgress, resetsAt }` (§1.4) |
+| 403 | `QUOTA_EXCEEDED` | FREE users only (since v2.0): `consumed + reserved >= FREE_MONTHLY_ANALYSES`; `error.meta = { limit, used, inProgress, resetsAt }` (§1.4) |
 | 503 | `SERVICE_UNAVAILABLE` | Enqueue failed (FR-006.4) |
 
 #### API-010 `GET /api/v1/analyses`
@@ -2907,7 +2909,7 @@ Item fields: `id` (uuid), `status`, `errorCode` (nullable), `jobRole` (`{ id, co
 #### API-011 `GET /api/v1/analyses/{analysisId}`
 - **Purpose:** status of one analysis and, when completed, its result with plan gating.
 - **Auth / role:** owner. **Consent:** required. **Rate limit:** default (polling every 3 s uses 20 of the 120 per minute).
-- **Implements:** FR-008 to FR-012
+- **Implements:** FR-008 to FR-012, FR-023 (plan for gating)
 
 **Request**
 
@@ -2956,7 +2958,7 @@ Item fields: `id` (uuid), `status`, `errorCode` (nullable), `jobRole` (`{ id, co
       ],
       "totalSuggestionCount": 7,
       "lockedSuggestionCount": 4,
-      "upgradeUrl": "https://surfingbear.com/pricing?ref=resume-optimizer"
+      "upgradeUrl": "https://resume.surfingbear.com/en/pro"
     }
   }
 }
@@ -2993,7 +2995,7 @@ Example: failed.
 #### API-012 `GET /api/v1/analyses/{analysisId}/report`
 - **Purpose:** download the analysis as a PDF (§4.10).
 - **Auth / role:** owner. **Consent:** required. **Rate limit:** 30 per hour per user.
-- **Implements:** FR-013
+- **Implements:** FR-013, FR-023 (plan for gating)
 
 **Request**
 
@@ -3029,7 +3031,7 @@ Example: failed.
 #### API-014 `GET /api/v1/privacy/my-data`
 - **Purpose:** summary of the caller's personal data and its processing (DPDP Act section 11).
 - **Auth / role:** any user. **Consent:** not required. **Rate limit:** default.
-- **Implements:** FR-018
+- **Implements:** FR-018, FR-022 (billing records)
 
 **Request:** no parameters.
 
@@ -3064,17 +3066,30 @@ Example: failed.
       ],
       "truncated": false
     },
-    "retention": { "rawFileMaxHours": 48, "resumeDays": 30, "analysisDays": 180, "recordDays": 365 },
+    "subscriptions": {
+      "items": [
+        { "status": "ACTIVE", "createdAt": "2026-10-27T04:19:30.000Z", "paidUntil": "2026-11-27T04:20:11.000Z", "cancelAtPeriodEnd": false }
+      ],
+      "truncated": false
+    },
+    "payments": {
+      "items": [
+        { "paidAt": "2026-10-27T04:20:11.000Z", "amountPaise": 29900, "currency": "INR" }
+      ],
+      "truncated": false
+    },
+    "retention": { "rawFileMaxHours": 48, "resumeDays": 30, "analysisDays": 180, "recordDays": 365, "paymentRecordDays": 2922, "paymentEventDays": 90 },
     "processors": [
       { "name": "Anthropic PBC", "purpose": "AI analysis of redacted resume text", "location": "United States" },
-      { "name": "Amazon Web Services", "purpose": "Hosting, database and file storage", "location": "India (ap-south-1)" }
+      { "name": "Amazon Web Services", "purpose": "Hosting, database and file storage", "location": "India (ap-south-1)" },
+      { "name": "Razorpay", "purpose": "Resume Pro payments (only if you subscribe)", "location": "India" }
     ],
     "grievanceEmail": "grievance@surfingbear.com"
   }
 }
 ```
 
-Each `items` list holds at most 1000 rows, newest first; `truncated` is true when more exist. Field meanings: `consents.items[]` = `{ noticeVersion, locale, status, acceptedAt, endedAt (nullable) }`; `resumes.items[]` = `{ id, filename, fileType, sizeBytes, parseStatus, createdAt, expiresAt }`; `analyses.items[]` = `{ id, status, jobRoleCode, experienceLevel, overallScore (nullable), createdAt, expiresAt }`; `usage.items[]` = `{ periodMonth, used, inProgress }`; `retention` = `{ rawFileMaxHours: RAW_FILE_MAX_HOURS, resumeDays: RESUME_RETENTION_DAYS, analysisDays: ANALYSIS_RETENTION_DAYS, recordDays: AUDIT_RETENTION_DAYS }` (consents, erasure records and audit events); `processors` is the fixed list shown; `grievanceEmail` = `GRIEVANCE_EMAIL`.
+Each `items` list holds at most 1000 rows, newest first; `truncated` is true when more exist. Field meanings: `consents.items[]` = `{ noticeVersion, locale, status, acceptedAt, endedAt (nullable) }`; `resumes.items[]` = `{ id, filename, fileType, sizeBytes, parseStatus, createdAt, expiresAt }`; `analyses.items[]` = `{ id, status, jobRoleCode, experienceLevel, overallScore (nullable), createdAt, expiresAt }`; `usage.items[]` = `{ periodMonth, used, inProgress }`; `retention` = `{ rawFileMaxHours: RAW_FILE_MAX_HOURS, resumeDays: RESUME_RETENTION_DAYS, analysisDays: ANALYSIS_RETENTION_DAYS, recordDays: AUDIT_RETENTION_DAYS }` (consents, erasure records and audit events); `processors` is the fixed list shown; `grievanceEmail` = `GRIEVANCE_EMAIL`. Since v2.0 also `subscriptions.items[]` = `{ status, createdAt, paidUntil (nullable), cancelAtPeriodEnd }`, `payments.items[]` = `{ paidAt, amountPaise, currency }`, `retention.paymentRecordDays` = `PAYMENT_RECORD_RETENTION_DAYS` and `retention.paymentEventDays` = `PAYMENT_EVENT_RETENTION_DAYS`; Razorpay is always listed in `processors`.
 
 **Errors:** common errors only.
 
@@ -3102,6 +3117,7 @@ Each `items` list holds at most 1000 rows, newest first; `truncated` is true whe
     "resumesDeleted": 2,
     "analysesDeleted": 3,
     "consentsWithdrawn": 1,
+    "subscriptionCancelled": false,
     "completedAt": "2026-10-16T12:20:00.000Z"
   }
 }
@@ -3109,7 +3125,14 @@ Each `items` list holds at most 1000 rows, newest first; `truncated` is true whe
 
 A user with no data gets 200 with all counts 0 (a TBL-009 row is still written).
 
-**Errors:** common errors only (`VALIDATION_FAILED` when `confirm` is not `DELETE`).
+`subscriptionCancelled` (v2.0) is true when erasure cancelled an open subscription (FR-019.10).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `confirm` is not `DELETE` |
+| 503 | `PAYMENT_PROVIDER_UNAVAILABLE` | The user has an open subscription and Razorpay cannot be reached; nothing is deleted (FR-019.10, v2.0) |
 
 #### API-016 `GET /api/v1/admin/job-roles`
 - **Purpose:** all job roles, including inactive ones.
@@ -3217,6 +3240,235 @@ Checks, each with a 1000 ms timeout: PostgreSQL `SELECT 1`, which decides readin
 |---|---|---|
 | 503 | `SERVICE_UNAVAILABLE` | The PostgreSQL check fails; `details` lists every failed check, e.g. `[{ "field": "database", "issue": "down" }]` |
 
+#### API-021 `GET /api/v1/subscription` (v2.0)
+- **Purpose:** the caller's plan, subscription, payments and the Pro terms, for P-06.
+- **Auth / role:** any user. **Consent:** not required. **Rate limit:** default.
+- **Implements:** FR-022, FR-023, FR-024
+
+**Request:** no parameters. `terms` follows `Accept-Language`.
+
+**Response 200**
+
+```json
+{
+  "data": {
+    "plan": "PRO",
+    "proUntil": "2026-11-27T04:20:11.000Z",
+    "cancelAtPeriodEnd": false,
+    "priceAmountPaise": 29900,
+    "currency": "INR",
+    "checkoutMode": "razorpay",
+    "termsVersion": "RO-PRO-TERMS-2026-10",
+    "terms": "## Resume Pro: terms and payment notice\n\n- **Price:** ₹299 per month, GST included, ...",
+    "subscription": {
+      "id": "5b1e2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "status": "ACTIVE",
+      "currentPeriodEnd": "2026-11-27T04:20:11.000Z",
+      "cancelAtPeriodEnd": false,
+      "createdAt": "2026-10-27T04:19:30.000Z"
+    },
+    "payments": [
+      { "paidAt": "2026-10-27T04:20:11.000Z", "amountPaise": 29900, "currency": "INR", "periodEnd": "2026-11-27T04:20:11.000Z" }
+    ]
+  }
+}
+```
+
+| Field | Type | Nullable | Notes |
+|---|---|---|---|
+| `plan` | `"FREE"` \| `"PRO"` | no | FR-023.1 |
+| `proUntil` | string (date-time) | yes | `paid_until` of the row that grants Pro |
+| `cancelAtPeriodEnd` | boolean | no | |
+| `priceAmountPaise`, `currency` | integer, string | no | `PRO_PRICE_PAISE`, `"INR"` |
+| `checkoutMode` | `"razorpay"` \| `"mock"` | no | From `PAYMENT_MODE` |
+| `termsVersion`, `terms` | string | no | `PRO_TERMS_VERSION` and the §4.9.1 text in the request locale |
+| `subscription` | object | yes | The open subscription, else the newest one, else `null` |
+| `payments` | array | no | The user's last 12 TBL-012 rows, newest first; `periodEnd` nullable |
+
+**Errors:** common errors only.
+
+#### API-022 `POST /api/v1/subscription/checkout` (v2.0)
+- **Purpose:** start a Resume Pro purchase and return what Razorpay Checkout needs.
+- **Auth / role:** any user who is not PRO. **Consent:** required. **Rate limit:** 5 per hour per user.
+- **Implements:** FR-022
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `termsVersion` | body | string | yes | 1–32 chars; must equal `PRO_TERMS_VERSION` (else 409) |
+
+**Response 201** (also when an unpaid checkout younger than `CHECKOUT_EXPIRY_MS` is returned again)
+
+```json
+{
+  "data": {
+    "subscriptionId": "5b1e2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "razorpaySubscriptionId": "sub_N8x2kQ9wZr1aBc",
+    "razorpayKeyId": "rzp_live_AbCdEf1234567",
+    "amountPaise": 29900,
+    "currency": "INR",
+    "name": "SurfingBear Resume Pro",
+    "description": "₹299 per month",
+    "checkoutMode": "razorpay"
+  }
+}
+```
+
+**Errors** (after the common guard errors, in this order)
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | Body invalid |
+| 409 | `CONSENT_VERSION_MISMATCH` | `termsVersion` is not `PRO_TERMS_VERSION`; `details: [{ "field": "termsVersion", "issue": "current is RO-PRO-TERMS-2026-10" }]` |
+| 409 | `ALREADY_PRO` | The caller is PRO; `error.meta = { proUntil }` |
+| 503 | `PAYMENT_PROVIDER_UNAVAILABLE` | Razorpay cannot be reached; no row is kept |
+
+#### API-023 `POST /api/v1/subscription/verify` (v2.0)
+- **Purpose:** confirm a Checkout payment and grant Pro.
+- **Auth / role:** any user. **Consent:** not required (the payment already happened). **Rate limit:** 10 per hour per user.
+- **Implements:** FR-022
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `razorpayPaymentId` | body | string | yes | `^pay_[A-Za-z0-9_]{1,36}$` |
+| `razorpaySubscriptionId` | body | string | yes | `^sub_[A-Za-z0-9_]{1,36}$`; must be a TBL-011 row of the caller |
+| `razorpaySignature` | body | string | yes | 64 lowercase hex characters, or `mock_ok` when `PAYMENT_MODE=mock` |
+
+**Response 200**
+
+```json
+{ "data": { "plan": "PRO", "proUntil": "2026-11-27T04:20:11.000Z", "cancelAtPeriodEnd": false, "activationPending": false } }
+```
+
+When the payment is not captured yet: `plan: "FREE"`, `proUntil: null`, `activationPending: true` (FR-022.6).
+
+**Errors** (in this order)
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | Body invalid |
+| 404 | `NOT_FOUND` | No subscription of the caller with this `razorpaySubscriptionId` |
+| 400 | `PAYMENT_SIGNATURE_INVALID` | The signature does not match (CR-037) |
+| 503 | `PAYMENT_PROVIDER_UNAVAILABLE` | Razorpay cannot be reached to fetch the subscription or payment (FR-022.7) |
+
+#### API-024 `POST /api/v1/subscription/cancel` (v2.0)
+- **Purpose:** cancel Resume Pro; access continues until the end of the paid month.
+- **Auth / role:** any user. **Consent:** not required. **Rate limit:** 5 per hour per user.
+- **Implements:** FR-024
+
+**Request:** no body (an empty JSON object is accepted).
+
+**Response 200**
+
+```json
+{ "data": { "plan": "PRO", "proUntil": "2026-11-27T04:20:11.000Z", "cancelAtPeriodEnd": true, "subscriptionStatus": "ACTIVE" } }
+```
+
+For a subscription that never granted Pro or no longer renews (FR-024.4): `plan` as computed after the cancel, `cancelAtPeriodEnd: false`, `subscriptionStatus: "CANCELLED"`.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 409 | `NO_ACTIVE_SUBSCRIPTION` | The caller has no open subscription |
+| 503 | `PAYMENT_PROVIDER_UNAVAILABLE` | Razorpay cannot be reached; nothing changes |
+
+#### API-025 `POST /api/v1/webhooks/razorpay` (v2.0)
+- **Purpose:** receive Razorpay subscription events.
+- **Auth / role:** public; authenticated by `X-Razorpay-Signature` (CR-037). No CSRF check, no consent, no user rate limit.
+- **Implements:** FR-023, FR-024, FR-026
+
+**Request:** headers `X-Razorpay-Signature` and `x-razorpay-event-id` (both required); body is Razorpay's event JSON, at most `JSON_BODY_LIMIT`. Fields read: `event`, `created_at`, `payload.subscription.entity` (`id`, `status`, `current_start`, `current_end`) and `payload.payment.entity` (`id`, `amount`, `currency`, `created_at`); everything else is discarded (FR-026.7).
+
+```json
+{
+  "entity": "event",
+  "event": "subscription.charged",
+  "created_at": 1793079611,
+  "payload": {
+    "subscription": { "entity": { "id": "sub_N8x2kQ9wZr1aBc", "status": "active", "current_start": 1793079611, "current_end": 1795758011 } },
+    "payment": { "entity": { "id": "pay_N8x3aB4cD5eF6g", "amount": 29900, "currency": "INR", "created_at": 1793079605 } }
+  }
+}
+```
+
+**Response 200:** `{ "data": { "received": true } }` for applied, duplicate, ignored and stale events (FR-026.2 to FR-026.4).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `WEBHOOK_SIGNATURE_INVALID` | Missing or wrong signature; nothing is stored |
+| 400 | `VALIDATION_FAILED` | Missing `x-razorpay-event-id`, or the body is not JSON |
+| 500 | `INTERNAL_ERROR` | Processing failed; the transaction is rolled back and Razorpay retries (FR-026.2) |
+| 503 | `SERVICE_UNAVAILABLE` | PostgreSQL is down; Razorpay retries |
+
+#### API-026 `GET /api/v1/analyses/compare` (v2.0)
+- **Purpose:** compare two of the caller's completed analyses.
+- **Auth / role:** PRO. **Consent:** required. **Rate limit:** default.
+- **Implements:** FR-014, FR-025
+
+The route is registered before `GET /api/v1/analyses/{analysisId}` so that `compare` is not read as an ID.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `baseId` | query | string | yes | UUID v4 |
+| `targetId` | query | string | yes | UUID v4, different from `baseId` |
+
+**Response 200** (the target is the API-011 example; scores of the base: 60, 40, 70, 85, 55, 70 → 62)
+
+```json
+{
+  "data": {
+    "base": {
+      "id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "createdAt": "2026-09-20T10:00:00.000Z",
+      "jobRole": { "id": "0b6f3f7e-3a51-4f64-9d0c-2f4c3a8e9b11", "code": "BACKEND_ENGINEER", "name": "Backend Software Engineer" },
+      "experienceLevel": "MID",
+      "overallScore": 62,
+      "scoreBand": "FAIR"
+    },
+    "target": {
+      "id": "9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a",
+      "createdAt": "2026-10-16T12:01:00.000Z",
+      "jobRole": { "id": "0b6f3f7e-3a51-4f64-9d0c-2f4c3a8e9b11", "code": "BACKEND_ENGINEER", "name": "Backend Software Engineer" },
+      "experienceLevel": "MID",
+      "overallScore": 70,
+      "scoreBand": "GOOD"
+    },
+    "sameRole": true,
+    "sameLevel": true,
+    "overallDelta": 8,
+    "bandChanged": true,
+    "dimensions": [
+      { "code": "KEYWORD_MATCH", "name": "Keyword match", "baseScore": 60, "targetScore": 70, "delta": 10 },
+      { "code": "EXPERIENCE_IMPACT", "name": "Experience impact", "baseScore": 40, "targetScore": 50, "delta": 10 },
+      { "code": "ATS_READABILITY", "name": "ATS readability", "baseScore": 70, "targetScore": 80, "delta": 10 },
+      { "code": "SECTION_COMPLETENESS", "name": "Section completeness", "baseScore": 85, "targetScore": 90, "delta": 5 },
+      { "code": "LEVEL_ALIGNMENT", "name": "Level alignment", "baseScore": 55, "targetScore": 60, "delta": 5 },
+      { "code": "LANGUAGE_QUALITY", "name": "Language quality", "baseScore": 70, "targetScore": 75, "delta": 5 }
+    ],
+    "missingSkills": { "resolved": ["Unit testing"], "stillMissing": ["Docker", "Message queues", "Observability"], "newlyMissing": [] }
+  }
+}
+```
+
+`missingSkills` is `null` when `sameRole` is false (FR-025.5). Dimension `name` follows the locale.
+
+**Errors** (after the common guard errors, in this order)
+
+| HTTP | Error code | When |
+|---|---|---|
+| 403 | `PRO_REQUIRED` | The caller is FREE |
+| 400 | `VALIDATION_FAILED` | Missing or invalid IDs, or `targetId` equals `baseId` (`issue: "sameAsBase"`) |
+| 404 | `NOT_FOUND` | An analysis does not exist for the caller or has expired |
+| 409 | `ANALYSIS_NOT_COMPLETED` | An analysis is not `COMPLETED` |
+
 ### 6.3 Error code list
 
 "`details` / `meta`" gives the exact content of those fields in the error body (§1.4). "Surface" says where the code appears: **HTTP** = an error response; **parse** = `Resume.parseErrorCode`; **analysis** = `Analysis.errorCode`. Messages with numbers must be updated together with the constant they mention.
@@ -3258,6 +3510,12 @@ Checks, each with a 1000 ms timeout: PostgreSQL `SELECT 1`, which decides readin
 | ERR-033 | `CONSENT_VERSION_MISMATCH` | 409 | HTTP | `[{ field: "noticeVersion", issue: "current is <NOTICE_VERSION>" }]` | The privacy notice has been updated. Please read the latest version and accept again. | गोपनीयता सूचना अपडेट हो गई है। कृपया नवीनतम संस्करण पढ़कर फिर से स्वीकार करें। | 개인정보 처리 안내가 변경되었습니다. 최신 내용을 읽고 다시 동의해 주세요. | API-004 with an old notice version (FR-002.4). |
 | ERR-034 | `JOB_ROLE_CODE_EXISTS` | 409 | HTTP | `[{ field: "code", issue: "already exists" }]` | A job role with this code already exists. | इस कोड वाली जॉब भूमिका पहले से मौजूद है। | 이 코드를 사용하는 직무가 이미 있습니다. | API-017 with a used code (FR-021.2). |
 | ERR-035 | `RESUME_LIMIT_REACHED` | 409 | HTTP | `[]`; `meta: { limit }` | You have reached the limit of 15 stored resumes. Delete a resume to upload a new one. | आप 15 सहेजे गए रिज़्यूमे की सीमा तक पहुँच गए हैं। नया अपलोड करने के लिए कोई एक रिज़्यूमे हटाएँ। | 저장할 수 있는 이력서는 최대 15개입니다. 새 이력서를 업로드하려면 기존 이력서를 삭제해 주세요. | API-005 when the user already has `MAX_STORED_RESUMES` non-expired resumes (FR-004.9). |
+| ERR-036 | `PRO_REQUIRED` | 403 | HTTP | `[]` | Comparing analyses is part of Resume Pro. | विश्लेषणों की तुलना Resume Pro का हिस्सा है। | 분석 비교는 Resume Pro 기능입니다. | API-026 called by a FREE user (FR-025.1, v2.0). |
+| ERR-037 | `ALREADY_PRO` | 409 | HTTP | `[]`; `meta: { proUntil }` | You already have Resume Pro. | आपके पास पहले से Resume Pro है। | 이미 Resume Pro를 이용 중입니다. | API-022 by a PRO user (FR-022.2, FR-024.8, v2.0). |
+| ERR-038 | `NO_ACTIVE_SUBSCRIPTION` | 409 | HTTP | `[]` | You do not have a Resume Pro subscription to cancel. | आपके पास रद्द करने के लिए कोई Resume Pro सदस्यता नहीं है। | 해지할 Resume Pro 구독이 없습니다. | API-024 without an open subscription (FR-024.5, v2.0). |
+| ERR-039 | `PAYMENT_SIGNATURE_INVALID` | 400 | HTTP | `[]` | We could not verify this payment. If money was taken, it will be confirmed automatically within an hour. | हम इस भुगतान की पुष्टि नहीं कर सके। यदि राशि कट गई है, तो एक घंटे के भीतर इसकी अपने-आप पुष्टि हो जाएगी। | 결제를 확인할 수 없습니다. 금액이 결제되었다면 1시간 안에 자동으로 확인됩니다. | API-023 with a wrong signature (FR-022.5, v2.0). |
+| ERR-040 | `WEBHOOK_SIGNATURE_INVALID` | 400 | HTTP | `[]` | Invalid webhook signature. | वेबहुक हस्ताक्षर अमान्य है। | 웹훅 서명이 올바르지 않습니다. | API-025 with a missing or wrong signature (FR-026.1, v2.0). |
+| ERR-041 | `PAYMENT_PROVIDER_UNAVAILABLE` | 503 | HTTP | `[]` | The payment service is not responding right now. Please try again in a few minutes. | भुगतान सेवा अभी जवाब नहीं दे रही है। कृपया कुछ मिनट बाद फिर से प्रयास करें। | 현재 결제 서비스가 응답하지 않습니다. 몇 분 후 다시 시도해 주세요. | Razorpay unreachable in API-022, API-023, API-024 or API-015 (FR-019.10, FR-022.7, FR-024.6, v2.0). |
 
 ---
 
