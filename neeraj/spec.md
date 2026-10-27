@@ -202,7 +202,7 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`: `userId` and `isAdmi
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
 | CR-006 | Roles | There are three roles: `FREE_USER` (plan FREE), `PRO_USER` (plan PRO) and `RO_ADMIN` (has `ro_admin` in `roles`, in addition to their plan role). `RO_ADMIN` is computed from the token on every request. Since v2.0 the plan role comes from the Resume Pro entitlement (FR-023), cached for at most `PLAN_CACHE_TTL_S` and invalidated on every subscription change. | Unit test of the role mapper; e2e test that a webhook makes the next request PRO. |
-| CR-007 | Object-level authorization | Every query on user data in TBL-002, TBL-003, TBL-004, TBL-008 and TBL-009 MUST include `user_id = request.user.userId`; TBL-005 to TBL-007 are read only through an analysis row that passed that filter. A resource that exists but belongs to another user returns 404 `NOT_FOUND` (ERR-008), never 403, so IDs cannot be probed. | e2e test: user B requests user A's resume, analysis and report and gets 404. Code review of every repository method. |
+| CR-007 | Object-level authorization | Every query on user data in TBL-002, TBL-003, TBL-004, TBL-008, TBL-009, TBL-011 and TBL-012 MUST include `user_id = request.user.userId`; TBL-005 to TBL-007 are read only through an analysis row that passed that filter. A resource that exists but belongs to another user returns 404 `NOT_FOUND` (ERR-008), never 403, so IDs cannot be probed. | e2e test: user B requests user A's resume, analysis and report and gets 404. Code review of every repository method. |
 | CR-008 | Admin endpoints | Routes under `/api/v1/admin` require `RO_ADMIN` via `@Roles('RO_ADMIN')`. A user without it gets 403 `FORBIDDEN` (ERR-003). | e2e test with a non-admin token. |
 
 **Role × permission table**
@@ -1757,7 +1757,7 @@ Enum labels in the PDF (English): sections `Summary`, `Experience`, `Projects`, 
 | `ro_quota_exceeded_total` | counter | `plan` | CMP-008 |
 | `ro_jwks_fetch_errors_total` | counter | — | CMP-004 |
 | `ro_retention_deleted_rows_total` | counter | `table` | CMP-018 |
-| `ro_retention_overdue_rows` | gauge, set by `retention-purge` after its delete loop to `COUNT(*)` of rows still past retention | `table` (`consents`, `resumes`, `analyses`, `monthly_usage`, `erasure_requests`, `audit_events`) | CMP-018 |
+| `ro_retention_overdue_rows` | gauge, set by `retention-purge` after its delete loop to `COUNT(*)` of rows still past retention | `table` (`consents`, `resumes`, `analyses`, `monthly_usage`, `erasure_requests`, `audit_events`, and since v2.0 `subscriptions`, `payment_events`) | CMP-018 |
 | `ro_stuck_analyses` | gauge, set by `stale-janitor` after each run (NFR-008) | — | CMP-018 |
 | `ro_webhook_events_total` (v2.0) | counter | `event`, `result` (`APPLIED`, `IGNORED`, `STALE`, `REJECTED`) | CMP-026 |
 | `ro_subscription_reconcile_changes_total` (v2.0) | counter | — | CMP-018 |
@@ -1948,6 +1948,8 @@ erDiagram
   PLATFORM_USER ||--o{ monthly_usage : "user_id, no FK"
   PLATFORM_USER ||--o{ erasure_requests : "user_id, no FK"
   PLATFORM_USER |o--o{ audit_events : "actor_user_id, no FK"
+  PLATFORM_USER ||--o{ subscriptions : "user_id, no FK (v2.0)"
+  subscriptions ||--o{ subscription_payments : "has 0..n"
   job_roles ||--o{ analyses : "is target of"
   resumes |o--o{ analyses : "is analysed in"
   analyses ||--o{ analysis_dimension_scores : "has 6 when completed"
@@ -2012,6 +2014,24 @@ erDiagram
   audit_events {
     bigint id PK
     varchar action
+  }
+  subscriptions {
+    uuid id PK
+    varchar user_id
+    varchar razorpay_subscription_id UK
+    varchar status
+    timestamptz paid_until
+  }
+  subscription_payments {
+    uuid id PK
+    uuid subscription_id FK
+    varchar razorpay_payment_id UK
+    integer amount_paise
+  }
+  payment_events {
+    uuid id PK
+    varchar razorpay_event_id UK
+    varchar result
   }
 ```
 
@@ -2146,7 +2166,7 @@ Purpose: rewrite suggestions of a completed analysis.
 | reason | varchar(300) | NO | | | |
 
 #### TBL-008 `monthly_usage`
-Purpose: quota counter per user and period month. Its row lock serializes analysis creation per user (FR-006.3).
+Purpose: quota counter per user and period month. Its row lock serializes analysis creation per user (FR-006.3). Since v2.0, `consumed_count` and `reserved_count` count FREE-plan analyses only, and PRO-plan analyses use the `pro_*` columns (FR-007.10).
 
 | Column | Type | Null | Key | Default | Constraint / note |
 |---|---|---|---|---|---|
@@ -2154,6 +2174,8 @@ Purpose: quota counter per user and period month. Its row lock serializes analys
 | period_month | char(7) | NO | PK (part 2) | | `ck_monthly_usage__period`: same regex as `analyses.period_month` |
 | consumed_count | smallint | NO | | `0` | `ck_monthly_usage__consumed`: `consumed_count >= 0` |
 | reserved_count | smallint | NO | | `0` | `ck_monthly_usage__reserved`: `reserved_count >= 0` |
+| pro_consumed_count | smallint | NO | | `0` | v2.0. Completed analyses created on the PRO plan. `ck_monthly_usage__pro_consumed`: `pro_consumed_count >= 0` |
+| pro_reserved_count | smallint | NO | | `0` | v2.0. Running analyses created on the PRO plan. `ck_monthly_usage__pro_reserved`: `pro_reserved_count >= 0` |
 | created_at | timestamptz | NO | | `now()` | |
 | updated_at | timestamptz | NO | | `now()` | |
 
@@ -2183,7 +2205,7 @@ Purpose: append-only security and compliance log (CR-010). Never updated; delete
 | actor_type | varchar(6) | NO | | | `ck_audit_events__actor_type`: `actor_type IN ('USER','ADMIN','SYSTEM')` |
 | actor_user_id | varchar(64) | YES | | NULL | `ck_audit_events__actor`: `(actor_type = 'SYSTEM') = (actor_user_id IS NULL)` |
 | action | varchar(32) | NO | | | `ck_audit_events__action`: one of the actions below |
-| entity_type | varchar(10) | YES | | NULL | `ck_audit_events__entity_type`: `entity_type IS NULL OR entity_type IN ('RESUME','ANALYSIS','CONSENT','JOB_ROLE','ERASURE')` |
+| entity_type | varchar(12) | YES | | NULL | `ck_audit_events__entity_type`: `entity_type IS NULL OR entity_type IN ('RESUME','ANALYSIS','CONSENT','JOB_ROLE','ERASURE','SUBSCRIPTION')`. Widened from `varchar(10)` in v2.0 (an expand-only change) |
 | entity_id | uuid | YES | | NULL | |
 | request_id | uuid | YES | | NULL | The request ID of CR-012, or the per-run UUID of a maintenance job or CLI run (§4.8.1) |
 | metadata | jsonb | NO | | `'{}'::jsonb` | Only the keys listed below. Never personal data |
@@ -2197,10 +2219,71 @@ Purpose: append-only security and compliance log (CR-010). Never updated; delete
 | `ANALYSIS_DELETED` | USER | ANALYSIS | — |
 | `REPORT_DOWNLOADED` | USER | ANALYSIS | `plan` |
 | `DATA_SUMMARY_VIEWED` | USER | — | — |
-| `DATA_ERASED` | USER (API-015) or SYSTEM (FR-019.9) | ERASURE | `resumesDeleted`, `analysesDeleted`, `consentsWithdrawn`, `source` (`USER` or `GRIEVANCE`) |
+| `DATA_ERASED` | USER (API-015) or SYSTEM (FR-019.9) | ERASURE | `resumesDeleted`, `analysesDeleted`, `consentsWithdrawn`, `source` (`USER` or `GRIEVANCE`), and since v2.0 `subscriptionCancelled` (boolean) |
 | `JOB_ROLE_CREATED` | ADMIN | JOB_ROLE | `code` |
 | `JOB_ROLE_UPDATED` | ADMIN | JOB_ROLE | `changedFields` (array of field names) |
-| `RETENTION_PURGE` | SYSTEM | — | exactly these keys, each the number of deleted rows: `consents`, `resumes`, `analyses`, `monthlyUsage`, `erasureRequests`, `auditEvents` |
+| `SUBSCRIPTION_CHECKOUT` (v2.0) | USER | SUBSCRIPTION | `razorpaySubscriptionId` |
+| `SUBSCRIPTION_ACTIVATED` (v2.0) | USER (API-023) or SYSTEM (webhook, reconcile) | SUBSCRIPTION | `paidUntil` |
+| `SUBSCRIPTION_RENEWED` (v2.0) | SYSTEM | SUBSCRIPTION | `paidUntil` |
+| `SUBSCRIPTION_CANCEL_REQUESTED` (v2.0) | USER (API-024) or SYSTEM (erasure, FR-019.10) | SUBSCRIPTION | `proUntil` |
+| `SUBSCRIPTION_ENDED` (v2.0) | SYSTEM | SUBSCRIPTION | `status` |
+| `RETENTION_PURGE` | SYSTEM | — | exactly these keys, each the number of deleted rows: `consents`, `resumes`, `analyses`, `monthlyUsage`, `erasureRequests`, `auditEvents`, and since v2.0 `subscriptions`, `paymentEvents` |
+
+#### TBL-011 `subscriptions` (v2.0)
+Purpose: one Resume Pro subscription at Razorpay and the time it has paid for. The only source of the plan (FR-023, ASM-018).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | Returned as `subscription.id` |
+| user_id | varchar(64) | NO | | | Platform `sub` |
+| razorpay_subscription_id | varchar(40) | NO | UK `ux_subscriptions__razorpay_subscription_id` | | `sub_…` from Razorpay |
+| razorpay_plan_id | varchar(40) | NO | | | `RAZORPAY_PLAN_ID` at creation |
+| terms_version | varchar(32) | NO | | | `PRO_TERMS_VERSION` accepted at checkout (FR-022.1) |
+| status | varchar(13) | NO | | `'CREATED'` | `ck_subscriptions__status`: `status IN ('CREATED','AUTHENTICATED','ACTIVE','PENDING','HALTED','PAUSED','CANCELLED','COMPLETED','EXPIRED')` (§4.13.2) |
+| cancel_at_period_end | boolean | NO | | `false` | |
+| cancel_requested_at | timestamptz | YES | | NULL | `ck_subscriptions__cancel`: `cancel_at_period_end = (cancel_requested_at IS NOT NULL)` |
+| current_period_start | timestamptz | YES | | NULL | From Razorpay `current_start` |
+| current_period_end | timestamptz | YES | | NULL | From Razorpay `current_end` |
+| paid_until | timestamptz | YES | | NULL | End of the last charged cycle; set only for a captured payment and never decreased (FR-023.6) |
+| last_event_at | timestamptz | YES | | NULL | `created_at` of the last webhook that changed the status (FR-026.4) |
+| ended_at | timestamptz | YES | | NULL | `ck_subscriptions__ended`: `(status IN ('CANCELLED','COMPLETED','EXPIRED')) = (ended_at IS NOT NULL)` |
+| expires_at | timestamptz | YES | | NULL | `ended_at + PAYMENT_RECORD_RETENTION_DAYS`. `ck_subscriptions__expires`: `(ended_at IS NULL) = (expires_at IS NULL)` |
+| created_at | timestamptz | NO | | `now()` | Written from the Clock (§2.2 rule 6) |
+| updated_at | timestamptz | NO | | `now()` | |
+
+#### TBL-012 `subscription_payments` (v2.0)
+Purpose: every captured Razorpay payment of a subscription, kept as a financial record (ASM-020). Failed payments are not stored.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| subscription_id | uuid | NO | FK `fk_subscription_payments__subscription_id` → `subscriptions(id)` ON DELETE CASCADE | | |
+| user_id | varchar(64) | NO | | | Copy of the subscription's user, for API-014 and API-021 |
+| razorpay_payment_id | varchar(40) | NO | UK `ux_subscription_payments__razorpay_payment_id` | | `pay_…`; makes payment inserts idempotent |
+| amount_paise | integer | NO | | | As charged. `ck_subscription_payments__amount`: `amount_paise > 0` |
+| currency | char(3) | NO | | `'INR'` | As charged. `ck_subscription_payments__currency`: `currency ~ '^[A-Z]{3}$'` |
+| period_start | timestamptz | YES | | NULL | Billing cycle start, when known |
+| period_end | timestamptz | YES | | NULL | Billing cycle end, when known |
+| paid_at | timestamptz | NO | | | Razorpay payment `created_at` |
+| source | varchar(9) | NO | | | `ck_subscription_payments__source`: `source IN ('VERIFY','WEBHOOK','RECONCILE')` |
+| created_at | timestamptz | NO | | `now()` | |
+
+#### TBL-013 `payment_events` (v2.0)
+Purpose: one row per Razorpay webhook event, to process each event exactly once (FR-026.2). The webhook body is never stored.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| razorpay_event_id | varchar(64) | NO | UK `ux_payment_events__razorpay_event_id` | | `x-razorpay-event-id` header |
+| event_type | varchar(40) | NO | | | For example `subscription.charged` |
+| razorpay_subscription_id | varchar(40) | YES | | NULL | From the payload, when present |
+| razorpay_payment_id | varchar(40) | YES | | NULL | From the payload, when present |
+| event_created_at | timestamptz | NO | | | Payload `created_at` |
+| received_at | timestamptz | NO | | `now()` | |
+| result | varchar(7) | NO | | | `ck_payment_events__result`: `result IN ('APPLIED','IGNORED','STALE')` |
+| expires_at | timestamptz | NO | | | `received_at + PAYMENT_EVENT_RETENTION_DAYS` |
+
+Events with a bad signature are not stored (FR-026.1); they are only counted in `ro_webhook_events_total{result="REJECTED"}`.
 
 ### 5.3 Indexes
 
@@ -2226,6 +2309,13 @@ Primary keys and the unique keys above are not repeated here.
 | erasure_requests | `ix_erasure_requests__expires_at` | `(expires_at)` | FR-020 purge. |
 | audit_events | `ix_audit_events__occurred_at` | `(occurred_at)` | FR-020 purge and time-range investigations. |
 | audit_events | `ix_audit_events__actor_user_id_occurred_at` | `(actor_user_id, occurred_at DESC)` | Security investigation of one user's actions. |
+| subscriptions | `ux_subscriptions__user_id_open` (unique, partial `WHERE status IN ('CREATED','AUTHENTICATED','ACTIVE','PENDING','HALTED','PAUSED')`) | `(user_id)` | At most one open subscription per user (FR-022.3); finds it for API-022, API-024 and erasure. |
+| subscriptions | `ix_subscriptions__user_id_paid_until` | `(user_id, paid_until DESC)` | `planOf()` on every plan-cache miss (FR-023.1). |
+| subscriptions | `ix_subscriptions__open_created_at` (partial, same condition as above) | `(created_at)` | Hourly reconciliation over open subscriptions (FR-026.6). |
+| subscriptions | `ix_subscriptions__expires_at` | `(expires_at)` | FR-020 purge. |
+| subscription_payments | `ix_subscription_payments__user_id_paid_at` | `(user_id, paid_at DESC)` | Payment lists of API-021 and API-014. |
+| subscription_payments | `ix_subscription_payments__subscription_id` | `(subscription_id)` | FK cascade and the first-payment check of §4.13.3. |
+| payment_events | `ix_payment_events__expires_at` | `(expires_at)` | FR-020 purge. |
 
 ### 5.4 Relationships and delete rules
 
@@ -2239,8 +2329,11 @@ Primary keys and the unique keys above are not repeated here.
 | consents, resumes, analyses, monthly_usage, erasure_requests (`user_id`) | platform user | many to one, no FK | Handled by the application, see below. |
 | analyses (`user_id`, `period_month`) | monthly_usage (`user_id`, `period_month`) | many to one, no FK | No FK, because usage rows are kept after erasure while analyses are deleted, and old usage rows are purged while analyses remain. |
 | audit_events.actor_user_id | platform user | many to zero-or-one, no FK | Never deleted with the user; purged after `AUDIT_RETENTION_DAYS`. |
+| subscription_payments.subscription_id | subscriptions.id | many to one | CASCADE, which happens only in the FR-020 purge after `PAYMENT_RECORD_RETENTION_DAYS` |
+| subscriptions (`user_id`) | platform user | many to one, no FK | Kept after erasure (FR-019.10, ASM-020) |
+| payment_events | subscriptions | no FK (matched by `razorpay_subscription_id`) | Purged on its own after `PAYMENT_EVENT_RETENTION_DAYS` |
 
-**When a user erases their data (FR-019)**, in one transaction: `SELECT storage_key FROM resumes WHERE user_id = $1 AND storage_key IS NOT NULL` (kept in memory for the S3 clean-up) → `DELETE FROM analyses WHERE user_id = $1 RETURNING status, period_month` (children cascade) → for each `period_month` among the returned `QUEUED`/`PROCESSING` rows, `UPDATE monthly_usage SET reserved_count = reserved_count - <count> WHERE user_id = $1 AND period_month = <month>` (FR-019.5) → `DELETE FROM resumes WHERE user_id = $1` → `UPDATE consents SET status = 'WITHDRAWN', ended_at = $now WHERE user_id = $1 AND status = 'ACTIVE'` → `INSERT INTO erasure_requests` → `INSERT INTO audit_events`. Analyses are deleted before resumes so the SET NULL update is not needed. `monthly_usage` rows are not deleted (FR-019.7).
+**When a user erases their data (FR-019)**, in one transaction: `SELECT storage_key FROM resumes WHERE user_id = $1 AND storage_key IS NOT NULL` (kept in memory for the S3 clean-up) → `DELETE FROM analyses WHERE user_id = $1 RETURNING status, period_month` (children cascade) → for each `period_month` among the returned `QUEUED`/`PROCESSING` rows, `UPDATE monthly_usage SET reserved_count = reserved_count - <count> WHERE user_id = $1 AND period_month = <month>` (FR-019.5) → `DELETE FROM resumes WHERE user_id = $1` → `UPDATE consents SET status = 'WITHDRAWN', ended_at = $now WHERE user_id = $1 AND status = 'ACTIVE'` → `INSERT INTO erasure_requests` → `INSERT INTO audit_events`. Analyses are deleted before resumes so the SET NULL update is not needed. `monthly_usage` rows are not deleted (FR-019.7). Since v2.0, an open subscription is cancelled at Razorpay before this transaction starts (FR-019.10), and TBL-011, TBL-012 and TBL-013 rows are not deleted by erasure.
 
 **Lock order:** every transaction that locks both an `analyses` row and a `monthly_usage` row locks the `analyses` row first (worker save, stale janitor, erasure), so they cannot deadlock. API-009 locks the `monthly_usage` row and then the resume row (`FOR SHARE`) and only inserts a new analysis; API-008 locks only the resume row (`FOR UPDATE`).
 
@@ -2333,7 +2426,7 @@ Every place where personal data lives, with its retention and what erasure (FR-0
 
 | Data | Where | What it reveals | Retention | On erasure (FR-019) | Protection |
 |---|---|---|---|---|---|
-| Platform user ID (`sub`) | `user_id` in TBL-002, TBL-003, TBL-004, TBL-008, TBL-009; `actor_user_id` in TBL-010; logs | Pseudonymous identifier | With the row that holds it | Kept only in TBL-002, TBL-008, TBL-009, TBL-010 and logs (FR-019.7) | RDS encryption |
+| Platform user ID (`sub`) | `user_id` in TBL-002, TBL-003, TBL-004, TBL-008, TBL-009, TBL-011, TBL-012; `actor_user_id` in TBL-010; logs | Pseudonymous identifier | With the row that holds it | Kept only in TBL-002 and TBL-008 to TBL-012 and in logs (FR-019.7, FR-019.10) | RDS encryption |
 | Raw resume file | S3 `uploads/` | Full resume including contact details | Deleted after parsing; at most `RAW_FILE_MAX_HOURS` | Deleted (best effort, then the lifecycle rule) | SSE-KMS, private bucket |
 | File name | `resumes.original_filename`, `analyses.resume_filename` | Often the person's name | `RESUME_RETENTION_DAYS` / `ANALYSIS_RETENTION_DAYS` | Deleted | RDS encryption; never logged (CR-011) |
 | Redacted resume text | `resumes.text_enc` | Resume content without contact details or ID numbers | `RESUME_RETENTION_DAYS` | Deleted | AES-256-GCM (§5.6) and RDS encryption |
@@ -2345,6 +2438,10 @@ Every place where personal data lives, with its retention and what erasure (FR-0
 | Audit events | TBL-010 | The person's actions (IDs only) | `AUDIT_RETENTION_DAYS` | Kept (security logs, DPDP Rules 2025 rule 6) | RDS encryption |
 | Application logs | CloudWatch Logs | `userId` only (CR-011) | 365 days in prod, 30 days elsewhere (CR-013) | Kept | CloudWatch encryption |
 | AI request content | Anthropic (processor) | Redacted resume text | Under Anthropic's commercial terms (ASM-005) | Not reachable from this module; stated in the notice (§4.9) | TLS; redaction before sending (NFR-015) |
+| Subscription records (v2.0) | TBL-011 | That the person bought Resume Pro, when, and until when | `PAYMENT_RECORD_RETENTION_DAYS` after the subscription ends | Kept, because the law requires it (ASM-020); an open subscription is cancelled first (FR-019.10) | RDS encryption |
+| Payment records (v2.0) | TBL-012 | Razorpay payment IDs, amounts and dates | With their subscription | Kept (ASM-020) | RDS encryption |
+| Webhook event records (v2.0) | TBL-013 | Razorpay IDs and event times only | `PAYMENT_EVENT_RETENTION_DAYS` | Kept until purged | RDS encryption |
+| Payment details (v2.0) | Razorpay (processor) | Card, UPI or bank details, payer email and phone | Under Razorpay's terms | Never received or stored by this module; stated in the Pro terms (§4.9.1) | PCI DSS at Razorpay; CR-037 |
 
 ---
 
