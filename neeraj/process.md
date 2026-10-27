@@ -7,6 +7,7 @@ List every AI conversation you used, with a link and one line on what it was for
 |---|---|---|---|
 | 2026-10-16 | Claude Code (VS Code extension, Claude Opus 5.5) | Claude Code sessions have no shareable link. Session ID: `fac3a8e1-2e04-4feb-8e9b-83f8b8252d78` (transcript can be exported on request) | Read `BRIEF.md`, `RUBRIC.md` and the Slack channel, fixed the open design decisions, drafted all 8 sections (v0.1), then ran two simulated build tests and a consistency audit with separate review agents and fixed what they found (v0.2, v0.3). |
 | 2026-10-19 | Claude Code (same session as above) | same session ID | Third simulated build test and fixes (v0.4); Korean UI language and check-mark permission table (v0.5); review of my spec against the rubric and fixes (v0.6–v0.9). |
+| 2026-10-27 | Claude Code (same session as above) | same session ID | Round 2 (Resume Pro): designed the billing model, updated every affected section (v2.0), compared the design ideas of other round 2 submissions at concept level, and ran a review of the change before pushing. |
 
 ## Notes
 
@@ -29,6 +30,21 @@ List every AI conversation you used, with a link and one line on what it was for
 | 2026-10-19 | v0.9 | Resume limit, script check at parse, exact error bodies, test fixtures, grievance erasure | `9a8ba53` |
 | 2026-10-19 | v0.10 | Build test 4 fixes | `c68a96b` |
 | 2026-10-19 | v0.11 | Build test 5 fixes | `5b73fe5` |
+| 2026-10-27 | v1.0 | Change log row recording v0.11 as the round 1 submission | see v2.0 commits |
+| 2026-10-27 | v2.0 | Round 2: Resume Pro, one commit per section (0–1, 3, 2 and 4, 5, 6, 7–8) | `751cdc6` … |
+
+### Round 2 (Resume Pro)
+
+I submitted round 2 late, on 27 Oct, after the coordinator extended the deadline. The main decisions, each written down in the spec with its reason:
+
+- **The module owns the plan** (ASM-018): Pro is bought in this module through Razorpay, so the token's `plan` claim is ignored and `subscriptions.paid_until` is the only source of truth (FR-023).
+- **Pro is granted only for a captured payment**, never on a signature alone. The checkout callback is verified, the webhook is signed and idempotent, and an hourly reconciliation repairs missed webhooks (FR-022, FR-026).
+- **24 h renewal grace** while a subscription is renewing, so paying users do not flip to FREE between the cycle end and Razorpay's charge; no grace after a cancel or a failed renewal (FR-023.1, FR-024.2).
+- **FREE users stay exactly as they were**: they keep the history list (ASM-019), PRO analyses use separate usage counters (FR-007.10), and the general privacy notice is unchanged. Pro has its own terms accepted at checkout (§4.9.1), so FREE users do not have to consent again.
+- **Erasure cancels an open subscription at the cycle end**, so no further charge happens and days already paid for are not lost; payment records are kept for 8 years as the law requires (FR-019.10, ASM-020).
+- **Comparison** shows score deltas for any two completed analyses; the skill diff is shown only when both analyses are for the same role (FR-025).
+- Existing IDs were not renumbered: replaced items are marked **Deprecated** (ASM-003, ASM-012, `PRO_MONTHLY_ANALYSES`, `PLATFORM_UPGRADE_URL`), and §7.4 maps each round 2 point to where it is specified.
+- Before writing, I compared how other round 2 submissions handled the change at the level of ideas only (no text copied), to check that edge cases like out-of-order webhooks, abandoned checkouts and the Checkout CSP were covered.
 
 ### Main decisions and their trade-offs
 
