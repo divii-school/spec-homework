@@ -51,7 +51,9 @@ An acceptance criterion is referenced as `<requirement ID>.<number>`, for exampl
 | Platform | The main SurfingBear platform. It owns sign-up, login, billing and the user's plan. |
 | Module | This system, the Resume Optimizer. |
 | User | A person logged in to the platform. Identified only by the platform user ID (`sub` claim). |
-| Plan | `FREE` or `PRO`, read from the platform token on every request. |
+| Plan | `FREE` or `PRO`. Since v2.0 it comes from the user's Resume Pro entitlement in this module (FR-023), not from the platform token. |
+| Resume Pro | Monthly subscription of ₹299 bought in this module through Razorpay (FR-022). |
+| Paid until | `subscriptions.paid_until`: end of the last billing cycle that Razorpay has charged (FR-023). |
 | Resume | One uploaded file (PDF or DOCX) and the text extracted from it. |
 | Redacted text | Resume text after contact details and ID numbers are replaced by placeholders (§4.8.4). Only redacted text is stored and sent to the AI. |
 | Analysis | One AI evaluation of one resume for one job role and one experience level. |
@@ -79,7 +81,7 @@ Every number below is defined **once** here, and other sections refer to these n
 | `DOCX_MAX_ZIP_ENTRIES` | `1000` | FR-005, ERR-015 |
 | `PARSE_TIMEOUT_MS` | `15000` | FR-005, ERR-015 |
 | `FREE_MONTHLY_ANALYSES` | `3` | FR-007, API-001 (and example), API-009, ERR-023, §0.7 |
-| `PRO_MONTHLY_ANALYSES` | `30` | FR-007 (FR-007.5 example), API-001, API-009, ERR-023, §0.7 |
+| `PRO_MONTHLY_ANALYSES` | **Deprecated (v2.0).** Was `30`; Resume Pro has no monthly limit (FR-007.5, FR-023.3) | — |
 | `FREE_VISIBLE_SUGGESTIONS` | `3` | FR-012, FR-013 (FR-013.2 example), API-001 example, API-011, API-012, §4.3.3, §0.7 |
 | `MAX_SUGGESTIONS` | `10` | FR-010, §4.7.1 prompt rule 5, TBL-007 `ck_as__priority`, §5.1 ERD label |
 | `MAX_MISSING_SKILLS` | `15` | FR-009, §4.7.5 step 4, TBL-006 `ck_ams__order`, §5.1 ERD label |
@@ -94,6 +96,15 @@ Every number below is defined **once** here, and other sections refer to these n
 | `PARSE_STALE_AFTER_MS` | `300000` (5 min after `created_at`) | FR-005 |
 | `MAX_STORED_RESUMES` | `15` (non-expired resumes per user) | FR-004.9, API-005, ERR-035 message |
 | `MIN_LATIN_LETTER_RATIO` | `0.7` (share of Latin-script letters among all letters) | FR-005.10, §4.8.2 step 4 |
+| `PRO_PRICE_PAISE` | `29900` (₹299 per month, GST included, ASM-021) | FR-022, API-021, API-022, §4.9.1, §4.13.1, P-06 |
+| `PRO_TERMS_VERSION` | `RO-PRO-TERMS-2026-10` | FR-022, API-021, API-022, §4.9.1, TBL-011 |
+| `RAZORPAY_TOTAL_COUNT` | `120` (billing cycles requested for each Razorpay subscription; the longest term Razorpay needs to be told) | FR-022, §4.13.1 |
+| `CHECKOUT_EXPIRY_MS` | `1800000` (30 min; an unpaid checkout is reused only within this time) | FR-022, FR-026.6 |
+| `RENEWAL_GRACE_MS` | `86400000` (24 h after `paid_until` while a renewing subscription waits for its next charge) | FR-023.1, NFR-027 |
+| `PLAN_CACHE_TTL_S` | `60` | FR-023.2, NFR-027 |
+| `PAYMENT_RECORD_RETENTION_DAYS` | `2922` (8 years, ASM-020) | FR-019.10, FR-020.1, FR-024.7, NFR-013, TBL-011, §4.9.1, §5.8 |
+| `PAYMENT_EVENT_RETENTION_DAYS` | `90` | FR-020.1, TBL-013, §5.8 |
+| `PRO_FAIR_USE_DAILY_ALERT` | `100` (completed analyses by one Pro user in 24 h that raise a cost alarm) | FR-023.3, §4.11 |
 | `AI_MODEL` | `claude-opus-5-5` (read from the required env var `AI_MODEL`; this is its value in every environment) | §4.7 |
 | `AI_EFFORT` | `medium` | §4.7 |
 | `AI_MAX_TOKENS` | `16000` | §4.7 |
@@ -131,7 +142,7 @@ To keep the build deterministic, everything not listed here is specified somewhe
 
 ### 0.7 The system at a glance
 
-A logged-in SurfingBear user opens the Resume Optimizer, accepts the privacy notice once, uploads a resume (PDF or DOCX, at most 5 MiB), and picks a target job role and experience level. A background worker reads the file, removes contact details, and asks Claude to score the resume on six ATS dimensions, list missing skills, and suggest rewrites. The user sees the result in about a minute, can download it as a PDF, and can delete any of their data at any time. FREE users get 3 analyses per month and see 3 suggestions per analysis. PRO users get 30 analyses and see every suggestion.
+A logged-in SurfingBear user opens the Resume Optimizer, accepts the privacy notice once, uploads a resume (PDF or DOCX, at most 5 MiB), and picks a target job role and experience level. A background worker reads the file, removes contact details, and asks Claude to score the resume on six ATS dimensions, list missing skills, and suggest rewrites. The user sees the result in about a minute, can download it as a PDF, and can delete any of their data at any time. FREE users get 3 analyses per month and see 3 suggestions per analysis. Since v2.0, users can buy Resume Pro for ₹299 a month through Razorpay: Pro users get unlimited analyses, see every suggestion and can compare two analyses, and they can cancel at any time and keep Pro until the end of the paid month.
 
 ```mermaid
 flowchart LR
@@ -158,10 +169,10 @@ These rules apply to every part of this module. Each rule has a check that a rev
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-001 | Authentication | Every endpoint under `/api/v1` requires a valid platform token, except API-019 and API-020 (health), which are marked `@Public()`. The module never issues, refreshes or stores tokens and has no login or sign-up endpoint. | e2e test calls every non-public route without a token and expects 401 `AUTH_REQUIRED` (ERR-001). Code review: no route outside `health/` uses `@Public()`. |
+| CR-001 | Authentication | Every endpoint under `/api/v1` requires a valid platform token, except API-019 and API-020 (health) and API-025 (Razorpay webhook, authenticated by its signature, CR-037), which are marked `@Public()`. The module never issues, refreshes or stores tokens and has no login or sign-up endpoint. | e2e test calls every non-public route without a token and expects 401 `AUTH_REQUIRED` (ERR-001). Code review: no route outside `health/` and `webhooks/` uses `@Public()`. |
 | CR-002 | Authentication | The token is a JWT signed by the platform with **RS256**. The API verifies it with `jose` against the platform JWKS (`AUTH_JWKS_URL`) and checks: `alg` is `RS256` (any other value, including `none` and `HS256`, is rejected), `iss` equals `AUTH_ISSUER`, `aud` contains `AUTH_AUDIENCE`, `exp` is in the future and `nbf` (if present) is in the past, both with 30 s clock tolerance, and `sub` matches `^[A-Za-z0-9_-]{1,64}$`. Any failure returns 401 `AUTH_TOKEN_INVALID` (ERR-002). | Unit tests for each failing check: wrong alg, wrong iss, wrong aud, expired, bad `sub`, unknown `kid`. |
 | CR-003 | Authentication | The browser sends the token in the httpOnly cookie named `AUTH_COOKIE_NAME` (`sb_access_token`), which the platform sets on `.surfingbear.com`. If no cookie is present, the API also accepts `Authorization: Bearer <jwt>` (used by automated tests and non-browser clients). If both are present, the cookie wins. Frontend JavaScript never reads or stores the token. | e2e tests for cookie, header, both. Code review: no `localStorage`/`sessionStorage` use for tokens in `apps/web`. |
-| CR-004 | Authentication (CSRF) | Every request with method `POST`, `PATCH`, `PUT` or `DELETE` MUST carry the header `X-Requested-With: SurfingBearRO` **and** an `Origin` header equal to `APP_ORIGIN`. Otherwise the API returns 403 `CSRF_CHECK_FAILED` (ERR-004). Reason: the auth cookie is sent automatically by the browser, and other `*.surfingbear.com` sites are "same-site", so `SameSite=Lax` alone does not stop cross-subdomain forgery. Clients that use the Bearer header (API e2e tests, k6 scripts) send the same two headers, with `Origin` set to the target environment's `APP_ORIGIN`. | e2e tests: POST without header, with wrong Origin, with both correct. |
+| CR-004 | Authentication (CSRF) | Every request with method `POST`, `PATCH`, `PUT` or `DELETE` MUST carry the header `X-Requested-With: SurfingBearRO` **and** an `Origin` header equal to `APP_ORIGIN`. Otherwise the API returns 403 `CSRF_CHECK_FAILED` (ERR-004). Reason: the auth cookie is sent automatically by the browser, and other `*.surfingbear.com` sites are "same-site", so `SameSite=Lax` alone does not stop cross-subdomain forgery. Clients that use the Bearer header (API e2e tests, k6 scripts) send the same two headers, with `Origin` set to the target environment's `APP_ORIGIN`. API-025 is exempt: Razorpay calls it server to server, and its signature (CR-037) replaces the CSRF check. | e2e tests: POST without header, with wrong Origin, with both correct. |
 | CR-005 | Authentication (JWKS failure) | `JwksProvider` (in `common/auth/jwks.provider.ts`) fetches `AUTH_JWKS_URL` with a 3000 ms timeout and keeps the last successfully fetched key set in memory. A background timer per process refreshes the set every 10 min (single-flight, never on the request path). A token with an unknown `kid`, or a request arriving when the last good set is older than 24 h, triggers one refetch on the request path (3000 ms timeout). After any failed fetch, the next fetch waits at least 60 s. If a refetch fails, it keeps verifying with the last good set for up to 24 h after that set was fetched. The 24 h window and the 60 s wait use the Clock (§2.2 rule 6); `jwtVerify` checks `exp` and `nbf` against the system time. A token whose `kid` is not in the usable set returns 401 `AUTH_TOKEN_INVALID` when the last fetch succeeded, and 503 `SERVICE_UNAVAILABLE` (ERR-011) when the last fetch failed or there is no usable set. Verification uses `jose.jwtVerify` with `algorithms: ['RS256']` and a key from `jose.createLocalJWKSet(lastGoodSet)`. | Unit tests: JWKS returns 500 with and without a cached set; unknown `kid`; set older than 24 h. |
 
 **Token claims contract (from the platform):**
@@ -181,16 +192,16 @@ These rules apply to every part of this module. Each rule has a check that a rev
 | Claim | Type | Use in this module |
 |---|---|---|
 | `sub` | string, 1–64 chars | The user ID. Stored as `user_id` in every table. |
-| `plan` | `"free"` or `"pro"` | Mapped to `FREE` / `PRO`. A missing or unknown value is treated as `FREE`. |
+| `plan` | `"free"` or `"pro"` | **Ignored since v2.0.** The plan comes from the module's own Resume Pro entitlement (FR-023, ASM-018); ASM-003 is deprecated. |
 | `roles` | string[] | If it contains `"ro_admin"`, the user also has the `RO_ADMIN` role. Missing means `[]`. |
 
-The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from the token is used or stored.
+The API puts `{ userId, plan, isAdmin }` on `request.user`: `userId` and `isAdmin` from the token, `plan` from `EntitlementService.planOf(userId)` (FR-023). Nothing else from the token is used or stored.
 
 ### 1.2 Roles and permissions
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-006 | Roles | There are three roles: `FREE_USER` (plan FREE), `PRO_USER` (plan PRO) and `RO_ADMIN` (has `ro_admin` in `roles`, in addition to their plan role). Roles are computed from the token on every request and never stored. A plan change on the platform takes effect on the next request that carries a new token. | Unit test of the role mapper. |
+| CR-006 | Roles | There are three roles: `FREE_USER` (plan FREE), `PRO_USER` (plan PRO) and `RO_ADMIN` (has `ro_admin` in `roles`, in addition to their plan role). `RO_ADMIN` is computed from the token on every request. Since v2.0 the plan role comes from the Resume Pro entitlement (FR-023), cached for at most `PLAN_CACHE_TTL_S` and invalidated on every subscription change. | Unit test of the role mapper; e2e test that a webhook makes the next request PRO. |
 | CR-007 | Object-level authorization | Every query on user data in TBL-002, TBL-003, TBL-004, TBL-008 and TBL-009 MUST include `user_id = request.user.userId`; TBL-005 to TBL-007 are read only through an analysis row that passed that filter. A resource that exists but belongs to another user returns 404 `NOT_FOUND` (ERR-008), never 403, so IDs cannot be probed. | e2e test: user B requests user A's resume, analysis and report and gets 404. Code review of every repository method. |
 | CR-008 | Admin endpoints | Routes under `/api/v1/admin` require `RO_ADMIN` via `@Roles('RO_ADMIN')`. A user without it gets 403 `FORBIDDEN` (ERR-003). | e2e test with a non-admin token. |
 
@@ -204,13 +215,17 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | Read privacy notice, give consent (API-003, API-004) | ✗ | ✔️ | ✔️ | ✔️ |
 | Upload, list, view own resumes (API-005 to API-007) | ✗ | ✔️ (consent needed) | ✔️ (consent needed) | ✔️ (consent needed) |
 | Delete own resume (API-008) | ✗ | ✔️ | ✔️ | ✔️ |
-| Create analysis (API-009) | ✗ | ✔️ up to `FREE_MONTHLY_ANALYSES` per month | ✔️ up to `PRO_MONTHLY_ANALYSES` per month | ✔️ as their plan |
+| Create analysis (API-009) | ✗ | ✔️ up to `FREE_MONTHLY_ANALYSES` per month | ✔️ unlimited (rate limit and concurrency limit still apply) | ✔️ as their plan |
 | View own analyses (API-010, API-011) | ✗ | ✔️ first `FREE_VISIBLE_SUGGESTIONS` suggestions | ✔️ all suggestions | ✔️ as their plan |
 | Download own PDF report (API-012) | ✗ | ✔️ same gating as API-011 | ✔️ all suggestions | ✔️ as their plan |
 | Delete own analysis (API-013) | ✗ | ✔️ | ✔️ | ✔️ |
+| See plan and subscription, buy Resume Pro (API-021, API-022, API-023) | ✗ | ✔️ (buying needs consent and the Pro terms) | ✔️ (buying again returns `ALREADY_PRO`) | ✔️ as their plan |
+| Cancel Resume Pro (API-024) | ✗ | ✔️ (only an unpaid checkout) | ✔️ | ✔️ as their plan |
+| Compare two analyses (API-026) | ✗ | ✗ (`PRO_REQUIRED`, upsell shown) | ✔️ | ✔️ as their plan |
 | View own data summary, erase own data (API-014, API-015) | ✗ | ✔️ (no consent needed) | ✔️ (no consent needed) | ✔️ |
 | Manage job role catalog (API-016 to API-018) | ✗ | ✗ | ✗ | ✔️ |
 | See any other user's data | ✗ | ✗ | ✗ | ✗ (admins have no access to user data) |
+| Razorpay webhook (API-025) | Razorpay only, with a valid signature (CR-037) | ✗ | ✗ | ✗ |
 
 ✔️ = allowed, ✗ = not allowed. Text after a mark is the condition or limit.
 
@@ -220,7 +235,7 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 |---|---|---|---|
 | CR-009 | Log format | Logs are written by `nestjs-pino` to stdout as one JSON object per line with these fields: `time` (ISO 8601 UTC), `level` (lowercase label such as `info`, via `formatters.level`), `msg`, `service` (`ro-api` or `ro-worker`), `env` (`APP_ENV`), `requestId`, `userId` (platform `sub`, allowed because it is a pseudonymous ID), `method`, `route` (the route template, for example `/api/v1/analyses/:analysisId`, never the raw URL), `statusCode`, `durationMs`, `errorCode` (when present), `jobId` and `queue` (worker only). The Next.js server (`service: ro-web`) logs only startup, shutdown and server-side errors with `pino` in the same JSON format; it does not log requests (the ALB access log covers them). | Log sample review in CI e2e run: every line parses as JSON and has the required fields. |
 | CR-010 | Audit log | The actions listed in TBL-010 are written to `audit_events` with actor, entity ID and request ID, and are kept `AUDIT_RETENTION_DAYS` days. Audit metadata never contains personal data. | e2e test checks one audit row per action. |
-| CR-011 | No personal data in logs | Logs, metrics, traces, audit metadata and job payloads MUST NOT contain: resume text or any part of it, file names, AI prompts or AI responses, cookies, `Authorization` headers, IP addresses, email addresses, phone numbers. `nestjs-pino` MUST use the serializers `req: (r) => ({ method: r.method })` and `res: (r) => ({ statusCode: r.statusCode })`, and add `requestId`, `userId` and `route` through `customProps`, so headers, the URL with its query string and the remote address are never logged. As a second guard, `redact.paths` is `["req.headers.cookie", "req.headers.authorization", "req.headers[\"x-forwarded-for\"]", "req.remoteAddress", "res.headers[\"set-cookie\"]"]`. Request and response bodies are never logged. Job payloads contain only IDs, the request ID and the W3C `traceparent` string. | Automated scan of the staging log stream (NFR-016). Unit test on the logger config. |
+| CR-011 | No personal data in logs | Logs, metrics, traces, audit metadata and job payloads MUST NOT contain: resume text or any part of it, file names, AI prompts or AI responses, cookies, `Authorization` headers, IP addresses, email addresses, phone numbers. `nestjs-pino` MUST use the serializers `req: (r) => ({ method: r.method })` and `res: (r) => ({ statusCode: r.statusCode })`, and add `requestId`, `userId` and `route` through `customProps`, so headers, the URL with its query string and the remote address are never logged. As a second guard, `redact.paths` is `["req.headers.cookie", "req.headers.authorization", "req.headers[\"x-forwarded-for\"]", "req.remoteAddress", "res.headers[\"set-cookie\"]"]`. Request and response bodies are never logged. Job payloads contain only IDs, the request ID and the W3C `traceparent` string. Razorpay data is never logged: no webhook body, no `razorpay_signature`, no payer email, phone, card, UPI or bank detail. | Automated scan of the staging log stream (NFR-016). Unit test on the logger config. |
 | CR-012 | Request ID | If the request has an `X-Request-Id` header that is a UUID, it is used; otherwise the API generates a UUID v4. The ID is returned in the `X-Request-Id` response header, included in every log line and error body, and passed to worker jobs as `job.data.requestId`. | e2e test checks the header and error body. |
 | CR-013 | Log levels and retention | Levels: `debug` in local and dev, `info` in staging and prod. Logs go to CloudWatch Logs groups `/sb/ro/<env>/api`, `/sb/ro/<env>/worker`, `/sb/ro/<env>/web` with 365-day retention in prod and 30 days elsewhere. | Infrastructure code review. |
 
@@ -263,17 +278,18 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-017 | Secrets | Secrets (`ANTHROPIC_API_KEY`, `DATABASE_URL` and `REDIS_URL` (both contain passwords), `DATA_ENCRYPTION_KEYS`, `IP_HASH_SALT`) live in AWS Secrets Manager and are injected into ECS tasks as environment variables. No secret is committed to git; `.env` files are gitignored and only `.env.example` (no real values) is committed. CI runs `gitleaks` on every push and fails on any finding. | CI job `secrets-scan`. |
+| CR-017 | Secrets | Secrets (`ANTHROPIC_API_KEY`, `DATABASE_URL` and `REDIS_URL` (both contain passwords), `DATA_ENCRYPTION_KEYS`, `IP_HASH_SALT`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`) live in AWS Secrets Manager and are injected into ECS tasks as environment variables. No secret is committed to git; `.env` files are gitignored and only `.env.example` (no real values) is committed. CI runs `gitleaks` on every push and fails on any finding. | CI job `secrets-scan`. |
 | CR-018 | Configuration validation | All environment variables (§1.7) are validated at startup with a `zod` schema in `apps/api/src/config/env.schema.ts`. A missing or invalid variable stops the process with exit code 1 and a log line naming the variable (never its value). The file exports `dbEnvSchema` (`NODE_ENV`, `APP_ENV`, `DATABASE_URL`, `DATABASE_SSL`), `baseEnvSchema` (`dbEnvSchema` plus every API/worker variable of §1.7 that is not marked "API only" or "Worker only"), `apiEnvSchema` (base plus `PORT`) and `workerEnvSchema` (base plus `WORKER_*`). `main.ts` validates `apiEnvSchema`, `worker.ts` validates `workerEnvSchema`, and `data-source.ts`, `migrate.ts` and `run-seed.ts` validate `dbEnvSchema`; variables of another process are ignored. Code that runs outside the HTTP server (`data-source.ts`, `migrate.ts`, `run-seed.ts`, `cli/erase-user.ts`) first calls Node's `process.loadEnvFile('<repository root>/.env')` when that file exists. `cli/erase-user.ts` validates `baseEnvSchema` and starts `NestFactory.createApplicationContext(CliModule)`, where `CliModule` imports the config, TypeORM, Redis, storage, audit and privacy modules. | Unit test with a missing variable. |
 | CR-019 | CORS | The web app and the API share one origin: in AWS the load balancer routes `/api/*` to the API, and in local the Next.js dev server proxies `/api/*` to the API (`API_PROXY_TARGET`). The API therefore never enables CORS, in any environment. | e2e test: a preflight from another origin gets no `Access-Control-Allow-Origin`. |
 | CR-020 | Input validation | Every request DTO uses `class-validator`. The global `ValidationPipe` is created with `whitelist: true`, `forbidNonWhitelisted: true`, `transform: true`. Unknown fields return 400 `VALIDATION_FAILED` (ERR-006). JSON bodies larger than `JSON_BODY_LIMIT` return 413 `PAYLOAD_TOO_LARGE` (ERR-007). Path IDs are validated as UUID v4. | e2e tests with an unknown field, a bad UUID, a 101 kB body. |
-| CR-021 | Rate limiting | `@nestjs/throttler` with Redis storage (`@nest-lab/throttler-storage-redis`), keyed by `userId` (custom `getTracker` returns `request.user.userId`). Limits: default 120 requests / 60 s; API-005 10 / 3600 s; API-009 10 / 3600 s; API-012 30 / 3600 s; API-015 3 / 3600 s; API-019 and API-020 are excluded (`@SkipThrottle()`). Over the limit: 429 `RATE_LIMITED` (ERR-009) with `Retry-After`. Requests without a valid token are rejected by `PlatformJwtGuard` before throttling runs; floods of such requests are stopped by the AWS WAF rule that blocks an IP sending more than 1000 requests in 5 minutes. If the throttler's Redis storage fails, the request is allowed (fail open, `warn` log), so a Redis problem does not block reads. Throttler keys use the prefix `ro:throttle:`. | e2e test sends 11 uploads in a row and gets 429 on the 11th. |
-| CR-022 | Security headers | API uses `helmet` defaults. The web app's `middleware.ts` runs the next-intl middleware and then, for every page response, generates a nonce (`Buffer.from(crypto.randomUUID()).toString('base64')`), passes it to the app in the request header `x-nonce`, and sets `Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-<nonce>' 'strict-dynamic'` (plus `'unsafe-eval'` only when `NODE_ENV=development`, which `next dev` needs) `; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'` (Next.js applies the nonce to its own scripts; pages are therefore rendered dynamically). It also sets `Strict-Transport-Security: max-age=31536000; includeSubDomains`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. | ZAP baseline scan in staging (NFR-012); Playwright checks there are no CSP violations in the console. |
+| CR-021 | Rate limiting | `@nestjs/throttler` with Redis storage (`@nest-lab/throttler-storage-redis`), keyed by `userId` (custom `getTracker` returns `request.user.userId`). Limits: default 120 requests / 60 s; API-005 10 / 3600 s; API-009 10 / 3600 s; API-012 30 / 3600 s; API-015 3 / 3600 s; API-022 5 / 3600 s; API-023 10 / 3600 s; API-024 5 / 3600 s; API-019, API-020 and API-025 are excluded (`@SkipThrottle()`; Razorpay retries webhooks and is limited only by the WAF rule). Over the limit: 429 `RATE_LIMITED` (ERR-009) with `Retry-After`. Requests without a valid token are rejected by `PlatformJwtGuard` before throttling runs; floods of such requests are stopped by the AWS WAF rule that blocks an IP sending more than 1000 requests in 5 minutes. If the throttler's Redis storage fails, the request is allowed (fail open, `warn` log), so a Redis problem does not block reads. Throttler keys use the prefix `ro:throttle:`. | e2e test sends 11 uploads in a row and gets 429 on the 11th. |
+| CR-022 | Security headers | API uses `helmet` defaults. The web app's `middleware.ts` runs the next-intl middleware and then, for every page response, generates a nonce (`Buffer.from(crypto.randomUUID()).toString('base64')`), passes it to the app in the request header `x-nonce`, and sets `Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-<nonce>' 'strict-dynamic'` (plus `'unsafe-eval'` only when `NODE_ENV=development`, which `next dev` needs) `; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://cdn.razorpay.com; font-src 'self'; connect-src 'self' https://api.razorpay.com https://lumberjack.razorpay.com; frame-src https://api.razorpay.com https://checkout.razorpay.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'` (the Razorpay entries, added in v2.0, let Razorpay Checkout run on P-06; its script `https://checkout.razorpay.com/v1/checkout.js` is loaded with the page nonce, so `'strict-dynamic'` allows it) (Next.js applies the nonce to its own scripts; pages are therefore rendered dynamically). It also sets `Strict-Transport-Security: max-age=31536000; includeSubDomains`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. | ZAP baseline scan in staging (NFR-012); Playwright checks there are no CSP violations in the console. |
 | CR-023 | Encryption | TLS 1.2 or higher on every external connection (ALB policy `ELBSecurityPolicy-TLS13-1-2-2021-06`; RDS and ElastiCache connections use TLS). At rest: RDS and ElastiCache encrypted with AWS KMS; S3 objects use SSE-KMS; the full redacted resume text is additionally encrypted by the application with AES-256-GCM (§5.6). Short resume quotes stored with suggestions (TBL-007) rely on RDS encryption only (NFR-013 states their retention). | Infrastructure review, NFR-010, NFR-011. |
 | CR-024 | Untrusted files | Uploaded files are never executed, rendered in a browser or parsed in the API process. They are parsed only in the worker (CMP-015) inside a `worker_threads` thread with `resourceLimits.maxOldGenerationSizeMb = 512` and a `PARSE_TIMEOUT_MS` timeout. PDF parsing runs with `isEvalSupported: false`. DOCX macros and embedded objects are ignored. | Unit tests with a zip bomb, a 6-page PDF, a password-protected PDF. |
 | CR-025 | Data retention | Personal data is kept only as long as the table in §3.2 NFR-013 says, then deleted by FR-020. Non-production environments contain only synthetic data; production data is never copied to another environment. | Retention job tests; access policy review. |
 | CR-026 | Dependencies | CI runs `npm audit --omit=dev --audit-level=high` and fails on any high or critical finding. Dependabot opens weekly update PRs. | CI job `deps-audit`. |
 | CR-027 | Prompt injection | Resume text is untrusted. It is passed to the AI only inside `<resume_text>` tags, the system prompt tells the model to ignore instructions inside it (§4.7.1), and the AI output is validated against a strict schema (§4.7.2) before use. The AI has no tools and no access to other data. | Unit test with a resume containing "Ignore previous instructions". |
+| CR-037 | Payment security | Card, UPI and bank details never reach the module: payments are made in Razorpay Checkout (PCI DSS scope stays with Razorpay, SAQ A for SurfingBear). Every checkout callback (API-023) and every webhook (API-025) is accepted only after an HMAC-SHA256 signature check with a constant-time compare (`crypto.timingSafeEqual`): checkout `HMAC(razorpay_payment_id + "\|" + razorpay_subscription_id, RAZORPAY_KEY_SECRET)`, webhook `HMAC(raw request body, RAZORPAY_WEBHOOK_SECRET)`, both lowercase hex. The price comes only from the Razorpay plan `RAZORPAY_PLAN_ID`, never from the client. `RAZORPAY_KEY_ID` is the only Razorpay value sent to the browser. | Unit tests with valid, changed and missing signatures; code review; `gitleaks`. |
 
 ### 1.6 Internationalization (i18n)
 
@@ -298,13 +314,14 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | `AUTH_JWKS_URL` | `http://localhost:4100/.well-known/jwks.json` | `<AUTH_ISSUER>/.well-known/jwks.json` | `<AUTH_ISSUER>/.well-known/jwks.json` | `<AUTH_ISSUER>/.well-known/jwks.json` |
 | `PLATFORM_LOGIN_URL` | `http://localhost:4100/dev/login` | `https://dev.surfingbear.com/login` | `https://staging.surfingbear.com/login` | `https://surfingbear.com/login` |
 | `PLATFORM_HOME_URL` | `http://localhost:4100/` | `https://dev.surfingbear.com/` | `https://staging.surfingbear.com/` | `https://surfingbear.com/` |
-| `PLATFORM_UPGRADE_URL` | `http://localhost:4100/pricing` | `https://dev.surfingbear.com/pricing?ref=resume-optimizer` | `https://staging.surfingbear.com/pricing?ref=resume-optimizer` | `https://surfingbear.com/pricing?ref=resume-optimizer` |
+| `PLATFORM_UPGRADE_URL` | **Deprecated (v2.0)**: the upgrade link now opens P-06 in this module | — | — | — |
 | AI | `AI_MODE=mock` (deterministic fake, §4.7.6) | `live`, Anthropic workspace `ro-dev` | `live`, workspace `ro-staging` | `live`, workspace `ro-prod` |
 | PostgreSQL | `postgres:16-alpine` container | RDS `db.t4g.small`, single-AZ | RDS `db.t4g.medium`, single-AZ | RDS `db.m7g.large`, Multi-AZ, PITR 7 days |
 | Redis | `redis:7-alpine` container | ElastiCache `cache.t4g.micro` | `cache.t4g.small` | `cache.r7g.large`, 1 replica, Multi-AZ |
 | S3 | LocalStack 3 | bucket `sb-ro-resumes-dev` | `sb-ro-resumes-staging` | `sb-ro-resumes-prod` |
 | Log level | `debug` | `debug` | `info` | `info` |
 | Data | Synthetic | Synthetic | Synthetic | Real |
+| Payments (v2.0) | `PAYMENT_MODE=mock` (§4.13.4) | Razorpay test mode | Razorpay test mode | Razorpay live mode |
 | Deploy trigger | — | Every merge to `main` | Every tag `v*.*.*` | Same tag, after manual approval |
 
 **Environment variables (API and worker):**
@@ -322,7 +339,7 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | `AUTH_ISSUER` | `http://localhost:4100` | Yes | prod: `https://auth.surfingbear.com` |
 | `AUTH_AUDIENCE` | `resume-optimizer` | Yes | |
 | `AUTH_COOKIE_NAME` | `sb_access_token` | Yes | |
-| `PLATFORM_UPGRADE_URL` | `http://localhost:4100/pricing` | Yes | prod: `https://surfingbear.com/pricing?ref=resume-optimizer` |
+| `PLATFORM_UPGRADE_URL` | — | No | **Deprecated (v2.0)**, no longer read; `upgradeUrl` is `<APP_ORIGIN>/<locale>/pro` (FR-012.2) |
 | `AI_MODE` | `mock` | Yes | `mock` or `live`; `mock` is rejected when `APP_ENV=prod` |
 | `AI_MODEL` | `claude-opus-5-5` | Yes | |
 | `AI_MOCK_DELAY_MS` | `1000` | No | Delay of `MockAiClient` (§4.7.6); default `1000` |
@@ -335,6 +352,11 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | `DATA_ENCRYPTION_KEYS` | `{"1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}` (32 zero bytes; local and CI only) | Yes | Secret. JSON map version → base64 key; zod checks every value decodes to exactly 32 bytes, and rejects the all-zero key when `APP_ENV` is `staging` or `prod` |
 | `DATA_ENCRYPTION_ACTIVE_KEY_VERSION` | `1` | Yes | Must exist in the map |
 | `IP_HASH_SALT` | `local-dev-salt-not-a-secret-0000000` (local and CI only) | Yes | Secret, at least 32 characters (zod) |
+| `PAYMENT_MODE` | `mock` | Yes | `mock` or `live`; `mock` is rejected when `APP_ENV=prod` (§4.13.4) |
+| `RAZORPAY_KEY_ID` | `rzp_test_localdummy0000` | When `PAYMENT_MODE=live` | Public key id, also sent to the browser in API-022 |
+| `RAZORPAY_KEY_SECRET` | `local-dummy-razorpay-secret` | When `PAYMENT_MODE=live` | Secret (CR-017, CR-037) |
+| `RAZORPAY_WEBHOOK_SECRET` | `local-dummy-webhook-secret` | When `PAYMENT_MODE=live` | Secret; the same value is entered in the Razorpay dashboard webhook (§4.13.1) |
+| `RAZORPAY_PLAN_ID` | `plan_localdummy0000` | When `PAYMENT_MODE=live` | Razorpay plan of `PRO_PRICE_PAISE` per month, one per environment (§4.13.1) |
 | `GRIEVANCE_EMAIL` | `grievance@surfingbear.com` | Yes | Shown in the notice (ASM-011) |
 | `LOG_LEVEL` | `debug` | Yes | |
 | `METRICS_PORT` | `9464` | Yes | Prometheus `/metrics`, not exposed through the ALB. In AWS API and worker both use `9464` (separate tasks). Locally the root script `dev:worker` starts the worker with `METRICS_PORT=9465` (via `cross-env`), so both can run on one laptop. When `NODE_ENV=test` no `/metrics` server is started, and each Nest application registers its metrics on its own `prom-client` `Registry` instance, so API and worker modules can run in one Jest process |
