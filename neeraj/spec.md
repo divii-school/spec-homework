@@ -3,9 +3,9 @@
 | Field | Value |
 |---|---|
 | Author | Neeraj Gurjar |
-| Version | v0.11 |
-| Last updated | 2026-10-19 |
-| Status | Draft |
+| Version | v2.0 |
+| Last updated | 2026-10-27 |
+| Status | Review (round 2) |
 | Backend stack | NestJS 11 (TypeScript 5, Node.js 22 LTS) |
 | Frontend stack | Next.js 15 (App Router, React 19) |
 | Data stores | PostgreSQL 16, Redis 7 |
@@ -3527,27 +3527,32 @@ Every FR and NFR appears here. `—` means the item genuinely has no element of 
 
 | Requirement | Component(s) | Table(s) | API(s) | Verified by |
 |---|---|---|---|---|
-| FR-001 | CMP-004, CMP-001, CMP-023 | — (identity comes from the token; no user table, §5) | API-001 to API-018 (all protected) | FR-001.1–6; `auth.e2e-spec.ts`; `platform-jwt.guard.spec.ts` |
+| FR-001 | CMP-004, CMP-024, CMP-001, CMP-023 | TBL-011 (plan since v2.0; identity still comes from the token) | API-001 to API-024, API-026 (all protected) | FR-001.1–6; `auth.e2e-spec.ts`; `platform-jwt.guard.spec.ts` |
 | FR-002 | CMP-006, CMP-004, CMP-020, CMP-001 | TBL-002, TBL-010 | API-001, API-003, API-004 | FR-002.1–8; `privacy.e2e-spec.ts`; Playwright `consent.spec.ts` |
 | FR-003 | CMP-005, CMP-020 | TBL-001 | API-002 | FR-003.1–5; `catalog.e2e-spec.ts`; seed idempotency test |
 | FR-004 | CMP-007, CMP-021, CMP-020, CMP-012 | TBL-003, TBL-010 | API-005 | FR-004.1–9; `resumes.e2e-spec.ts` with fixtures (valid PDF, valid DOCX, `.doc`, renamed `.png`, 0 bytes, 5 MiB, 5 MiB + 1 byte) |
 | FR-005 | CMP-015, CMP-021, CMP-018 | TBL-003 | API-007 | FR-005.1–10; `resume-parse.processor.spec.ts`, `pii-redactor.spec.ts`, `text-normalizer.spec.ts` |
 | FR-006 | CMP-008, CMP-009, CMP-020, CMP-012 | TBL-001, TBL-003, TBL-004, TBL-008, TBL-010 | API-009 | FR-006.1–5; `analyses.e2e-spec.ts` including 5 parallel requests with 1 quota slot left (exactly 1 succeeds) |
-| FR-007 | CMP-009, CMP-008, CMP-016, CMP-018 | TBL-008, TBL-004 | API-001, API-009 | FR-007.1–9; `usage.service.spec.ts`, `period.spec.ts` (31 Oct 23:59 IST and 1 Nov 00:00 IST cases) |
+| FR-007 | CMP-009, CMP-008, CMP-016, CMP-018, CMP-024 | TBL-008, TBL-004, TBL-011 | API-001, API-009 | FR-007.1–9; `usage.service.spec.ts`, `period.spec.ts` (31 Oct 23:59 IST and 1 Nov 00:00 IST cases) |
 | FR-008 | CMP-016, CMP-017 | TBL-004, TBL-005 | API-011 | FR-008.1–6; `scoring.spec.ts`, `ai-output.schema.spec.ts`, `anthropic-ai.client.spec.ts` (request body snapshot) |
 | FR-009 | CMP-016, CMP-017 | TBL-001, TBL-006 | API-011 | FR-009.1–5; `post-process.spec.ts` |
 | FR-010 | CMP-016, CMP-017 | TBL-007 | API-011 | FR-010.1–5; `post-process.spec.ts` |
 | FR-011 | CMP-014, CMP-016, CMP-017, CMP-018, CMP-001 | TBL-004, TBL-008 | API-011 | FR-011.1–9; `resume-analysis.processor.spec.ts` with each mock fixture (§4.7.6); `maintenance.processor.spec.ts` |
-| FR-012 | CMP-008, CMP-001 | TBL-004, TBL-005, TBL-006, TBL-007 | API-011 | FR-012.1–6; `analyses.e2e-spec.ts` (FREE body contains no locked text; same analysis read as PRO shows all) |
-| FR-013 | CMP-010, CMP-012 | TBL-004, TBL-005, TBL-006, TBL-007, TBL-010 | API-012 | FR-013.1–8; `reports.e2e-spec.ts` (extracts the PDF text with `pdfjs-dist` and checks blocks and gating) |
-| FR-014 | CMP-008, CMP-001 | TBL-004 | API-010 | FR-014.1–4; `analyses.e2e-spec.ts`; Playwright `history.spec.ts` |
+| FR-012 | CMP-008, CMP-024, CMP-001 | TBL-004, TBL-005, TBL-006, TBL-007, TBL-011 | API-011 | FR-012.1–6; `analyses.e2e-spec.ts` (FREE body contains no locked text; same analysis read as PRO shows all) |
+| FR-013 | CMP-010, CMP-012 | TBL-004, TBL-005, TBL-006, TBL-007, TBL-010, TBL-011 | API-012 | FR-013.1–8; `reports.e2e-spec.ts` (extracts the PDF text with `pdfjs-dist` and checks blocks and gating) |
+| FR-014 | CMP-008, CMP-001 | TBL-004 | API-010, API-026 | FR-014.1–4; `analyses.e2e-spec.ts`; Playwright `history.spec.ts` |
 | FR-015 | CMP-007, CMP-001 | TBL-003 | API-006, API-007, API-009 | FR-015.1–4; `resumes.e2e-spec.ts` |
 | FR-016 | CMP-007, CMP-021, CMP-012 | TBL-003, TBL-004, TBL-010 | API-008 | FR-016.1–5; `resumes.e2e-spec.ts` |
 | FR-017 | CMP-008, CMP-012 | TBL-004, TBL-005, TBL-006, TBL-007, TBL-010 | API-013 | FR-017.1–4; `analyses.e2e-spec.ts` |
-| FR-018 | CMP-006, CMP-012, CMP-001 | TBL-002, TBL-003, TBL-004, TBL-008, TBL-010 | API-014, API-003 | FR-018.1–5; `privacy.e2e-spec.ts` |
-| FR-019 | CMP-006, CMP-021, CMP-020, CMP-012, CMP-016, CMP-001 | TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-008 (kept), TBL-009, TBL-010 | API-015 | FR-019.1–9; `privacy.e2e-spec.ts` (erase during a `PROCESSING` analysis); Playwright `erase.spec.ts` |
-| FR-020 | CMP-018, CMP-021 | TBL-002, TBL-003, TBL-004, TBL-008, TBL-009, TBL-010 | — (scheduled jobs, no endpoint) | FR-020.1–5; `maintenance.processor.spec.ts` with a fake clock |
+| FR-018 | CMP-006, CMP-012, CMP-001 | TBL-002, TBL-003, TBL-004, TBL-008, TBL-010, TBL-011, TBL-012 | API-014, API-003 | FR-018.1–5; `privacy.e2e-spec.ts` |
+| FR-019 | CMP-006, CMP-021, CMP-020, CMP-012, CMP-016, CMP-024, CMP-025, CMP-001 | TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-008 (kept), TBL-009, TBL-010, TBL-011 and TBL-012 (kept, v2.0) | API-015 | FR-019.1–9; `privacy.e2e-spec.ts` (erase during a `PROCESSING` analysis); Playwright `erase.spec.ts` |
+| FR-020 | CMP-018, CMP-021 | TBL-002, TBL-003, TBL-004, TBL-008, TBL-009, TBL-010, TBL-011, TBL-012, TBL-013 | — (scheduled jobs, no endpoint) | FR-020.1–5; `maintenance.processor.spec.ts` with a fake clock |
 | FR-021 | CMP-011, CMP-005, CMP-008, CMP-012 | TBL-001, TBL-010 | API-016, API-017, API-018, API-002, API-009 | FR-021.1–6; `admin.e2e-spec.ts` |
+| FR-022 | CMP-001, CMP-012, CMP-024, CMP-025 | TBL-010, TBL-011, TBL-012 | API-014, API-021, API-022, API-023 | FR-022.1–10; `billing.e2e-spec.ts` (mock payments and signed fixtures); Playwright `pro.spec.ts` |
+| FR-023 | CMP-004, CMP-008, CMP-020, CMP-024 | TBL-008, TBL-011 | API-001, API-009, API-011, API-012, API-021, API-025 | FR-023.1–9; `entitlement.service.spec.ts` with a fixed Clock; `billing.e2e-spec.ts` |
+| FR-024 | CMP-001, CMP-024, CMP-025, CMP-026 | TBL-010, TBL-011 | API-021, API-024, API-025 | FR-024.1–8; `billing.e2e-spec.ts`; Playwright `pro.spec.ts` |
+| FR-025 | CMP-001, CMP-027 | TBL-004, TBL-005, TBL-006 | API-026 | FR-025.1–7; `compare.e2e-spec.ts`; Playwright `compare.spec.ts` |
+| FR-026 | CMP-018, CMP-025, CMP-026 | TBL-011, TBL-012, TBL-013 | API-025 | FR-026.1–8; `billing.e2e-spec.ts`; `maintenance.processor.spec.ts` |
 | NFR-001 | CMP-003, CMP-019, CMP-020 | TBL-001, TBL-002, TBL-003, TBL-004 (indexes in §5.3) | API-001, API-002, API-003, API-006, API-007, API-010, API-011, API-014 | `perf/read-apis.js` |
 | NFR-002 | CMP-007, CMP-021 | TBL-003 | API-005 | `perf/upload.js` |
 | NFR-003 | CMP-015 | TBL-003 | API-007 | `ro_parse_duration_seconds` p95 |
@@ -3556,11 +3561,11 @@ Every FR and NFR appears here. `—` means the item genuinely has no element of 
 | NFR-006 | CMP-002, CMP-003, CMP-014, CMP-020 | TBL-004, TBL-008 (row lock is per user, so no global contention) | API-009 | `perf/peak.js` |
 | NFR-007 | CMP-002, CMP-003, CMP-013 | — (availability is measured on the service, not stored) | API-019, API-020 | CloudWatch canary report |
 | NFR-008 | CMP-018 | TBL-004 | API-011 | `ro_stuck_analyses` gauge and alarm |
-| NFR-009 | CMP-019, CMP-020 | TBL-001 to TBL-010 (RDS PITR covers all) | — (infrastructure capability, no endpoint) | Quarterly restore drill |
+| NFR-009 | CMP-019, CMP-020 | TBL-001 to TBL-013 (RDS PITR covers all) | — (infrastructure capability, no endpoint) | Quarterly restore drill |
 | NFR-010 | CMP-002, CMP-019, CMP-020, CMP-021 | — (transport property) | API-001 to API-020 | `testssl.sh` report |
 | NFR-011 | CMP-015, CMP-016, CMP-019, CMP-021 | TBL-003 (`text_enc`) | — (storage property, no endpoint) | `text-cipher.service.spec.ts`; infra review |
 | NFR-012 | CMP-001, CMP-003, CMP-014 | — (code and dependency property) | API-001 to API-020 | `deps-audit` CI job; ZAP baseline report |
-| NFR-013 | CMP-015, CMP-018, CMP-021 | TBL-002, TBL-003, TBL-004, TBL-008, TBL-009, TBL-010 | — (scheduled jobs) | FR-020 tests; `ro_retention_overdue_rows` = 0 |
+| NFR-013 | CMP-015, CMP-018, CMP-021 | TBL-002, TBL-003, TBL-004, TBL-008, TBL-009, TBL-010, TBL-011, TBL-012, TBL-013 | — (scheduled jobs) | FR-020 tests; `ro_retention_overdue_rows` = 0 |
 | NFR-014 | CMP-006, CMP-021 | TBL-002 to TBL-007, TBL-009 | API-015 | `privacy.e2e-spec.ts`; S3 inventory |
 | NFR-015 | CMP-015, CMP-017 | TBL-003 | — (internal AI call, no endpoint) | `pii-redactor.spec.ts`; `anthropic-ai.client.spec.ts` |
 | NFR-016 | CMP-022, CMP-003, CMP-014 | — (logs are not in the database) | API-001 to API-020 | `scan-logs.ts` in CI; `ro_pii_log_matches` filters and alarm in staging |
@@ -3572,7 +3577,11 @@ Every FR and NFR appears here. `—` means the item genuinely has no element of 
 | NFR-022 | CMP-016, CMP-017 | TBL-004, TBL-005 | — (offline evaluation) | `ai-golden.ts` report |
 | NFR-023 | CMP-022, CMP-012 | TBL-010 | — (process requirement) | Annual tabletop record |
 | NFR-024 | CMP-001, CMP-003 | TBL-001 (`name_hi`, `name_ko`) | API-002, API-003, API-011 | `no-literal-string` lint; key-coverage script |
-| NFR-025 | CMP-003, CMP-004, CMP-013, CMP-014, CMP-017 | TBL-004, TBL-008 (reservations released in every failure path) | API-001 to API-020 | `outage.e2e-spec.ts`, one case per §4.4.1 row |
+| NFR-025 | CMP-003, CMP-004, CMP-013, CMP-014, CMP-017, CMP-025 | TBL-004, TBL-008 (reservations released in every failure path) | API-001 to API-020 | `outage.e2e-spec.ts`, one case per §4.4.1 row |
+| NFR-026 | CMP-026 | TBL-011, TBL-012, TBL-013 | API-025 | `billing.e2e-spec.ts` (duplicate and reversed events) |
+| NFR-027 | CMP-004, CMP-020, CMP-024 | TBL-011 | API-001, API-021, API-023 | `entitlement.service.spec.ts`; `billing.e2e-spec.ts` |
+| NFR-028 | CMP-001, CMP-024, CMP-025, CMP-026 | TBL-011, TBL-012 (no card fields exist) | API-022, API-023, API-025 | Unit tests; `scan-logs.ts`; `gitleaks`; code review |
+| NFR-029 | CMP-018, CMP-025 | TBL-011, TBL-012 | — (scheduled job, no endpoint) | `maintenance.processor.spec.ts` |
 
 ### 7.2 Tables to requirements
 
@@ -3583,13 +3592,16 @@ Generated from §7.1; every table is used by at least one requirement.
 | TBL-001 `job_roles` | FR-003, FR-006, FR-009, FR-021, NFR-001, NFR-009, NFR-024 |
 | TBL-002 `consents` | FR-002, FR-018, FR-019, FR-020, NFR-001, NFR-009, NFR-013, NFR-014 |
 | TBL-003 `resumes` | FR-004, FR-005, FR-006, FR-015, FR-016, FR-018, FR-019, FR-020, NFR-001, NFR-002, NFR-003, NFR-009, NFR-011, NFR-013, NFR-014, NFR-015 |
-| TBL-004 `analyses` | FR-006, FR-007, FR-008, FR-011, FR-012, FR-013, FR-014, FR-016, FR-017, FR-018, FR-019, FR-020, NFR-001, NFR-004, NFR-005, NFR-006, NFR-008, NFR-009, NFR-013, NFR-014, NFR-018, NFR-022, NFR-025 |
-| TBL-005 `analysis_dimension_scores` | FR-008, FR-012, FR-013, FR-017, FR-019, NFR-005, NFR-009, NFR-014, NFR-022 |
-| TBL-006 `analysis_missing_skills` | FR-009, FR-012, FR-013, FR-017, FR-019, NFR-005, NFR-009, NFR-014 |
+| TBL-004 `analyses` | FR-006, FR-007, FR-008, FR-011, FR-012, FR-013, FR-014, FR-016, FR-017, FR-018, FR-019, FR-020, FR-025, NFR-001, NFR-004, NFR-005, NFR-006, NFR-008, NFR-009, NFR-013, NFR-014, NFR-018, NFR-022, NFR-025 |
+| TBL-005 `analysis_dimension_scores` | FR-008, FR-012, FR-013, FR-017, FR-019, FR-025, NFR-005, NFR-009, NFR-014, NFR-022 |
+| TBL-006 `analysis_missing_skills` | FR-009, FR-012, FR-013, FR-017, FR-019, FR-025, NFR-005, NFR-009, NFR-014 |
 | TBL-007 `analysis_suggestions` | FR-010, FR-012, FR-013, FR-017, FR-019, NFR-005, NFR-009, NFR-014 |
-| TBL-008 `monthly_usage` | FR-006, FR-007, FR-011, FR-018, FR-019, FR-020, NFR-006, NFR-009, NFR-013, NFR-025 |
+| TBL-008 `monthly_usage` | FR-006, FR-007, FR-011, FR-018, FR-019, FR-020, FR-023, NFR-006, NFR-009, NFR-013, NFR-025 |
 | TBL-009 `erasure_requests` | FR-019, FR-020, NFR-009, NFR-013, NFR-014 |
-| TBL-010 `audit_events` | FR-002, FR-004, FR-006, FR-013, FR-016, FR-017, FR-018, FR-019, FR-020, FR-021, NFR-009, NFR-013, NFR-023 |
+| TBL-010 `audit_events` | FR-002, FR-004, FR-006, FR-013, FR-016, FR-017, FR-018, FR-019, FR-020, FR-021, FR-022, FR-024, NFR-009, NFR-013, NFR-023 |
+| TBL-011 `subscriptions` | FR-001, FR-007, FR-012, FR-013, FR-018, FR-019, FR-020, FR-022, FR-023, FR-024, FR-026, NFR-009, NFR-013, NFR-026, NFR-027, NFR-028, NFR-029 |
+| TBL-012 `subscription_payments` | FR-018, FR-019, FR-020, FR-022, FR-026, NFR-009, NFR-013, NFR-026, NFR-028, NFR-029 |
+| TBL-013 `payment_events` | FR-020, FR-026, NFR-009, NFR-013, NFR-026 |
 
 ### 7.3 Common requirements to components
 
@@ -3633,6 +3645,21 @@ Where each company-wide rule is implemented. How each one is checked is in its r
 | CR-034 | Deploy pipeline (§4.12.6) |
 | CR-035 | CMP-019, CI job `migrations` (§4.12.5) |
 | CR-036 | CMP-002, deploy pipeline (§4.12.6) |
+| CR-037 | CMP-001, CMP-024, CMP-025, CMP-026 |
+
+
+### 7.4 Round 2 brief to specification (v2.0)
+
+Where each point of the round 2 change is specified. Everything else was checked and left unchanged on purpose (for example the general privacy notice and `NOTICE_VERSION`, so FREE users need no new consent).
+
+| Round 2 point | Requirements | Components | Tables | APIs and pages |
+|---|---|---|---|---|
+| 1. Resume Pro, ₹299 a month, paid through Razorpay | FR-022, FR-026, NFR-026, NFR-028, NFR-029, CR-037, ASM-018, ASM-021 | CMP-024, CMP-025, CMP-026, CMP-018 | TBL-011, TBL-012, TBL-013 | API-021, API-022, API-023, API-025; P-06; §4.9.1, §4.13 |
+| 2. Pro: unlimited analyses and all rewrite suggestions | FR-023, FR-007 (changed), FR-012 (changed), NFR-027 | CMP-024, CMP-004, CMP-008 | TBL-008 (PRO counters), TBL-011 | API-001, API-009, API-011, API-012; P-01, P-02 |
+| 3. Pro: analysis history and comparison of two analyses | FR-025, FR-014 (changed), ASM-019 | CMP-027 | TBL-004 to TBL-006 (read only) | API-010, API-026; P-03, P-05 |
+| 4. Cancel any time, access until the end of the paid month | FR-024, ASM-022 | CMP-024, CMP-025, CMP-026 | TBL-011 | API-024, API-025; P-06 |
+| 5. Free users stay exactly as they are | FR-023 (intro), FR-007.10, ASM-019; `NOTICE_VERSION` unchanged | — | TBL-008 FREE counters unchanged | Unchanged FREE behaviour of API-001, API-009, API-010, API-011 |
+| Effects on existing rules | CR-001, CR-004, CR-006, CR-007, CR-011, CR-017, CR-021, CR-022, FR-001, FR-002, FR-018, FR-019, FR-020, NFR-013, NFR-025; deprecated ASM-003, ASM-012, `PRO_MONTHLY_ANALYSES`, `PLATFORM_UPGRADE_URL` | CMP-001, CMP-018 | TBL-010 | API-014, API-015; §4.4.1, §4.11, §5.8 |
 
 ---
 
@@ -3661,3 +3688,5 @@ Where each company-wide rule is implemented. How each one is checked is in its r
 | v0.9 | 2026-10-19 | Neeraj Gurjar | (1) Limit of `MAX_STORED_RESUMES` per user with ERR-035. (2) Script check at parse time rejects resumes mostly in non-Latin script before any AI call (FR-005.10, ERR-027 now also a parse code). (3) Exact `details`/`meta` content for every error code. (4) Named test fixtures built at test time. (5) Grievance-officer erasure path (FR-019.9, ASM-017, OOS-014). (6) Database size estimate, UI disclaimer on P-02, and a "Confirm with" owner for every assumption. | Close remaining edge cases and make tests and error bodies exact. | Changed: FR-004, FR-005, FR-019, NFR-015, API-005, ERR-027, TBL-003, TBL-010, P-01, P-02, §1.4, §2.2, §2.5, §3.3, §4.3.6, §4.8.2, §4.12.1, §6.3. Added: ERR-035, ASM-017, OOS-014, `MAX_STORED_RESUMES`, `MIN_LATIN_LETTER_RATIO`. |
 | v0.10 | 2026-10-19 | Neeraj Gurjar | Fourth simulated build test (on v0.9). Exact rules added for: the outage-test harness (TCP proxy, app needs PostgreSQL at boot), fixture generation before unit and e2e tests, the erase CLI start-up and exit codes, the criterion-coverage script and `docs/manual-checks.md`, the circuit's half-open outcome, `details[].field` paths, the upload error order, text without letters, per-run request IDs for maintenance jobs, first-time deploy, and the golden set. Contradictions removed: S3 client timeouts versus the 5 s bound, upload under a PostgreSQL outage, criterion ranges in §7.1, Clock time in retention queries, and the upload diagram (limit and language paths). | The v0.6–v0.9 additions opened new places to guess; this closes them. | Changed: CR-015, CR-018, FR-005, FR-014, FR-019, FR-020, NFR-022, NFR-025, API-005, TBL-003, TBL-010, §1.4, §2.5, §4.3.1, §4.4.1, §4.7.7, §4.8.1, §4.8.2, §4.12.1, §7.1. |
 | v0.11 | 2026-10-19 | Neeraj Gurjar | Fifth simulated build test (on v0.10, about 6 guesses). The migration task now gets a new revision with the new image on every deploy; the log scan skips ID fields and strips UUIDs and repeat job IDs; log serializers never include headers or IPs; `details[].issue` values for non-class-validator errors; JWKS refresh in the background with Clock-based windows; FR-019.8 checked by an automated timing test; golden-set file format and pipeline; the notice names both usage months; Dockerfiles copy every workspace `package.json`. | Remove the last build-test guesses and contradictions. | Changed: CR-005, CR-011, NFR-016, NFR-022, §1.4, §2.5, §4.7.6, §4.9, §4.12.4, §4.12.6. |
+| v1.0 | 2026-10-27 | Neeraj Gurjar | Records that v0.11 (commit `5b73fe5`, 2026-10-19) is the round 1 submission. No content change. | §8.1 rule 2 asks for v1.0 at the round 1 submission; this row was missing. | — |
+| v2.0 | 2026-10-27 | Neeraj Gurjar | **Round 2: Resume Pro.** A ₹299 monthly subscription sold in this module through Razorpay (checkout, payment verification, signed webhooks, hourly reconciliation, cancel at cycle end). The plan now comes from the module's own entitlement (`paid_until`, 24 h renewal grace) instead of the token claim. PRO has no monthly limit, sees all suggestions and can compare two analyses; PRO analyses have their own usage counters, so FREE users are unaffected. Erasure cancels an open subscription and keeps payment records for 8 years. New Pro terms are accepted at checkout, so the general notice and FREE users' consent are unchanged. Major version because API-001 (`usage.limit` can be null) and the plan source changed (§8.1 rule 2). | Round 2 requirement change (2026-10-22): paid plan with unlimited analyses, all suggestions, history and comparison, cancel any time, free users unchanged. | Added: FR-022 to FR-026, NFR-026 to NFR-029, CR-037, ASM-018 to ASM-022, OOS-015, OOS-016, CMP-024 to CMP-027, TBL-011 to TBL-013, API-021 to API-026, ERR-036 to ERR-041, P-05, P-06, §4.3.7 to §4.3.10, §4.9.1, §4.13, §7.4, constants `PRO_PRICE_PAISE`, `PRO_TERMS_VERSION`, `RAZORPAY_TOTAL_COUNT`, `CHECKOUT_EXPIRY_MS`, `RENEWAL_GRACE_MS`, `PLAN_CACHE_TTL_S`, `PAYMENT_RECORD_RETENTION_DAYS`, `PAYMENT_EVENT_RETENTION_DAYS`, `PRO_FAIR_USE_DAILY_ALERT`. Changed: CR-001, CR-004, CR-006, CR-007, CR-011, CR-017, CR-021, CR-022, FR-001, FR-002, FR-007, FR-012, FR-014, FR-018, FR-019, FR-020, NFR-013, NFR-025, CMP-001, CMP-004, CMP-018, TBL-008, TBL-010, API-001, API-009, API-011, API-012, API-014, API-015, P-01, P-03, §1.7, §2.2, §4.1, §4.3.6, §4.4, §4.4.1, §4.5, §4.6, §4.8, §4.11, §4.12.1, §5.8, §6.1, §7.1 to §7.3. Deprecated: ASM-003, ASM-012, `PRO_MONTHLY_ANALYSES`, `PLATFORM_UPGRADE_URL`. |
