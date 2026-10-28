@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | Author | Sovan Kumar Bera |
-| Version | v1.1 |
-| Last updated | 2026-10-22 |
+| Version | v1.2 |
+| Last updated | 2026-10-28 |
 | Status | Final |
 
 ---
@@ -182,33 +182,33 @@ Frontend (Next.js) is a separate repository and out of scope for this backend sp
 | FR-001 | Upload resume | A logged-in user uploads a resume file. The system accepts PDF and DOCX formats only, with a maximum size of 5 MB. The file is stored in S3 and a record is created in the database. | Must | 1. Only `.pdf` and `.docx` MIME types are accepted; any other type returns `ERR_INVALID_FILE_TYPE` (400). 2. Files > 5 MB return `ERR_FILE_TOO_LARGE` (400). 3. Files with 0 bytes return `ERR_EMPTY_FILE` (400). 4. After upload, the response contains `resumeId` (UUID), `fileName`, `fileSize`, `mimeType`, `uploadedAt`. 5. The file is stored in S3 at key `resumes/{userId}/{resumeId}/{originalFileName}`. 6. A malicious file (e.g. `.exe` renamed to `.pdf`) is rejected by checking the file's magic bytes, not just the extension. |
 | FR-002 | Select target job role | When starting an analysis, the user selects a target job role from a predefined list (e.g. "Software Engineer", "Data Analyst", "Product Manager", "DevOps Engineer", "UI/UX Designer", "Project Manager", "Business Analyst", "QA Engineer", "System Administrator", "Marketing Manager"). Admins can add roles via `POST /job-roles`. | Must | 1. The list is returned by `GET /job-roles`. 2. Selecting a role not in the list returns `ERR_INVALID_JOB_ROLE` (400). 3. The selected role is stored with the analysis. |
 | FR-003 | Select experience level | When starting an analysis, the user selects an experience level: `entry` (0–2 years), `mid` (3–5 years), `senior` (6–10 years), `lead` (10+ years). | Must | 1. Only the four values are accepted; anything else returns `ERR_INVALID_EXPERIENCE_LEVEL` (400). 2. The level is stored with the analysis. |
-| FR-004 | AI resume analysis | The system sends the resume text, job role, and experience level to OpenAI GPT-4o. The AI returns a structured analysis: an overall score (0–100), per-dimension scores, a list of missing skills, and rewrite suggestions for weak lines. | Must | 1. The analysis completes within 60 seconds (p95). 2. The overall score is an integer 0–100. 3. Seven dimensions are scored, each with its own weight: Contact Info (10), Professional Summary (15), Work Experience (20), Skills Match (20), Education (10), Formatting & ATS Readability (15), Keywords & Industry Terms (10). 4. The weighted sum of dimension scores equals the overall score. 5. If the AI call fails (timeout, rate limit, server error), the analysis status is set to `failed` and the user can retry without consuming another analysis credit. 6. The resume text is extracted from the file using `pdf-parse` (PDF) or `mammoth` (DOCX) before sending to the AI. |
+| FR-004 | AI resume analysis | **Analysis is asynchronous (decision D-01, §4.6).** `POST /analyses` validates the request, reserves the user's credit, creates the analysis row with status `pending`, enqueues a job on the `analysis` queue (CMP-010) and returns `202 Accepted` immediately. The Analysis Worker picks up the job, sets status `processing`, extracts the resume text, sends text + job role + experience level to OpenAI GPT-4o and stores the structured result (overall score 0–100, per-dimension scores, missing skills, rewrite suggestions). The client polls `GET /analyses/:id` until status is `completed` or `failed`. | Must | 1. `POST /analyses` responds `202` with `status: "pending"` in < 500 ms (p95); the job reaches `completed` or `failed` within 60 s (p95) of enqueue. The client polls `GET /analyses/:id` every 3 s (recommended) and stops on a terminal status. 2. The overall score is an integer 0–100. 3. Seven dimensions are scored, each with its own weight: Contact Info (10), Professional Summary (15), Work Experience (20), Skills Match (20), Education (10), Formatting & ATS Readability (15), Keywords & Industry Terms (10). 4. The weighted sum of dimension scores equals the overall score. 5. If the AI call fails (timeout, rate limit, server error) after the job's retry policy (2 attempts, 5 s backoff, see CMP-010), the analysis status is set to `failed`, `error_code` is set (`ERR_AI_SERVICE_UNAVAILABLE` or `ERR_TEXT_EXTRACTION_FAILED`) and the reserved credit is released; the user can retry without consuming another credit. 6. The resume text is extracted inside the worker using `pdf-parse` (PDF) or `mammoth` (DOCX) before sending to the AI. 7. Exactly one worker processes a given job at a time (BullMQ lock); a job is never processed twice concurrently. |
 | FR-005 | Missing skills list | The analysis result includes a list of skills that are expected for the target role and experience level but are missing from the resume. Each skill has a name and a brief explanation of why it matters for the role. | Must | 1. At least 0 and at most 20 missing skills are returned. 2. Each skill has `name` (string, 1–100 chars) and `reason` (string, 1–300 chars). 3. Skills are ordered by relevance (most important first, as ranked by the AI). |
 | FR-006 | Rewrite suggestions | The analysis result includes rewrite suggestions for weak lines in the resume. Each suggestion has the original line, the suggested rewrite, the dimension it improves, and the expected score impact. | Must | 1. Each suggestion has `originalText`, `suggestedText`, `dimension` (one of the 7 dimension keys), `impact` (`low` / `medium` / `high`). 2. Free users see only the top 3 suggestions (ordered by impact descending). Pro users see all (max 15). 3. The response includes `totalSuggestions` count even for free users, so they know how many they are missing. |
-| FR-007 | Free tier usage limits | Free users can run a maximum of 3 analyses per calendar month (UTC). The count resets on the 1st of each month at 00:00 UTC. If the limit is reached, `POST /analyses` returns `ERR_MONTHLY_LIMIT_REACHED` (403). | Must | 1. After 3 successful analyses in a month, the 4th attempt returns 403 with `ERR_MONTHLY_LIMIT_REACHED`. 2. Failed analyses (status `failed`) do not count toward the limit. 3. `GET /analyses/usage` returns `{ "used": <n>, "limit": 3, "resetsAt": "<ISO-8601>" }`. 4. Pro users are exempt from this limit (see FR-011). |
+| FR-007 | Free tier usage limits | Free users can run a maximum of 3 analyses per calendar month (UTC). The count resets on the 1st of each month at 00:00 UTC. If the limit is reached, `POST /analyses` returns `ERR_MONTHLY_LIMIT_REACHED` (403). | Must | 1. After 3 analyses in a month, the 4th attempt returns 403 with `ERR_MONTHLY_LIMIT_REACHED`. 2. Because analysis is asynchronous, the credit is **reserved at enqueue** (`INCR usage:{userId}:{YYYY-MM}` in Redis, atomic) so two concurrent requests cannot both pass the check; it is **released** (`DECR`) by the worker when the job ends in `failed`. Pending and processing analyses therefore count; failed ones do not. 3. `GET /analyses/usage` returns `{ "used": <n>, "limit": 3, "resetsAt": "<ISO-8601>" }`. 4. Pro users (tier derived per §5.5) skip the check entirely. 5. The Redis key expires 35 days after the month starts; if Redis is unavailable the API falls back to `SELECT count(*) FROM analyses WHERE user_id = ? AND status <> 'failed' AND created_at >= <month start>`. |
 | FR-008 | Download analysis as PDF | A user can download any of their own completed analyses as a PDF. The PDF contains: overall score, dimension scores as a radar chart, missing skills, rewrite suggestions (all for Pro, top 3 for free), and a timestamp. | Must | 1. `GET /analyses/:id/pdf` returns `Content-Type: application/pdf`. 2. The PDF file size is < 2 MB. 3. If the analysis status is not `completed`, the endpoint returns `ERR_ANALYSIS_NOT_READY` (400). 4. The PDF includes the SurfingBear logo, the user's name, and the analysis date. |
 | FR-009 | View analysis history | A user can view a list of their past analyses, paginated, sorted by creation date descending. Each list item shows: overall score, job role, experience level, status, and created date. | Should | 1. `GET /analyses` returns a paginated list. 2. Default page size: 10, max: 50. 3. Filterable by `status` (pending, processing, completed, failed) and `jobRoleId`. 4. Each item includes `id`, `resumeId`, `jobRole`, `experienceLevel`, `overallScore`, `status`, `createdAt`. |
-| FR-010 | Delete resume and associated data | A user can delete their own resume. Deleting a resume also deletes the S3 file and all associated analyses, dimension scores, and rewrite suggestions. This supports the DPDP Act right to erasure. | Must | 1. `DELETE /resumes/:id` returns 204. 2. The S3 file is deleted within 48 hours (async via queue). 3. All rows referencing the resume in `analyses`, `dimension_scores`, `rewrite_suggestions` are cascade-deleted. 4. Attempting to access a deleted resume returns 404. |
-| FR-011 | Resume Pro subscription | A user can subscribe to Resume Pro for ₹299/month via Razorpay. Pro benefits: unlimited analyses, all rewrite suggestions visible, analysis history with score comparison. The subscription auto-renews monthly. Users can cancel anytime; Pro access continues until the end of the paid period. Free users are unchanged. | Must | 1. `POST /subscriptions` creates a Razorpay subscription and returns the `subscriptionId` and `paymentLink`. 2. After successful payment (webhook), the user's `tier` changes from `free` to `pro`. 3. Pro users bypass the 3/month analysis limit. 4. Pro users see all rewrite suggestions (not just top 3). 5. Cancellation via `POST /subscriptions/:id/cancel` sets `cancelAtPeriodEnd: true`; Pro access remains until `currentPeriodEnd`. 6. After `currentPeriodEnd`, tier reverts to `free`. |
+| FR-010 | Delete resume and associated data | A user can delete their own resume. Deleting a resume also deletes the S3 file and all associated analyses, dimension scores, and rewrite suggestions. This supports the DPDP Act right to erasure. | Must | 1. `DELETE /resumes/:id` returns 204. 2. The S3 file is deleted within 48 hours: `DELETE` enqueues a `resume-cleanup` job on CMP-010 (same BullMQ instance, 5 attempts, exponential backoff from 30 s) that calls S3 `DeleteObject`. 3. All rows referencing the resume in `analyses`, `dimension_scores`, `rewrite_suggestions` are cascade-deleted. 4. Attempting to access a deleted resume returns 404. |
+| FR-011 | Resume Pro subscription | A user can subscribe to Resume Pro for ₹299/month via Razorpay. Pro benefits: unlimited analyses, all rewrite suggestions visible, analysis history with score comparison. The subscription auto-renews monthly. Users can cancel anytime; Pro access continues until the end of the paid period. Free users are unchanged. | Must | 1. `POST /subscriptions` creates a Razorpay subscription and returns the `subscriptionId` and `paymentLink`. 2. After successful payment (webhook), the user's derived `tier` (§5.5: computed from TBL-006, cached in Redis `user_tier:{userId}`) becomes `pro`. 3. Pro users bypass the 3/month analysis limit. 4. Pro users see all rewrite suggestions (not just top 3). 5. Cancellation via `POST /subscriptions/:id/cancel` sets `cancelAtPeriodEnd: true`; Pro access remains until `currentPeriodEnd`. 6. After `currentPeriodEnd` the tier reverts to `free` automatically (the derivation rule compares `current_period_end` to `now()`; the daily sweep in CMP-008 marks the row `expired`). 7. Pro-only endpoints (`GET /analyses/compare`) are protected by `ProGuard` and return `ERR_PRO_REQUIRED` (403) for free users. |
 | FR-012 | Razorpay payment integration | The system integrates with Razorpay Subscriptions API. Payment lifecycle: create subscription → user pays on Razorpay checkout → webhook confirms payment → activate Pro. Razorpay webhooks are verified using the `WEBHOOK_SECRET`. | Must | 1. Webhook signature is verified using HMAC-SHA256 with `WEBHOOK_SECRET`; invalid signatures return 400. 2. Webhook events handled: `subscription.activated`, `subscription.charged`, `subscription.cancelled`, `subscription.halted`, `payment.failed`. 3. Each webhook is idempotent (duplicate delivery does not create duplicate records). 4. Payment records are stored with Razorpay `paymentId`, `amount` (in paise), `status`, `method`. |
 | FR-013 | Subscription management | A user can view their subscription status, payment history, and cancel their subscription. | Should | 1. `GET /subscriptions/me` returns current subscription or `null`. 2. `GET /subscriptions/me/payments` returns payment history, paginated. 3. `POST /subscriptions/:id/cancel` cancels at period end. 4. Re-subscribing after cancellation creates a new subscription. |
-| FR-014 | Score comparison | Pro users can compare scores across their analysis history. The comparison shows dimension scores between any two selected analyses side by side. | Should | 1. `GET /analyses/compare?ids=<id1>,<id2>` returns both analyses' dimension scores side by side. 2. Only completed analyses can be compared. 3. Maximum 2 analyses per comparison request. 4. Only the owner of both analyses can compare them. |
+| FR-014 | Score comparison | Pro users can compare scores across their analysis history. The comparison shows dimension scores between any two selected analyses side by side. | Should | 1. `GET /analyses/compare?ids=<id1>,<id2>` returns both analyses' dimension scores side by side. 2. Only completed analyses can be compared. 3. Maximum 2 analyses per comparison request. 4. Only the owner of both analyses can compare them. 5. The endpoint is Pro-gated: a free user (tier per §5.5) receives `ERR_PRO_REQUIRED` (403) before any analysis lookup happens. |
 | FR-015 | List job roles | Any authenticated user can fetch the list of available job roles. | Must | 1. `GET /job-roles` returns `[{ "id": "<uuid>", "name": "<string>", "slug": "<string>" }]`. 2. Results are cached in Redis for 1 hour. |
 | FR-016 | Admin: add job role | An admin can add a new job role. | Could | 1. `POST /job-roles` with `{ "name": "..." }` creates a new role. Slug is auto-generated from name. 2. Duplicate names return `ERR_DUPLICATE_JOB_ROLE` (409). |
-| FR-017 | Retry failed analysis | A user can retry a failed analysis without uploading the resume again and without consuming an additional analysis credit. | Should | 1. `POST /analyses/:id/retry` re-queues the analysis. 2. Only analyses with status `failed` can be retried. 3. Retrying a non-failed analysis returns `ERR_ANALYSIS_NOT_FAILED` (400). |
+| FR-017 | Retry failed analysis | A user can retry a failed analysis without uploading the resume again and without consuming an additional analysis credit. | Should | 1. `POST /analyses/:id/retry` re-enqueues the same analysis row on the `analysis` queue (CMP-010), resets status to `pending`, clears `error_code`/`error_message`, increments `attempts` and returns `202`. No new credit is reserved. 2. Only analyses with status `failed` can be retried. 3. Retrying a non-failed analysis returns `ERR_ANALYSIS_NOT_FAILED` (400). |
 
 ### 3.2 Non-functional requirements
 
 | ID | Category | Requirement | Measurable target | How it is verified |
 |---|---|---|---|---|
-| NFR-001 | Performance — analysis latency | AI resume analysis completes within acceptable time. | p50 < 15 s, p95 < 30 s, p99 < 60 s (measured from API request received to response sent). | Load test with 50 concurrent analyses in staging; measure via APM (Datadog). |
+| NFR-001 | Performance — analysis latency | AI resume analysis completes within acceptable time. | End-to-end: p50 < 15 s, p95 < 30 s, p99 < 60 s measured from job enqueue (`analyses.created_at`) to terminal status (`analyses.completed_at`). Queue wait alone: p95 < 5 s at 50 concurrent analyses. `POST /analyses` itself: p95 < 500 ms. | Load test with 50 concurrent analyses in staging; measure via APM (Datadog) + BullMQ job timings. |
 | NFR-002 | Performance — API latency | Non-analysis endpoints respond quickly. | p95 < 200 ms for CRUD endpoints. p95 < 500 ms for PDF generation. | Load test + APM. |
 | NFR-003 | Availability | The service is available for users. | 99.5% uptime per month (allows ~3.6 h downtime/month). Measured by health check endpoint `/health`. | Uptime monitoring (UptimeRobot or Datadog Synthetics), 1-minute interval. |
 | NFR-004 | Scalability | The service handles concurrent users. | 500 concurrent users, 50 concurrent analyses. Achieved via horizontal scaling (ECS auto-scaling: min 2, max 8 tasks, target CPU 60%). | Load test with k6 in staging. |
 | NFR-005 | Security — data protection | Personal data in resumes is protected. | Encryption at rest (AES-256) and in transit (TLS 1.2+). No PII in logs. Resume text is not stored in the database; only the S3 key is stored. | Security audit + pen test annually. |
 | NFR-006 | Privacy — data retention | User data is not retained longer than necessary. | Free users: resumes auto-deleted 90 days after upload. Pro users: resumes auto-deleted 90 days after subscription ends. Deletion job runs daily at 02:00 UTC. | Automated test: create resume with past date, run job, verify deletion. |
 | NFR-007 | Observability | The team can monitor and debug the system. | Structured JSON logs (see CR-004). Health endpoint at `/health` returns `{ "status": "ok", "db": "ok", "redis": "ok", "s3": "ok" }`. Request traces via `X-Request-Id` header propagated to all internal calls and logs. | Dashboard in Datadog/CloudWatch. |
-| NFR-008 | Reliability — AI failure | The system degrades gracefully when OpenAI is down. | If OpenAI returns 5xx or times out (60 s), the system retries once after 5 s. If the retry fails, the analysis status is set to `failed` and the user is notified. No data is lost. The rest of the system (uploads, history, PDF download of past analyses) continues to work. | Chaos test: block OpenAI endpoint, verify graceful degradation. |
+| NFR-008 | Reliability — AI failure | The system degrades gracefully when OpenAI is down. | If OpenAI returns 5xx or times out (60 s), the worker job retries once after 5 s (BullMQ `attempts: 2`, fixed backoff 5000 ms). If the retry fails, the analysis status is set to `failed` with `error_code = ERR_AI_SERVICE_UNAVAILABLE`, the reserved credit is released, and the client sees the failure on its next poll of `GET /analyses/:id`. Jobs that exhaust attempts stay in the BullMQ `failed` set for 7 days for inspection. No data is lost. The rest of the system (uploads, history, PDF download of past analyses) continues to work. | Chaos test: block OpenAI endpoint, verify graceful degradation. |
 | NFR-009 | Testability | The codebase is testable. | Unit test coverage ≥ 80% (lines). Integration tests for all API endpoints. E2E tests for critical flows (upload → analyze → download PDF). Mocked OpenAI in tests. | CI pipeline: `jest --coverage` fails if < 80%. |
 
 ### 3.3 Assumptions and out of scope
@@ -244,6 +244,8 @@ flowchart LR
     DB[(PostgreSQL RDS)]
     Cache[(Redis ElastiCache)]
     S3["AWS S3 (Resumes)"]
+    Queue[["BullMQ queues (on Redis)"]]
+    Worker["Analysis Worker (ECS Fargate)"]
     OpenAI["OpenAI GPT-4o API"]
     Razorpay["Razorpay API"]
     Puppeteer["Puppeteer PDF Service"]
@@ -252,11 +254,18 @@ flowchart LR
     LB --> API
     API --> DB
     API --> Cache
-    API --> S3
-    API --> OpenAI
+    API -->|multipart upload PutObject| S3
+    API -->|enqueue analysis / resume-cleanup| Queue
+    Queue --> Worker
+    Worker --> DB
+    Worker --> Cache
+    Worker -->|GetObject / DeleteObject| S3
+    Worker --> OpenAI
     API --> Razorpay
     API --> Puppeteer
 ```
+
+The API never calls OpenAI directly: every analysis runs in the Worker. The Worker is the same Docker image started with `PROCESS_ROLE=worker`, so it shares entities, config and the AI service code with the API.
 
 ### 4.2 Components
 
@@ -264,17 +273,20 @@ flowchart LR
 |---|---|---|---|
 | CMP-001 | API Server | Handles HTTP requests, authentication, validation, routing, and orchestration of all business logic. | NestJS 10.x (TypeScript 5.x) on Node.js 20 LTS. Chosen because: (a) NestJS is the team's primary backend framework, (b) decorators + DI map cleanly to the module structure, (c) built-in support for guards, pipes, interceptors matches our cross-cutting concerns. |
 | CMP-002 | PostgreSQL Database | Persistent storage for all structured data: resumes (metadata), analyses, dimension scores, rewrite suggestions, subscriptions, payments, job roles. | PostgreSQL 16 on AWS RDS. Chosen because: (a) required by the brief, (b) JSONB support for flexible AI response storage, (c) strong transaction support for payment recording. |
-| CMP-003 | Redis Cache | Caches job role list, user analysis usage counts, rate limit counters, and Razorpay subscription status. | Redis 7.x on AWS ElastiCache. Chosen because: (a) required by the brief, (b) atomic counters for rate limiting and usage tracking, (c) sub-millisecond reads for frequently accessed data. |
-| CMP-004 | S3 File Storage | Stores uploaded resume files. Files are encrypted at rest. Presigned URLs are generated for secure upload and download without proxying through the API. | AWS S3 with SSE-S3 encryption. Chosen because: (a) durable (99.999999999%), (b) presigned URLs reduce API server load, (c) lifecycle policies automate retention-based deletion. |
-| CMP-005 | AI Analysis Service | Extracts text from resumes, constructs prompts, calls OpenAI GPT-4o, and parses the structured response. | OpenAI GPT-4o API via `openai` npm package (v4.x). Chosen because: (a) GPT-4o balances quality and cost for text analysis, (b) structured JSON output mode reduces parsing errors, (c) extensive documentation and npm SDK. |
+| CMP-003 | Redis Cache | Caches the job role list, monthly usage counters (credit reservation, FR-007), rate-limit counters and the derived user tier (`user_tier:{userId}`, §5.5). Also hosts the BullMQ queues used by CMP-010. | Redis 7.x on AWS ElastiCache. Chosen because: (a) required by the brief, (b) atomic counters for rate limiting and usage tracking, (c) sub-millisecond reads for frequently accessed data, (d) one Redis serves both cache and queue, so no extra broker to run. |
+| CMP-004 | S3 File Storage | Stores uploaded resume files. Files are encrypted at rest. **Upload goes through the API** (multipart, decision D-02) so the API can check size and magic bytes before `PutObject`; **download** uses a presigned GET URL (15 min) so file bytes do not stream through the API. | AWS S3 with SSE-S3 encryption. Chosen because: (a) durable (99.999999999%), (b) presigned download URLs keep file bytes off the API server, (c) lifecycle policies automate retention-based deletion. |
+| CMP-005 | AI Analysis Service | Extracts text from resumes, constructs prompts, calls OpenAI GPT-4o, and parses the structured response. Runs inside the Analysis Worker (CMP-010), never in the API request path. | OpenAI GPT-4o API via `openai` npm package (v4.x). Chosen because: (a) GPT-4o balances quality and cost for text analysis, (b) structured JSON output mode reduces parsing errors, (c) extensive documentation and npm SDK. |
 | CMP-006 | PDF Generator | Renders analysis results into a styled HTML template and converts to PDF. | Puppeteer 22.x with Handlebars 4.x templates. Chosen because: (a) pixel-perfect PDF output matching the web design, (b) supports charts via inline SVG, (c) headless Chrome is well-maintained. |
 | CMP-007 | Razorpay Integration | Manages subscription creation, webhook processing, and payment recording. | Razorpay Node.js SDK (`razorpay` npm). Chosen because: (a) specified in the requirement, (b) native subscription support, (c) INR support with no forex. |
-| CMP-008 | Scheduler | Runs daily cron job at 02:00 UTC to delete expired resumes and their S3 files per retention policy. | `@nestjs/schedule` (cron). Chosen because: (a) built into NestJS, (b) simple for single-instance cron (with leader election via Redis lock for multi-instance). |
+| CMP-008 | Scheduler | Runs in the Worker process only (never in the API). Daily at 02:00 UTC: (a) deletes expired resumes and enqueues `resume-cleanup` jobs for their S3 files per retention policy; (b) **subscription expiry sweep** — `UPDATE subscriptions SET status = 'expired' WHERE status IN ('cancelled', 'halted') AND current_period_end < now()`, and `active` rows whose `current_period_end < now() - interval '3 days'` (Razorpay charge retry grace), then `DEL user_tier:{userId}` for each affected user. | `@nestjs/schedule` (cron) with a Redis `SET NX` leader lock (TTL 10 min) so only one worker instance runs the job. Chosen because: (a) built into NestJS, (b) the lock makes it safe with 2+ worker tasks. |
 | CMP-009 | Load Balancer | Terminates TLS, routes to healthy API instances, handles CORS preflight at the infra level. | AWS ALB. Chosen because: (a) native ECS integration, (b) built-in health checks, (c) TLS termination. |
+| CMP-010 | Analysis Queue + Worker | Decouples the expensive OpenAI call from the HTTP request (decision D-01). Two queues on Redis: `analysis` (jobs: `{ analysisId }`, attempts 2, fixed backoff 5 s, job timeout 90 s, concurrency 5 per worker task, `removeOnComplete: 1000`, `removeOnFail: 7 days`) and `resume-cleanup` (jobs: `{ s3Key }`, attempts 5, exponential backoff from 30 s). The Worker is a separate ECS service (same image, `PROCESS_ROLE=worker`, min 1 / max 4 tasks, scaled on `analysis` queue depth > 20) that runs CMP-005 and updates `analyses` status `pending → processing → completed | failed`. | BullMQ 5.x (`@nestjs/bullmq`). Chosen because: (a) runs on the Redis we already have, no SQS/RabbitMQ to operate, (b) per-job retries, backoff, timeouts and locks are built in, (c) NestJS integration via decorators (`@Processor`, `@InjectQueue`), (d) Bull Board gives a free admin UI in dev/staging. |
 
 ### 4.3 Main flows
 
 #### Flow 1: Upload resume
+
+Upload design (decision D-02): the file is sent as `multipart/form-data` **to the API**, which validates it and writes it to S3. There is no presigned PUT upload. Rationale: files are small (≤ 5 MB), and the API must read the first bytes to verify magic bytes (FR-001 AC 6) and reject disguised executables before anything reaches S3. Presigned URLs are used only for **download** (API-003).
 
 ```mermaid
 sequenceDiagram
@@ -295,46 +307,62 @@ sequenceDiagram
     A-->>U: 201 { id, fileName, fileSize, mimeType, uploadedAt }
 ```
 
-#### Flow 2: Start analysis
+#### Flow 2: Start analysis (asynchronous, decision D-01)
 
 ```mermaid
 sequenceDiagram
     participant U as User
     participant A as API Server
-    participant R as Redis
+    participant R as Redis (cache + BullMQ)
     participant DB as PostgreSQL
+    participant W as Analysis Worker
     participant S3 as AWS S3
     participant AI as OpenAI GPT-4o
 
     U->>A: POST /analyses { resumeId, jobRoleId, experienceLevel }
-    A->>A: Validate JWT, input
-    A->>R: GET usage:{userId}:{month} (check monthly count)
-    alt Free user and limit reached
-        A-->>U: 403 ERR_MONTHLY_LIMIT_REACHED
-    end
-    A->>DB: INSERT INTO analyses (status=processing)
-    A->>S3: GetObject (resume file)
-    S3-->>A: File bytes
-    A->>A: Extract text (pdf-parse / mammoth)
-    alt Text extraction fails
-        A->>DB: UPDATE analyses SET status=failed
-        A-->>U: 422 ERR_TEXT_EXTRACTION_FAILED
-    end
-    A->>AI: Chat completion (resume text + role + level)
-    alt AI timeout (60s) or error
-        A->>A: Retry once after 5s
-        alt Retry fails
-            A->>DB: UPDATE analyses SET status=failed
-            A-->>U: 502 ERR_AI_SERVICE_UNAVAILABLE
+    A->>A: Validate JWT, input, resume ownership
+    A->>R: GET user_tier:{userId} (miss → derive from DB, §5.5)
+    alt Free user
+        A->>R: INCR usage:{userId}:{YYYY-MM} (reserve credit)
+        alt result > 3
+            A->>R: DECR usage:{userId}:{YYYY-MM}
+            A-->>U: 403 ERR_MONTHLY_LIMIT_REACHED
         end
     end
-    AI-->>A: Structured JSON (scores, skills, suggestions)
-    A->>A: Validate AI response shape
-    A->>DB: INSERT dimension_scores, rewrite_suggestions
-    A->>DB: UPDATE analyses SET status=completed, overall_score=X
-    A->>R: INCR usage:{userId}:{month}
-    A-->>U: 200 { analysis object with scores and suggestions }
+    A->>DB: INSERT INTO analyses (status=pending, attempts=0)
+    A->>R: queue "analysis".add({ analysisId }) (attempts 2, backoff 5 s)
+    A-->>U: 202 { id, status: "pending", pollUrl }
+
+    loop every 3 s until completed | failed
+        U->>A: GET /analyses/:id
+        A->>DB: SELECT analysis (+ scores, suggestions when completed)
+        A-->>U: 200 { status: pending | processing | completed | failed }
+    end
+
+    R->>W: job { analysisId }
+    W->>DB: UPDATE analyses SET status=processing, started_at=now(), attempts=attempts+1
+    W->>S3: GetObject (resume file)
+    S3-->>W: File bytes
+    W->>W: Extract text (pdf-parse / mammoth)
+    alt Text extraction fails (not retried)
+        W->>DB: UPDATE analyses SET status=failed, error_code=ERR_TEXT_EXTRACTION_FAILED
+        W->>R: DECR usage:{userId}:{YYYY-MM} (release credit, free users)
+    end
+    W->>AI: Chat completion (resume text + role + level), timeout 60 s
+    alt AI 5xx / timeout
+        W->>W: throw → BullMQ retries once after 5 s
+        alt second attempt fails
+            W->>DB: UPDATE analyses SET status=failed, error_code=ERR_AI_SERVICE_UNAVAILABLE
+            W->>R: DECR usage:{userId}:{YYYY-MM} (release credit, free users)
+        end
+    end
+    AI-->>W: Structured JSON (scores, skills, suggestions)
+    W->>W: Validate AI response shape
+    W->>DB: INSERT dimension_scores, rewrite_suggestions
+    W->>DB: UPDATE analyses SET status=completed, overall_score=X, completed_at=now()
 ```
+
+Why async: the OpenAI call takes 10–60 s. Holding an HTTP connection that long ties up ALB idle timeouts (60 s default), blocks ECS task scaling on request count, and makes retries double-charge the user. With the queue, the API stays fast (NFR-001: `POST /analyses` p95 < 500 ms), retries are a worker concern, and the credit reservation makes the limit race-free.
 
 #### Flow 3: Razorpay subscription (Round 2)
 
@@ -354,17 +382,40 @@ sequenceDiagram
     Note over U,RP: User completes payment on Razorpay Checkout
     RP->>A: POST /webhooks/razorpay (subscription.activated)
     A->>A: Verify HMAC-SHA256 signature
-    A->>DB: UPDATE subscriptions SET status=active
+    A->>DB: UPDATE subscriptions SET status=active, current_period_start/end
     A->>DB: INSERT INTO payments
-    A->>R: SET user_tier:{userId} = pro (TTL = period end)
+    A->>R: DEL user_tier:{userId} (invalidate cache — next read re-derives tier from DB, see 5.5)
     A-->>RP: 200 OK
+```
+
+#### Flow 4: Pro-gated request (ProGuard)
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant G as ProGuard (NestJS guard)
+    participant R as Redis
+    participant DB as PostgreSQL
+    participant H as Handler (e.g. GET /analyses/compare)
+
+    U->>G: request with JWT
+    G->>R: GET user_tier:{userId}
+    alt cache miss
+        G->>DB: SELECT status, current_period_end FROM subscriptions WHERE user_id=? AND status IN ('active','cancelled') ORDER BY current_period_end DESC LIMIT 1
+        G->>G: tier = (row exists AND current_period_end > now()) ? pro : free
+        G->>R: SET user_tier:{userId} = tier EX min(current_period_end - now(), 3600 s)
+    end
+    alt tier = free
+        G-->>U: 403 ERR_PRO_REQUIRED
+    end
+    G->>H: continue
 ```
 
 ### 4.4 External integrations
 
 | System | Purpose | Protocol / auth | Failure handling |
 |---|---|---|---|
-| OpenAI GPT-4o | Resume analysis (scoring, skills, suggestions) | HTTPS REST. Auth: `Authorization: Bearer <OPENAI_API_KEY>`. Model: `gpt-4o`. Response format: `json_object`. Max tokens: 4096. Temperature: 0.2 (low variance for consistent scoring). | Timeout: 60 s. Retry: 1 retry after 5 s on 5xx or timeout. On final failure: set analysis status to `failed`, return `ERR_AI_SERVICE_UNAVAILABLE` (502). Rate limit (429): no retry, set status to `failed`, return 502. |
+| OpenAI GPT-4o | Resume analysis (scoring, skills, suggestions) | HTTPS REST. Auth: `Authorization: Bearer <OPENAI_API_KEY>`. Model: `gpt-4o`. Response format: `json_object`. Max tokens: 4096. Temperature: 0.2 (low variance for consistent scoring). | Called only from the Worker (CMP-010). Timeout: 60 s. Retry: 1 retry after 5 s on 5xx or timeout (BullMQ attempts 2). On final failure: set analysis status to `failed`, `error_code = ERR_AI_SERVICE_UNAVAILABLE`, release the credit. Rate limit (429): no retry, same failure handling. The client learns of the failure via `GET /analyses/:id`. |
 | AWS S3 | Resume file storage | HTTPS. Auth: IAM role (ECS task role). Bucket: `surfingbear-resumes-{env}`. | Timeout: 30 s. On failure: return 502. Files are immutable (never overwritten). Lifecycle policy deletes objects tagged `retention-expiry` after 90 days. |
 | Razorpay | Subscription and payment processing | HTTPS REST. Auth: Basic auth (`RAZORPAY_KEY_ID:RAZORPAY_KEY_SECRET`). Webhook: HMAC-SHA256 signature verification using `WEBHOOK_SECRET`. | Timeout: 30 s. Webhook delivery: Razorpay retries for 24 h. Idempotent processing: store `razorpay_event_id`, skip duplicates. On Razorpay downtime: subscription creation fails with `ERR_PAYMENT_SERVICE_UNAVAILABLE` (502). Existing active subscriptions continue (status cached in Redis). |
 
@@ -377,7 +428,8 @@ sequenceDiagram
 | Language | TypeScript 5.x (strict mode) | Type safety catches mismatches between DTOs, entities, and AI response parsing at compile time rather than runtime. |
 | Database | PostgreSQL 16 | Required by brief. JSONB for flexible AI response storage. Supports `uuid_generate_v4()` for primary keys. Strong ACID for payment records. |
 | Cache | Redis 7.x | Required by brief. Atomic `INCR` for usage counting, `SET EX` for rate limiting, fast reads for job role cache. |
-| File storage | AWS S3 | Durable (11 nines), presigned URLs for direct browser upload/download, lifecycle policies for automated retention. Cost-effective for file storage. |
+| File storage | AWS S3 | Durable (11 nines), lifecycle policies for automated retention, cost-effective. Uploads go through the API (multipart, D-02) so magic bytes are checked; presigned URLs are used for download only. |
+| Job queue | BullMQ 5.x (`@nestjs/bullmq`) on Redis | Async analysis (D-01) without a new broker. Retries, backoff, timeouts, locks and a dashboard (Bull Board) out of the box. |
 | AI provider | OpenAI GPT-4o | Best balance of quality and cost for structured text analysis. JSON output mode reduces parsing errors. Well-documented Node.js SDK. |
 | PDF generation | Puppeteer 22.x + Handlebars | Renders styled HTML (with charts) to pixel-perfect PDF. Handlebars templates keep presentation logic separate from business logic. |
 | Payment | Razorpay | Required by Round 2. Native INR subscription support. Indian payment methods (UPI, cards, netbanking). Webhook-based lifecycle. |
@@ -386,7 +438,17 @@ sequenceDiagram
 | Testing | Jest 29.x + Supertest | NestJS default. `jest` for unit tests, `supertest` for integration/E2E tests. |
 | Containerization | Docker | Consistent environment across local/dev/staging/prod. Multi-stage build: build stage (compile TS) → prod stage (Node.js + dist). |
 | Orchestration | AWS ECS Fargate | Serverless containers. Auto-scaling based on CPU. No server management. |
-| CI/CD | GitHub Actions | Team standard. Workflow: lint → test → build → push Docker image → deploy to ECS. |
+| CI/CD | GitHub Actions | Team standard. Workflow: lint → test → build → push Docker image → deploy to ECS (two services from one image: `api`, `worker`). |
+
+### 4.6 Key design decisions
+
+Decisions a builder would otherwise have to guess. Each is referenced from the sections it affects.
+
+| ID | Decision | Chosen | Rejected | Why |
+|---|---|---|---|---|
+| D-01 | Sync or async analysis | **Async.** `POST /analyses` → 202 + poll `GET /analyses/:id`. Jobs on BullMQ `analysis` queue, processed by a separate Worker service (CMP-010). | Synchronous inline call returning 200 after 10–60 s. | Keeps the API under 500 ms, survives ALB idle timeout, retries live in one place, horizontal scaling of workers independent of API, credit reservation is race-free. Polling is acceptable because real-time notifications are out of scope (§3.3). |
+| D-02 | Upload path | **Multipart through the API**, API writes to S3 with `PutObject`. Presigned URLs for download only. | Presigned S3 PUT from the browser. | Files are ≤ 5 MB; the API must read magic bytes (FR-001 AC 6) and enforce MIME/size before the object exists. One code path, one error catalogue. |
+| D-03 | Where Pro status lives | **Derived from `subscriptions` (TBL-006)** at read time, cached in Redis `user_tier:{userId}`; no `tier` column, no user table in this module. Gated via `ProGuard` → `ERR_PRO_REQUIRED` (403). Expiry by comparing `current_period_end` to `now()`, plus a daily sweep (CMP-008). See §5.5. | A `users.tier` column updated by webhooks and cron. | The platform owns the user table (CR-001), so we cannot add a column there. A derived value cannot drift from the subscription record, and a cache miss is one indexed query. |
 
 ---
 
@@ -420,10 +482,13 @@ erDiagram
         uuid job_role_id FK
         string experience_level
         string status
+        int attempts
         int overall_score
         jsonb missing_skills
+        string error_code
         string error_message
         timestamp created_at
+        timestamp started_at
         timestamp completed_at
     }
 
@@ -507,7 +572,10 @@ Purpose: One row per resume analysis run. Links a resume to its analysis results
 | user_id | uuid | NO | IDX | — | Denormalized from resume for faster queries. Indexed for "my analyses" list. |
 | job_role_id | uuid | NO | FK → job_roles.id | — | ON DELETE RESTRICT (cannot delete a role that has analyses). |
 | experience_level | varchar(10) | NO | — | — | CHECK: `experience_level IN ('entry', 'mid', 'senior', 'lead')`. |
-| status | varchar(20) | NO | IDX | `'pending'` | CHECK: `status IN ('pending', 'processing', 'completed', 'failed')`. Indexed for filtering. |
+| status | varchar(20) | NO | IDX | `'pending'` | CHECK: `status IN ('pending', 'processing', 'completed', 'failed')`. Lifecycle (D-01): `pending` (enqueued) → `processing` (worker picked it up) → `completed` \| `failed`. Retry: `failed` → `pending`. Indexed for filtering. |
+| attempts | smallint | NO | — | `0` | Number of worker attempts so far (incremented when the worker starts a job). Max 2 per enqueue; retries via API-010 increase it further. |
+| started_at | timestamptz | YES | — | NULL | Set when the worker transitions the row to `processing`. `started_at - created_at` = queue wait time (NFR-001). |
+| error_code | varchar(50) | YES | — | NULL | One of the codes in §6.3 (`ERR_TEXT_EXTRACTION_FAILED`, `ERR_AI_SERVICE_UNAVAILABLE`). Populated only when status = `failed`; returned to the client by API-007. |
 | overall_score | smallint | YES | — | NULL | Range 0–100. NULL until analysis completes. CHECK: `overall_score >= 0 AND overall_score <= 100`. |
 | missing_skills | jsonb | YES | — | NULL | Array of `{ "name": "...", "reason": "..." }`. NULL until analysis completes. Stored as JSONB for flexible querying. |
 | error_message | text | YES | — | NULL | Populated only when status = `failed`. Contains a safe error description (no internal details). |
@@ -626,6 +694,43 @@ Purpose: Records every payment event from Razorpay. Immutable audit log.
 | rewrite_suggestions.analysis_id | analyses.id | Many-to-one | CASCADE — deleting an analysis deletes its suggestions. |
 | payments.subscription_id | subscriptions.id | Many-to-one | RESTRICT — cannot delete a subscription that has payments. |
 
+### 5.5 Entitlement (Pro status) rules — decision D-03
+
+**Source of truth:** TBL-006 `subscriptions`. There is no `tier` column anywhere; the user table belongs to the platform (CR-001) and is not in this database.
+
+**Derivation** (`EntitlementService.getTier(userId)`):
+
+```sql
+SELECT status, current_period_end
+FROM subscriptions
+WHERE user_id = $1 AND status IN ('active', 'cancelled')
+ORDER BY current_period_end DESC
+LIMIT 1;
+```
+
+| Row found | Condition | Tier |
+|---|---|---|
+| no | — | `free` |
+| yes | `current_period_end > now()` | `pro` |
+| yes | `current_period_end <= now()` | `free` (row will be marked `expired` by the daily sweep; the tier is already correct before that) |
+
+`created` (unpaid) and `halted` (payment failed) rows never grant Pro. `cancelled` grants Pro until `current_period_end` (requirement: access continues to the end of the paid month).
+
+**Cache:** Redis key `user_tier:{userId}` with value `pro` or `free`, TTL = `min(current_period_end - now(), 3600)` seconds for `pro`, 3600 s for `free`. Invalidated (`DEL`) by: every Razorpay webhook event for that user (API-018), `POST /subscriptions/:id/cancel` (API-016) and the daily sweep (CMP-008). Redis unavailable → derive from DB on every call (slower, still correct).
+
+**Expiry:** two mechanisms, both needed. (1) The derivation compares `current_period_end` to `now()`, so access ends on time even if no job runs. (2) CMP-008 runs daily at 02:00 UTC and sets `status = 'expired'` on `cancelled`/`halted` rows past `current_period_end`, and on `active` rows more than 3 days past it (Razorpay retries a failed renewal for up to 3 days before sending `subscription.halted`). `subscription.charged` extends `current_period_end` by one month.
+
+**Where it is enforced:**
+
+| Feature | Enforcement point | Free user result |
+|---|---|---|
+| Unlimited analyses (FR-007) | `AnalysesService.create` — skip credit reservation when tier = `pro` | 3/month, then `ERR_MONTHLY_LIMIT_REACHED` (403) |
+| All rewrite suggestions (FR-006) | `AnalysesService.toResponse` — slice to top 3 by impact when tier = `free` (applies to API-005/007 and the PDF, API-008) | top 3 + `totalSuggestions` |
+| Score comparison (FR-014) | `@UseGuards(JwtGuard, ProGuard)` on API-011 | `ERR_PRO_REQUIRED` (403) |
+| Retention (NFR-006) | Retention job reads tier to compute `expires_at` | 90 days from upload |
+
+`ProGuard` runs after `JwtGuard` and before pipes; it reads the tier via `EntitlementService` (Flow 4). Analysis history (FR-009) stays available to free users because the brief says free users keep what they have today.
+
 ---
 
 ## 6. API design
@@ -639,15 +744,17 @@ Purpose: Records every payment event from Razorpay. Immutable audit log.
 - **Standard error format** (matches CR-005): `{ "statusCode": <number>, "error": "<ERR_CODE>", "message": "<human-readable>", "requestId": "<uuid>" }`.
 - **Content-Type:** `application/json` for all responses except file downloads (PDF, resume). File uploads use `multipart/form-data`.
 - **Request IDs:** Every request gets a UUID in the `X-Request-Id` response header (echoed from request header if provided, otherwise auto-generated).
+- **Async operations (D-01):** `POST /analyses` and `POST /analyses/:id/retry` return `202 Accepted` with `{ "id", "status": "pending", "pollUrl" }`. The client polls `pollUrl` (= `GET /analyses/:id`) every 3 s until `status` is `completed` or `failed`. Failures of the background job are reported in that resource (`status: "failed"`, `errorCode`, `errorMessage`), never as an HTTP error of the original POST.
+- **Pro gating (D-03):** Pro-only endpoints carry `ProGuard` and return `ERR_PRO_REQUIRED` (403) for free users before any other validation. Currently: API-011 only.
 
 ### 6.2 Endpoints
 
 #### API-001 `POST /api/v1/resumes`
-- **Purpose:** Upload a resume file.
+- **Purpose:** Upload a resume file. The file body is sent to the API (D-02); the API validates it (size, MIME, magic bytes) and writes it to S3 with `PutObject`. There is no presigned-PUT flow.
 - **Auth / role:** `user`, `admin`
 - **Implements:** FR-001
 
-**Request** (`multipart/form-data`)
+**Request** (`multipart/form-data`, single field `file`, max request size 6 MB at the ALB and 5 MB for the file itself)
 
 | Field | In | Type | Required | Validation |
 |---|---|---|---|---|
@@ -795,7 +902,20 @@ The `downloadUrl` is a presigned S3 URL valid for 15 minutes.
 }
 ```
 
-**Response 200** (synchronous — analysis runs inline, returns when complete)
+**Response 202 Accepted** (asynchronous, D-01 — the analysis has been queued, not run)
+
+```json
+{
+  "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+  "status": "pending",
+  "pollUrl": "/api/v1/analyses/c3d4e5f6-a7b8-9012-cdef-123456789012",
+  "createdAt": "2026-10-22T10:35:00.000Z"
+}
+```
+
+The client polls `pollUrl` every 3 s. Possible `status` values on the resource: `pending` (queued), `processing` (worker running), `completed`, `failed`.
+
+**Analysis resource** — the full shape returned by `GET /analyses/:id` (API-007) once `status` is `completed`. Shown once here; API-007 and API-010 refer to it:
 
 ```json
 {
@@ -804,6 +924,9 @@ The `downloadUrl` is a presigned S3 URL valid for 15 minutes.
   "jobRole": { "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901", "name": "Software Engineer" },
   "experienceLevel": "mid",
   "status": "completed",
+  "attempts": 1,
+  "errorCode": null,
+  "errorMessage": null,
   "overallScore": 72,
   "dimensions": [
     { "key": "contact_info", "label": "Contact Information", "weight": 10, "score": 8, "feedback": "All contact details present. Consider adding a LinkedIn URL." },
@@ -826,24 +949,26 @@ The `downloadUrl` is a presigned S3 URL valid for 15 minutes.
   ],
   "totalSuggestions": 8,
   "createdAt": "2026-10-22T10:35:00.000Z",
+  "startedAt": "2026-10-22T10:35:02.000Z",
   "completedAt": "2026-10-22T10:35:18.000Z"
 }
 ```
 
-Note: Free users see only the top 3 suggestions (by impact). `totalSuggestions` shows the total available. Pro users see all (up to 15).
+While `status` is `pending` or `processing`, the same resource is returned with `overallScore: null`, `dimensions: []`, `missingSkills: []`, `suggestions: []`, `totalSuggestions: 0`, `completedAt: null` (and `startedAt: null` while pending). When `status` is `failed`, `errorCode` is `ERR_TEXT_EXTRACTION_FAILED` or `ERR_AI_SERVICE_UNAVAILABLE` and `errorMessage` carries the matching message from §6.3.
 
-**Errors**
+Note: Free users see only the top 3 suggestions (by impact). `totalSuggestions` shows the total available. Pro users see all (up to 15). The tier is derived per §5.5 at response time.
+
+**Errors** (of the enqueue request only — job failures surface on the resource, see above)
 
 | HTTP | Error code | When |
 |---|---|---|
 | 400 | ERR_INVALID_EXPERIENCE_LEVEL | `experienceLevel` is not one of the four valid values. |
 | 400 | ERR_INVALID_JOB_ROLE | `jobRoleId` does not match any existing job role. |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
-| 403 | ERR_MONTHLY_LIMIT_REACHED | Free user has used all 3 analyses this month. |
+| 403 | ERR_MONTHLY_LIMIT_REACHED | Free user has 3 analyses reserved/used this month. |
 | 404 | ERR_RESUME_NOT_FOUND | `resumeId` does not exist or is not owned by the user. |
-| 422 | ERR_TEXT_EXTRACTION_FAILED | Could not extract text from the resume file (corrupt or unreadable). |
 | 429 | ERR_RATE_LIMITED | Per-endpoint rate limit exceeded (10/min). |
-| 502 | ERR_AI_SERVICE_UNAVAILABLE | OpenAI API failed after retry. |
+| 503 | ERR_INTERNAL | Redis/BullMQ unavailable so the job could not be enqueued (credit is rolled back). |
 
 ---
 
@@ -901,7 +1026,7 @@ Note: Free users see only the top 3 suggestions (by impact). `totalSuggestions` 
 
 **Response 200**
 
-Same shape as the `POST /api/v1/analyses` response above.
+The **Analysis resource** shown under API-005, in whichever state the row is in. This is the polling endpoint for D-01: clients call it every 3 s after a `202` from API-005 or API-010 and stop when `status` is `completed` or `failed`. The response carries `Cache-Control: no-store`.
 
 **Errors**
 
@@ -955,11 +1080,12 @@ Same shape as the `POST /api/v1/analyses` response above.
   "used": 2,
   "limit": 3,
   "tier": "free",
+  "proUntil": null,
   "resetsAt": "2026-11-01T00:00:00.000Z"
 }
 ```
 
-For Pro users: `"limit": null` (unlimited), `"tier": "pro"`.
+`used` counts analyses reserved this month (pending + processing + completed; failed ones are released). `tier` and `proUntil` come from §5.5. For Pro users: `"limit": null` (unlimited), `"tier": "pro"`, `"proUntil": "<current_period_end>"`.
 
 **Errors**
 
@@ -970,7 +1096,7 @@ For Pro users: `"limit": null` (unlimited), `"tier": "pro"`.
 ---
 
 #### API-010 `POST /api/v1/analyses/:id/retry`
-- **Purpose:** Retry a failed analysis.
+- **Purpose:** Retry a failed analysis by re-enqueueing it (D-01). No new credit is reserved.
 - **Auth / role:** `user` (own), `admin` (any)
 - **Implements:** FR-017
 
@@ -980,26 +1106,35 @@ For Pro users: `"limit": null` (unlimited), `"tier": "pro"`.
 |---|---|---|---|---|
 | id | path | uuid | Yes | Valid UUID. |
 
-**Response 200**
+**Response 202 Accepted**
 
-Same shape as `POST /api/v1/analyses` response (re-runs the analysis).
+```json
+{
+  "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+  "status": "pending",
+  "attempts": 2,
+  "pollUrl": "/api/v1/analyses/c3d4e5f6-a7b8-9012-cdef-123456789012"
+}
+```
+
+The row's `status` is reset to `pending`, `error_code`/`error_message` are cleared, and a new job is added to the `analysis` queue. The client polls `pollUrl` as in API-005.
 
 **Errors**
 
 | HTTP | Error code | When |
 |---|---|---|
-| 400 | ERR_ANALYSIS_NOT_FAILED | Analysis status is not `failed`. |
+| 400 | ERR_ANALYSIS_NOT_FAILED | Analysis status is not `failed` (including `pending`/`processing`). |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
 | 403 | ERR_FORBIDDEN | User does not own this analysis and is not admin. |
 | 404 | ERR_ANALYSIS_NOT_FOUND | Analysis ID does not exist. |
-| 502 | ERR_AI_SERVICE_UNAVAILABLE | OpenAI API failed after retry. |
+| 503 | ERR_INTERNAL | Redis/BullMQ unavailable so the job could not be enqueued; status stays `failed`. |
 
 ---
 
 #### API-011 `GET /api/v1/analyses/compare`
 - **Purpose:** Compare dimension scores of two completed analyses side by side.
-- **Auth / role:** `user` (own), `admin` (any)
-- **Implements:** FR-014
+- **Auth / role:** `user` **with tier `pro`** (own analyses), `admin` (any). Guards: `JwtGuard` → `ProGuard` (§5.5, Flow 4). Free users get 403 `ERR_PRO_REQUIRED` before any lookup.
+- **Implements:** FR-014, FR-011 (AC 7)
 
 **Request**
 
@@ -1054,6 +1189,7 @@ Same shape as `POST /api/v1/analyses` response (re-runs the analysis).
 |---|---|---|
 | 400 | ERR_INVALID_COMPARISON | Not exactly 2 IDs, or an analysis is not `completed`. |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 403 | ERR_PRO_REQUIRED | Caller's tier is `free` (checked first, by `ProGuard`). |
 | 403 | ERR_FORBIDDEN | User does not own one or both analyses. |
 | 404 | ERR_ANALYSIS_NOT_FOUND | One or both analysis IDs do not exist. |
 
@@ -1269,11 +1405,11 @@ Returns `null` (with 200 status) if no active subscription.
 { "status": "ok" }
 ```
 
-Handled events:
-- `subscription.activated` → Set subscription status to `active`, create payment record.
-- `subscription.charged` → Create payment record, extend `current_period_end`.
-- `subscription.cancelled` → Set subscription status to `cancelled`.
-- `subscription.halted` → Set subscription status to `halted` (payment failure).
+Handled events (every one ends with `DEL user_tier:{userId}` so the derived tier is re-read, §5.5):
+- `subscription.activated` → Set subscription status to `active`, set `current_period_start`/`current_period_end` from the payload, create payment record.
+- `subscription.charged` → Create payment record, extend `current_period_end` to the payload's `current_end`.
+- `subscription.cancelled` → Set subscription status to `cancelled` (Pro continues until `current_period_end`).
+- `subscription.halted` → Set subscription status to `halted` (payment failure; Pro ends immediately).
 - `payment.failed` → Create payment record with status `failed`.
 
 **Errors**
@@ -1336,7 +1472,10 @@ If any service is down: `"status": "degraded"`, the failed service shows `"error
 | ERR-021 | ERR_PAYMENT_SERVICE_UNAVAILABLE | 502 | Payment service is temporarily unavailable. | Razorpay API failed. |
 | ERR-022 | ERR_INVALID_WEBHOOK_SIGNATURE | 400 | Invalid webhook signature. | Razorpay webhook HMAC verification failed. |
 | ERR-023 | ERR_INVALID_COMPARISON | 400 | Provide exactly 2 completed analysis IDs to compare. | Compare endpoint: wrong number of IDs or non-completed analysis. |
-| ERR-024 | ERR_INTERNAL | 500 | Internal server error. | Unexpected error. No internal details leaked. |
+| ERR-024 | ERR_INTERNAL | 500 | Internal server error. | Unexpected error. No internal details leaked. Returned as 503 when the cause is a dependency (Redis/BullMQ) refusing an enqueue. |
+| ERR-025 | ERR_PRO_REQUIRED | 403 | This feature requires Resume Pro. Upgrade to compare analyses. | Free user called a Pro-gated endpoint (API-011). Raised by `ProGuard` (§5.5). |
+
+Note (D-01): `ERR_TEXT_EXTRACTION_FAILED` (ERR-011) and `ERR_AI_SERVICE_UNAVAILABLE` (ERR-012) are no longer HTTP responses of `POST /analyses`. They appear as `errorCode` on the analysis resource (`status: "failed"`) returned by API-006/007. The codes and IDs are kept; their HTTP column describes the status they would map to if surfaced directly.
 
 ---
 
@@ -1349,28 +1488,28 @@ Every FR and NFR must appear here at least once. No empty cells — write `—` 
 | FR-001 Upload resume | CMP-001, CMP-004 | TBL-001 resumes | API-001, API-002, API-003 | AC: file type check, size check, magic bytes, S3 upload, DB record. Integration test. |
 | FR-002 Select target job role | CMP-001 | TBL-005 job_roles, TBL-002 analyses | API-005, API-012 | AC: invalid role → 400. Valid role stored in analysis. |
 | FR-003 Select experience level | CMP-001 | TBL-002 analyses | API-005 | AC: invalid level → 400. Valid level stored. |
-| FR-004 AI resume analysis | CMP-001, CMP-005 | TBL-002 analyses, TBL-003 dimension_scores | API-005, API-007 | AC: 7 dimensions scored, weighted sum = overall, p95 < 30s. Load test. |
+| FR-004 AI resume analysis | CMP-001, CMP-005, CMP-010 (D-01) | TBL-002 analyses (status, attempts, started_at, error_code), TBL-003 dimension_scores | API-005 (202), API-007 (poll) | AC: POST returns 202 < 500 ms; job completes p95 < 30 s; 7 dimensions, weighted sum = overall; failure visible via poll. Integration test with mocked OpenAI + BullMQ in-memory; load test. |
 | FR-005 Missing skills list | CMP-005 | TBL-002 analyses (missing_skills JSONB) | API-005, API-007 | AC: 0–20 skills, each with name + reason. |
 | FR-006 Rewrite suggestions | CMP-005 | TBL-004 rewrite_suggestions | API-005, API-007 | AC: free = top 3, pro = all. totalSuggestions shown. |
-| FR-007 Free tier usage limits | CMP-001, CMP-003 | TBL-002 analyses (counted) | API-005, API-009 | AC: 4th analysis in month → 403. Failed not counted. Reset on 1st. |
+| FR-007 Free tier usage limits | CMP-001, CMP-003 (INCR/DECR reservation), CMP-010 (release on fail) | TBL-002 analyses (fallback count) | API-005, API-009 | AC: 4th analysis in month → 403; two concurrent 3rd/4th requests → exactly one 202 (race test). Failed released. Reset on 1st. Pro skips check (§5.5). |
 | FR-008 Download analysis PDF | CMP-001, CMP-006 | TBL-002, TBL-003, TBL-004 (read) | API-008 | AC: PDF returned, < 2 MB, includes score + chart + suggestions. Non-completed → 400. |
 | FR-009 View analysis history | CMP-001 | TBL-002 analyses | API-006 | AC: paginated, sorted by date desc, filterable by status and role. |
-| FR-010 Delete resume | CMP-001, CMP-004 | TBL-001 resumes (cascade to TBL-002, TBL-003, TBL-004) | API-004 | AC: 204 returned. S3 deleted within 48h. Associated analyses cascade-deleted. 404 after. |
-| FR-011 Resume Pro subscription | CMP-001, CMP-007 | TBL-006 subscriptions | API-014, API-015, API-016 | AC: subscription created, Pro bypasses limit, all suggestions visible, cancel at period end. |
+| FR-010 Delete resume | CMP-001, CMP-004, CMP-010 (`resume-cleanup` queue) | TBL-001 resumes (cascade to TBL-002, TBL-003, TBL-004) | API-004 | AC: 204 returned. S3 deleted within 48h (job retries 5×). Associated analyses cascade-deleted. 404 after. |
+| FR-011 Resume Pro subscription | CMP-001, CMP-003 (`user_tier` cache), CMP-007, CMP-008 (expiry sweep) | TBL-006 subscriptions (source of truth, §5.5 D-03), TBL-007 payments | API-014, API-015, API-016, API-018, API-011 (gated), API-009 (`tier`, `proUntil`) | AC: tier derived from subscriptions; Pro bypasses limit; all suggestions visible; compare gated (ERR-025); cancel keeps Pro until period end; tier reverts automatically after `current_period_end` (test with clock skew). |
 | FR-012 Razorpay integration | CMP-007 | TBL-006 subscriptions, TBL-007 payments | API-014, API-018 | AC: webhook signature verified, events idempotent, payment records created. |
 | FR-013 Subscription management | CMP-001, CMP-007 | TBL-006, TBL-007 | API-015, API-016, API-017 | AC: view status, cancel, payment history. Re-subscribe after cancel. |
-| FR-014 Score comparison | CMP-001 | TBL-002, TBL-003 | API-011 | AC: 2 completed analyses compared side by side. Only owner can compare. |
+| FR-014 Score comparison | CMP-001 (`ProGuard`), CMP-003 | TBL-002, TBL-003, TBL-006 (entitlement) | API-011 | AC: free user → 403 ERR_PRO_REQUIRED; Pro user: 2 completed analyses compared side by side; only owner can compare. |
 | FR-015 List job roles | CMP-001, CMP-003 | TBL-005 job_roles | API-012 | AC: list returned, cached 1h in Redis. |
 | FR-016 Admin add job role | CMP-001 | TBL-005 job_roles | API-013 | AC: admin creates role, slug auto-generated, duplicate → 409, cache invalidated. |
-| FR-017 Retry failed analysis | CMP-001, CMP-005 | TBL-002, TBL-003, TBL-004 | API-010 | AC: only failed can retry, no extra credit consumed. Non-failed → 400. |
-| NFR-001 Analysis latency | CMP-005 | — (runtime metric) | API-005 | APM: p95 < 30s in staging load test. |
+| FR-017 Retry failed analysis | CMP-001, CMP-005, CMP-010 | TBL-002 (status → pending, attempts), TBL-003, TBL-004 | API-010 (202) | AC: only failed can retry, no extra credit reserved, returns 202 and re-enqueues. Non-failed → 400. |
+| NFR-001 Analysis latency | CMP-005, CMP-010 | TBL-002 (`created_at`, `started_at`, `completed_at`) | API-005, API-007 | APM + BullMQ timings: enqueue→terminal p95 < 30 s; queue wait p95 < 5 s; POST p95 < 500 ms in staging load test. |
 | NFR-002 API latency | CMP-001 | — (runtime metric) | All CRUD APIs | APM: p95 < 200ms for CRUD, < 500ms for PDF. |
 | NFR-003 Availability | CMP-009, CMP-001 | — (infra) | API-019 | Uptime monitor: 99.5% monthly on /health. |
 | NFR-004 Scalability | CMP-001, CMP-009 | — (infra) | — (ECS auto-scaling) | k6 load test: 500 concurrent users, 50 concurrent analyses. |
 | NFR-005 Data protection | CMP-004, CMP-001 | All tables | — (encryption, no PII in logs) | Security audit: S3 SSE-S3, RDS encryption, TLS, no PII in logs. |
 | NFR-006 Data retention | CMP-008, CMP-004 | TBL-001 resumes (expires_at) | — (cron job) | Test: create expired resume → run job → verify deleted. |
 | NFR-007 Observability | CMP-001 | — (runtime) | API-019 | Dashboard: structured logs, health endpoint, X-Request-Id tracing. |
-| NFR-008 AI failure handling | CMP-005 | TBL-002 analyses (status=failed) | API-005, API-010 | Chaos test: block OpenAI → analysis fails gracefully → retry works. |
+| NFR-008 AI failure handling | CMP-005, CMP-010 (BullMQ attempts 2) | TBL-002 analyses (status=failed, error_code) | API-007 (poll shows failure), API-010 | Chaos test: block OpenAI → job retries once → status failed with error_code, credit released → retry works. |
 | NFR-009 Testability | CMP-001 | — (CI) | — (jest) | CI: coverage ≥ 80%. All endpoints have integration tests. |
 
 ---
@@ -1381,3 +1520,4 @@ Every FR and NFR must appear here at least once. No empty cells — write `—` 
 |---|---|---|---|---|---|
 | v1.0 | 2026-10-22 | Sovan Kumar Bera | Initial specification — all 8 sections covering the SurfingBear Resume Optimizer (free tier). | First submission for Architecture Spec Homework. | All IDs (FR-001–FR-010, FR-015–FR-017, NFR-001–NFR-009, CR-001–CR-015, CMP-001–CMP-006, CMP-008–CMP-009, TBL-001–TBL-005, API-001–API-013, API-019, ERR-001–ERR-017, ERR-024) |
 | v1.1 | 2026-10-22 | Sovan Kumar Bera | **Round 2: Added Resume Pro paid plan (₹299/month via Razorpay).** Changes: (1) Added FR-011 (subscription), FR-012 (Razorpay integration), FR-013 (subscription management), FR-014 (score comparison). (2) Updated FR-006 acceptance criteria to distinguish free (top 3) vs. Pro (all) suggestions; added `totalSuggestions` field. (3) Updated FR-007 to note Pro users are exempt from the 3/month limit. (4) Added TBL-006 `subscriptions` and TBL-007 `payments`. (5) Added CMP-007 (Razorpay Integration). (6) Added API-014 through API-018 (subscription, cancel, payments, webhook). (7) Added ERR-018 through ERR-023. (8) Updated CR-006 to include `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `WEBHOOK_SECRET`. (9) Updated CR-012 to extend retention policy for Pro users. (10) Updated CR-014 to include Razorpay env config. (11) Updated architecture diagram and tech stack table. (12) Added Flow 3 sequence diagram (Razorpay subscription). (13) Updated traceability matrix with new FRs. | Requirement change: SurfingBear adding a paid tier to monetize the resume analysis feature. | FR-006, FR-007, FR-011, FR-012, FR-013, FR-014, CR-006, CR-012, CR-014, CMP-007, TBL-006, TBL-007, API-014, API-015, API-016, API-017, API-018, ERR-018, ERR-019, ERR-020, ERR-021, ERR-022, ERR-023 |
+| v1.2 | 2026-10-28 | Sovan Kumar Bera | **Review feedback (build test, Oct 28): removed the three ambiguities that caused most builder guesses.** (1) **D-01 Async analysis** — `POST /analyses` and `POST /analyses/:id/retry` now return 202 + poll; new CMP-010 Analysis Queue + Worker (BullMQ on Redis) with named queues, retry/backoff/timeout/concurrency values and a separate ECS service; Flow 2 rewritten; TBL-002 gains `attempts`, `started_at`, `error_code`; credit reservation/release defined (INCR at enqueue, DECR on fail); ERR-011/012 become `errorCode` on the resource instead of POST responses; NFR-001/NFR-008 restated for async. (2) **D-02 Upload path** — single design: multipart through the API, `PutObject` by the API, presigned URLs for download only; CMP-004, Flow 1, tech stack and API-001 aligned. (3) **D-03 Pro status** — new §5.5 Entitlement rules: tier derived from TBL-006 (no tier column), Redis cache `user_tier:{userId}` with TTL and invalidation points, expiry by `current_period_end` comparison + daily sweep (CMP-008), `ProGuard` on API-011, new ERR-025 `ERR_PRO_REQUIRED`, API-009 adds `proUntil`, API-018 events invalidate the cache; Flow 3 cache write changed to invalidation; new Flow 4. Added §4.6 Key design decisions. Traceability rows updated. No IDs renumbered. | Build-test feedback from the reviewer: the builder had to guess sync vs async, which upload design, and where Pro status lives / how it expires / where it is enforced. | FR-004, FR-007, FR-010, FR-011, FR-014, FR-017, NFR-001, NFR-008, CMP-003, CMP-004, CMP-005, CMP-008, CMP-010 (new), D-01–D-03 (new), TBL-002, §5.5 (new), API-001, API-005, API-007, API-009, API-010, API-011, API-018, ERR-024, ERR-025 (new), Flow 1–4 |
