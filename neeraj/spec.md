@@ -3,9 +3,9 @@
 | Field | Value |
 |---|---|
 | Author | Neeraj Gurjar |
-| Version | v0.11 |
-| Last updated | 2026-10-19 |
-| Status | Draft |
+| Version | v2.1 |
+| Last updated | 2026-10-27 |
+| Status | Review (round 2) |
 | Backend stack | NestJS 11 (TypeScript 5, Node.js 22 LTS) |
 | Frontend stack | Next.js 15 (App Router, React 19) |
 | Data stores | PostgreSQL 16, Redis 7 |
@@ -51,7 +51,9 @@ An acceptance criterion is referenced as `<requirement ID>.<number>`, for exampl
 | Platform | The main SurfingBear platform. It owns sign-up, login, billing and the user's plan. |
 | Module | This system, the Resume Optimizer. |
 | User | A person logged in to the platform. Identified only by the platform user ID (`sub` claim). |
-| Plan | `FREE` or `PRO`, read from the platform token on every request. |
+| Plan | `FREE` or `PRO`. Since v2.0 it comes from the user's Resume Pro entitlement in this module (FR-023), not from the platform token. |
+| Resume Pro | Monthly subscription of ₹299 bought in this module through Razorpay (FR-022). |
+| Paid until | `subscriptions.paid_until`: end of the last billing cycle that Razorpay has charged (FR-023). |
 | Resume | One uploaded file (PDF or DOCX) and the text extracted from it. |
 | Redacted text | Resume text after contact details and ID numbers are replaced by placeholders (§4.8.4). Only redacted text is stored and sent to the AI. |
 | Analysis | One AI evaluation of one resume for one job role and one experience level. |
@@ -79,7 +81,7 @@ Every number below is defined **once** here, and other sections refer to these n
 | `DOCX_MAX_ZIP_ENTRIES` | `1000` | FR-005, ERR-015 |
 | `PARSE_TIMEOUT_MS` | `15000` | FR-005, ERR-015 |
 | `FREE_MONTHLY_ANALYSES` | `3` | FR-007, API-001 (and example), API-009, ERR-023, §0.7 |
-| `PRO_MONTHLY_ANALYSES` | `30` | FR-007 (FR-007.5 example), API-001, API-009, ERR-023, §0.7 |
+| `PRO_MONTHLY_ANALYSES` | **Deprecated (v2.0).** Was `30`; Resume Pro has no monthly limit (FR-007.5, FR-023.3) | — |
 | `FREE_VISIBLE_SUGGESTIONS` | `3` | FR-012, FR-013 (FR-013.2 example), API-001 example, API-011, API-012, §4.3.3, §0.7 |
 | `MAX_SUGGESTIONS` | `10` | FR-010, §4.7.1 prompt rule 5, TBL-007 `ck_as__priority`, §5.1 ERD label |
 | `MAX_MISSING_SKILLS` | `15` | FR-009, §4.7.5 step 4, TBL-006 `ck_ams__order`, §5.1 ERD label |
@@ -94,6 +96,21 @@ Every number below is defined **once** here, and other sections refer to these n
 | `PARSE_STALE_AFTER_MS` | `300000` (5 min after `created_at`) | FR-005 |
 | `MAX_STORED_RESUMES` | `15` (non-expired resumes per user) | FR-004.9, API-005, ERR-035 message |
 | `MIN_LATIN_LETTER_RATIO` | `0.7` (share of Latin-script letters among all letters) | FR-005.10, §4.8.2 step 4 |
+| `PRO_PRICE_PAISE` | `29900` (₹299 per month, GST included, ASM-021) | FR-022, API-021, API-022, §4.9.1, §4.13.1, P-06 |
+| `PRO_TERMS_VERSION` | `RO-PRO-TERMS-2026-10` | FR-022, API-021, API-022, §4.9.1, TBL-011 |
+| `RAZORPAY_TOTAL_COUNT` | `120` (billing cycles requested for each Razorpay subscription; the longest term Razorpay needs to be told) | FR-022, §4.13.1 |
+| `CHECKOUT_EXPIRY_MS` | `1800000` (30 min; an unpaid checkout is reused only within this time) | FR-022, FR-026.6 |
+| `RENEWAL_GRACE_MS` | `86400000` (24 h after `paid_until` while a renewing subscription waits for its next charge) | FR-023.1, NFR-027 |
+| `PLAN_CACHE_TTL_S` | `60` | FR-023.2, NFR-027 |
+| `PAYMENT_RECORD_RETENTION_DAYS` | `2922` (8 years, ASM-020) | FR-019.10, FR-020.1, FR-024.7, NFR-013, TBL-011, §4.9.1, §5.8 |
+| `PAYMENT_EVENT_RETENTION_DAYS` | `90` | FR-020.1, TBL-013, §5.8 |
+| `PRO_FAIR_USE_DAILY_ALERT` | `100` (a Pro user with **more than** this many completed analyses in 24 h raises a cost alarm; nothing is blocked) | FR-023.3, §4.8.1, §4.11 |
+| `RAZORPAY_TIMEOUT_MS` | `5000` (timeout of each Razorpay API call; no automatic retries) (v2.1) | CMP-025, §4.4, §4.13.1 |
+| `PRO_ACTIVATION_POLL_MS` | `5000` (P-06 polls API-021 this often while activation is pending) (v2.1) | FR-022.7, P-06 |
+| `PRO_ACTIVATION_POLL_MAX_MS` | `120000` (P-06 stops polling after this long) (v2.1) | FR-022.7, P-06 |
+| `PAYMENTS_LIST_SIZE` | `12` (payments returned by API-021, newest first) (v2.1) | API-021 |
+| `RECONCILE_BATCH_SIZE` | `50` (subscriptions per batch in `subscription-reconcile`) (v2.1) | FR-026.6, §4.13.3 |
+| `RECONCILE_BATCH_GAP_MS` | `200` (pause between reconcile batches, to stay under Razorpay's rate limits) (v2.1) | FR-026.6, §4.13.3 |
 | `AI_MODEL` | `claude-opus-5-5` (read from the required env var `AI_MODEL`; this is its value in every environment) | §4.7 |
 | `AI_EFFORT` | `medium` | §4.7 |
 | `AI_MAX_TOKENS` | `16000` | §4.7 |
@@ -131,7 +148,7 @@ To keep the build deterministic, everything not listed here is specified somewhe
 
 ### 0.7 The system at a glance
 
-A logged-in SurfingBear user opens the Resume Optimizer, accepts the privacy notice once, uploads a resume (PDF or DOCX, at most 5 MiB), and picks a target job role and experience level. A background worker reads the file, removes contact details, and asks Claude to score the resume on six ATS dimensions, list missing skills, and suggest rewrites. The user sees the result in about a minute, can download it as a PDF, and can delete any of their data at any time. FREE users get 3 analyses per month and see 3 suggestions per analysis. PRO users get 30 analyses and see every suggestion.
+A logged-in SurfingBear user opens the Resume Optimizer, accepts the privacy notice once, uploads a resume (PDF or DOCX, at most 5 MiB), and picks a target job role and experience level. A background worker reads the file, removes contact details, and asks Claude to score the resume on six ATS dimensions, list missing skills, and suggest rewrites. The user sees the result in about a minute, can download it as a PDF, and can delete any of their data at any time. FREE users get 3 analyses per month and see 3 suggestions per analysis. Since v2.0, users can buy Resume Pro for ₹299 a month through Razorpay: Pro users get unlimited analyses, see every suggestion and can compare two analyses, and they can cancel at any time and keep Pro until the end of the paid month.
 
 ```mermaid
 flowchart LR
@@ -146,6 +163,10 @@ flowchart LR
   WK --> S3
   WK -->|redacted text| AI[Anthropic Claude API]
   A -->|JWKS| P[SurfingBear platform auth]
+  U -->|Checkout script| RZ[Razorpay]
+  A -->|subscriptions, payment check| RZ
+  WK -->|hourly reconcile| RZ
+  RZ -->|signed webhooks| A
 ```
 
 ---
@@ -158,10 +179,10 @@ These rules apply to every part of this module. Each rule has a check that a rev
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-001 | Authentication | Every endpoint under `/api/v1` requires a valid platform token, except API-019 and API-020 (health), which are marked `@Public()`. The module never issues, refreshes or stores tokens and has no login or sign-up endpoint. | e2e test calls every non-public route without a token and expects 401 `AUTH_REQUIRED` (ERR-001). Code review: no route outside `health/` uses `@Public()`. |
+| CR-001 | Authentication | Every endpoint under `/api/v1` requires a valid platform token, except API-019 and API-020 (health) and API-025 (Razorpay webhook, authenticated by its signature, CR-037), which are marked `@Public()`. The module never issues, refreshes or stores tokens and has no login or sign-up endpoint. | e2e test calls every non-public route without a token and expects 401 `AUTH_REQUIRED` (ERR-001). Code review: no route outside `health/` and `webhooks/` uses `@Public()`. |
 | CR-002 | Authentication | The token is a JWT signed by the platform with **RS256**. The API verifies it with `jose` against the platform JWKS (`AUTH_JWKS_URL`) and checks: `alg` is `RS256` (any other value, including `none` and `HS256`, is rejected), `iss` equals `AUTH_ISSUER`, `aud` contains `AUTH_AUDIENCE`, `exp` is in the future and `nbf` (if present) is in the past, both with 30 s clock tolerance, and `sub` matches `^[A-Za-z0-9_-]{1,64}$`. Any failure returns 401 `AUTH_TOKEN_INVALID` (ERR-002). | Unit tests for each failing check: wrong alg, wrong iss, wrong aud, expired, bad `sub`, unknown `kid`. |
 | CR-003 | Authentication | The browser sends the token in the httpOnly cookie named `AUTH_COOKIE_NAME` (`sb_access_token`), which the platform sets on `.surfingbear.com`. If no cookie is present, the API also accepts `Authorization: Bearer <jwt>` (used by automated tests and non-browser clients). If both are present, the cookie wins. Frontend JavaScript never reads or stores the token. | e2e tests for cookie, header, both. Code review: no `localStorage`/`sessionStorage` use for tokens in `apps/web`. |
-| CR-004 | Authentication (CSRF) | Every request with method `POST`, `PATCH`, `PUT` or `DELETE` MUST carry the header `X-Requested-With: SurfingBearRO` **and** an `Origin` header equal to `APP_ORIGIN`. Otherwise the API returns 403 `CSRF_CHECK_FAILED` (ERR-004). Reason: the auth cookie is sent automatically by the browser, and other `*.surfingbear.com` sites are "same-site", so `SameSite=Lax` alone does not stop cross-subdomain forgery. Clients that use the Bearer header (API e2e tests, k6 scripts) send the same two headers, with `Origin` set to the target environment's `APP_ORIGIN`. | e2e tests: POST without header, with wrong Origin, with both correct. |
+| CR-004 | Authentication (CSRF) | Every request with method `POST`, `PATCH`, `PUT` or `DELETE` MUST carry the header `X-Requested-With: SurfingBearRO` **and** an `Origin` header equal to `APP_ORIGIN`. Otherwise the API returns 403 `CSRF_CHECK_FAILED` (ERR-004). Reason: the auth cookie is sent automatically by the browser, and other `*.surfingbear.com` sites are "same-site", so `SameSite=Lax` alone does not stop cross-subdomain forgery. Clients that use the Bearer header (API e2e tests, k6 scripts) send the same two headers, with `Origin` set to the target environment's `APP_ORIGIN`. API-025 is exempt: Razorpay calls it server to server, and its signature (CR-037) replaces the CSRF check. | e2e tests: POST without header, with wrong Origin, with both correct. |
 | CR-005 | Authentication (JWKS failure) | `JwksProvider` (in `common/auth/jwks.provider.ts`) fetches `AUTH_JWKS_URL` with a 3000 ms timeout and keeps the last successfully fetched key set in memory. A background timer per process refreshes the set every 10 min (single-flight, never on the request path). A token with an unknown `kid`, or a request arriving when the last good set is older than 24 h, triggers one refetch on the request path (3000 ms timeout). After any failed fetch, the next fetch waits at least 60 s. If a refetch fails, it keeps verifying with the last good set for up to 24 h after that set was fetched. The 24 h window and the 60 s wait use the Clock (§2.2 rule 6); `jwtVerify` checks `exp` and `nbf` against the system time. A token whose `kid` is not in the usable set returns 401 `AUTH_TOKEN_INVALID` when the last fetch succeeded, and 503 `SERVICE_UNAVAILABLE` (ERR-011) when the last fetch failed or there is no usable set. Verification uses `jose.jwtVerify` with `algorithms: ['RS256']` and a key from `jose.createLocalJWKSet(lastGoodSet)`. | Unit tests: JWKS returns 500 with and without a cached set; unknown `kid`; set older than 24 h. |
 
 **Token claims contract (from the platform):**
@@ -181,17 +202,17 @@ These rules apply to every part of this module. Each rule has a check that a rev
 | Claim | Type | Use in this module |
 |---|---|---|
 | `sub` | string, 1–64 chars | The user ID. Stored as `user_id` in every table. |
-| `plan` | `"free"` or `"pro"` | Mapped to `FREE` / `PRO`. A missing or unknown value is treated as `FREE`. |
+| `plan` | `"free"` or `"pro"` | **Ignored since v2.0.** The plan comes from the module's own Resume Pro entitlement (FR-023, ASM-018); ASM-003 is deprecated. |
 | `roles` | string[] | If it contains `"ro_admin"`, the user also has the `RO_ADMIN` role. Missing means `[]`. |
 
-The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from the token is used or stored.
+The API puts `{ userId, plan, isAdmin }` on `request.user`: `userId` and `isAdmin` from the token, `plan` from `EntitlementService.planOf(userId)` (FR-023). Nothing else from the token is used or stored.
 
 ### 1.2 Roles and permissions
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-006 | Roles | There are three roles: `FREE_USER` (plan FREE), `PRO_USER` (plan PRO) and `RO_ADMIN` (has `ro_admin` in `roles`, in addition to their plan role). Roles are computed from the token on every request and never stored. A plan change on the platform takes effect on the next request that carries a new token. | Unit test of the role mapper. |
-| CR-007 | Object-level authorization | Every query on user data in TBL-002, TBL-003, TBL-004, TBL-008 and TBL-009 MUST include `user_id = request.user.userId`; TBL-005 to TBL-007 are read only through an analysis row that passed that filter. A resource that exists but belongs to another user returns 404 `NOT_FOUND` (ERR-008), never 403, so IDs cannot be probed. | e2e test: user B requests user A's resume, analysis and report and gets 404. Code review of every repository method. |
+| CR-006 | Roles | There are three roles: `FREE_USER` (plan FREE), `PRO_USER` (plan PRO) and `RO_ADMIN` (has `ro_admin` in `roles`, in addition to their plan role). `RO_ADMIN` is computed from the token on every request. Since v2.0 the plan role comes from the Resume Pro entitlement (FR-023), cached for at most `PLAN_CACHE_TTL_S` and invalidated on every subscription change. | Unit test of the role mapper; e2e test that a webhook makes the next request PRO. |
+| CR-007 | Object-level authorization | Every query on user data in TBL-002, TBL-003, TBL-004, TBL-008, TBL-009, TBL-011 and TBL-012 MUST include `user_id = request.user.userId`; TBL-005 to TBL-007 are read only through an analysis row that passed that filter. A resource that exists but belongs to another user returns 404 `NOT_FOUND` (ERR-008), never 403, so IDs cannot be probed. Exception (v2.1): API-025 (CMP-026) and `subscription-reconcile` (CMP-018) have no request user; they find a TBL-011 row only by the `razorpay_subscription_id` of a signed event or of a Razorpay response, and return no user data. | e2e test: user B requests user A's resume, analysis and report and gets 404. Code review of every repository method. |
 | CR-008 | Admin endpoints | Routes under `/api/v1/admin` require `RO_ADMIN` via `@Roles('RO_ADMIN')`. A user without it gets 403 `FORBIDDEN` (ERR-003). | e2e test with a non-admin token. |
 
 **Role × permission table**
@@ -204,13 +225,17 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | Read privacy notice, give consent (API-003, API-004) | ✗ | ✔️ | ✔️ | ✔️ |
 | Upload, list, view own resumes (API-005 to API-007) | ✗ | ✔️ (consent needed) | ✔️ (consent needed) | ✔️ (consent needed) |
 | Delete own resume (API-008) | ✗ | ✔️ | ✔️ | ✔️ |
-| Create analysis (API-009) | ✗ | ✔️ up to `FREE_MONTHLY_ANALYSES` per month | ✔️ up to `PRO_MONTHLY_ANALYSES` per month | ✔️ as their plan |
+| Create analysis (API-009) | ✗ | ✔️ up to `FREE_MONTHLY_ANALYSES` per month | ✔️ unlimited (rate limit and concurrency limit still apply) | ✔️ as their plan |
 | View own analyses (API-010, API-011) | ✗ | ✔️ first `FREE_VISIBLE_SUGGESTIONS` suggestions | ✔️ all suggestions | ✔️ as their plan |
 | Download own PDF report (API-012) | ✗ | ✔️ same gating as API-011 | ✔️ all suggestions | ✔️ as their plan |
 | Delete own analysis (API-013) | ✗ | ✔️ | ✔️ | ✔️ |
+| See plan and subscription, buy Resume Pro (API-021, API-022, API-023) | ✗ | ✔️ (buying needs consent and the Pro terms) | ✔️ (buying again returns `ALREADY_PRO`) | ✔️ as their plan |
+| Cancel Resume Pro (API-024) | ✗ | ✔️ (only a subscription that grants no Pro, FR-024.4) | ✔️ | ✔️ as their plan |
+| Compare two analyses (API-026) | ✗ | ✗ (`PRO_REQUIRED`, upsell shown) | ✔️ | ✔️ as their plan |
 | View own data summary, erase own data (API-014, API-015) | ✗ | ✔️ (no consent needed) | ✔️ (no consent needed) | ✔️ |
 | Manage job role catalog (API-016 to API-018) | ✗ | ✗ | ✗ | ✔️ |
 | See any other user's data | ✗ | ✗ | ✗ | ✗ (admins have no access to user data) |
+| Razorpay webhook (API-025) | Razorpay only, with a valid signature (CR-037) | ✗ | ✗ | ✗ |
 
 ✔️ = allowed, ✗ = not allowed. Text after a mark is the condition or limit.
 
@@ -220,7 +245,7 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 |---|---|---|---|
 | CR-009 | Log format | Logs are written by `nestjs-pino` to stdout as one JSON object per line with these fields: `time` (ISO 8601 UTC), `level` (lowercase label such as `info`, via `formatters.level`), `msg`, `service` (`ro-api` or `ro-worker`), `env` (`APP_ENV`), `requestId`, `userId` (platform `sub`, allowed because it is a pseudonymous ID), `method`, `route` (the route template, for example `/api/v1/analyses/:analysisId`, never the raw URL), `statusCode`, `durationMs`, `errorCode` (when present), `jobId` and `queue` (worker only). The Next.js server (`service: ro-web`) logs only startup, shutdown and server-side errors with `pino` in the same JSON format; it does not log requests (the ALB access log covers them). | Log sample review in CI e2e run: every line parses as JSON and has the required fields. |
 | CR-010 | Audit log | The actions listed in TBL-010 are written to `audit_events` with actor, entity ID and request ID, and are kept `AUDIT_RETENTION_DAYS` days. Audit metadata never contains personal data. | e2e test checks one audit row per action. |
-| CR-011 | No personal data in logs | Logs, metrics, traces, audit metadata and job payloads MUST NOT contain: resume text or any part of it, file names, AI prompts or AI responses, cookies, `Authorization` headers, IP addresses, email addresses, phone numbers. `nestjs-pino` MUST use the serializers `req: (r) => ({ method: r.method })` and `res: (r) => ({ statusCode: r.statusCode })`, and add `requestId`, `userId` and `route` through `customProps`, so headers, the URL with its query string and the remote address are never logged. As a second guard, `redact.paths` is `["req.headers.cookie", "req.headers.authorization", "req.headers[\"x-forwarded-for\"]", "req.remoteAddress", "res.headers[\"set-cookie\"]"]`. Request and response bodies are never logged. Job payloads contain only IDs, the request ID and the W3C `traceparent` string. | Automated scan of the staging log stream (NFR-016). Unit test on the logger config. |
+| CR-011 | No personal data in logs | Logs, metrics, traces, audit metadata and job payloads MUST NOT contain: resume text or any part of it, file names, AI prompts or AI responses, cookies, `Authorization` headers, IP addresses, email addresses, phone numbers. `nestjs-pino` MUST use the serializers `req: (r) => ({ method: r.method })` and `res: (r) => ({ statusCode: r.statusCode })`, and add `requestId`, `userId` and `route` through `customProps`, so headers, the URL with its query string and the remote address are never logged. As a second guard, `redact.paths` is `["req.headers.cookie", "req.headers.authorization", "req.headers[\"x-forwarded-for\"]", "req.remoteAddress", "res.headers[\"set-cookie\"]"]`. Request and response bodies are never logged. Job payloads contain only IDs, the request ID and the W3C `traceparent` string. Razorpay data is never logged: no webhook body, no `razorpay_signature`, no payer email, phone, card, UPI or bank detail. | Automated scan of the staging log stream (NFR-016). Unit test on the logger config. |
 | CR-012 | Request ID | If the request has an `X-Request-Id` header that is a UUID, it is used; otherwise the API generates a UUID v4. The ID is returned in the `X-Request-Id` response header, included in every log line and error body, and passed to worker jobs as `job.data.requestId`. | e2e test checks the header and error body. |
 | CR-013 | Log levels and retention | Levels: `debug` in local and dev, `info` in staging and prod. Logs go to CloudWatch Logs groups `/sb/ro/<env>/api`, `/sb/ro/<env>/worker`, `/sb/ro/<env>/web` with 365-day retention in prod and 30 days elsewhere. | Infrastructure code review. |
 
@@ -253,7 +278,7 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | `error.code` | string | Yes | One of §6.3. |
 | `error.message` | string | Yes | Localized (`en`, `hi` or `ko`). |
 | `error.details` | array of `{ field: string, issue: string }` | Yes (may be empty `[]`) | For `VALIDATION_FAILED`, one entry per invalid field. `field` is the dotted path of the input (`coreSkills.1.matchTerms.0`), the parameter name for path and query parameters, `body` for malformed JSON, and the multipart field name for upload errors. `issue` is the class-validator constraint key (for example `isUuid`, `maxLength`, `whitelistValidation`) or, for other codes, the text given in §6.3. Cases not produced by class-validator: malformed JSON → `{ field: "body", issue: "invalidJson" }`; Multer errors → `{ field: <multipart field name, or "file">, issue: <Multer error code, e.g. "LIMIT_UNEXPECTED_FILE"> }`; empty API-018 body → `{ field: "body", issue: "isNotEmptyObject" }`; duplicate skill names in `coreSkills` → `{ field: "coreSkills", issue: "uniqueSkillNames" }`. |
-| `error.meta` | object | Only for `QUOTA_EXCEEDED` and `RESUME_LIMIT_REACHED` (`{ "limit": 15 }`) | `{ "limit": 3, "used": 2, "inProgress": 1, "resetsAt": "2026-10-31T18:30:00.000Z" }` (`used` = consumed, `inProgress` = reserved, as in API-001). |
+| `error.meta` | object | Only for `QUOTA_EXCEEDED`, `RESUME_LIMIT_REACHED` (`{ "limit": 15 }`) and, since v2.0, `ALREADY_PRO` (`{ "proUntil": "<date-time>" }`) | `{ "limit": 3, "used": 2, "inProgress": 1, "resetsAt": "2026-10-31T18:30:00.000Z" }` (`used` = consumed, `inProgress` = reserved, as in API-001). |
 | `error.requestId` | string (UUID) | Yes | Same as the `X-Request-Id` header. |
 | `error.timestamp` | string (ISO 8601 UTC) | Yes | Server time. |
 
@@ -263,17 +288,18 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-017 | Secrets | Secrets (`ANTHROPIC_API_KEY`, `DATABASE_URL` and `REDIS_URL` (both contain passwords), `DATA_ENCRYPTION_KEYS`, `IP_HASH_SALT`) live in AWS Secrets Manager and are injected into ECS tasks as environment variables. No secret is committed to git; `.env` files are gitignored and only `.env.example` (no real values) is committed. CI runs `gitleaks` on every push and fails on any finding. | CI job `secrets-scan`. |
-| CR-018 | Configuration validation | All environment variables (§1.7) are validated at startup with a `zod` schema in `apps/api/src/config/env.schema.ts`. A missing or invalid variable stops the process with exit code 1 and a log line naming the variable (never its value). The file exports `dbEnvSchema` (`NODE_ENV`, `APP_ENV`, `DATABASE_URL`, `DATABASE_SSL`), `baseEnvSchema` (`dbEnvSchema` plus every API/worker variable of §1.7 that is not marked "API only" or "Worker only"), `apiEnvSchema` (base plus `PORT`) and `workerEnvSchema` (base plus `WORKER_*`). `main.ts` validates `apiEnvSchema`, `worker.ts` validates `workerEnvSchema`, and `data-source.ts`, `migrate.ts` and `run-seed.ts` validate `dbEnvSchema`; variables of another process are ignored. Code that runs outside the HTTP server (`data-source.ts`, `migrate.ts`, `run-seed.ts`, `cli/erase-user.ts`) first calls Node's `process.loadEnvFile('<repository root>/.env')` when that file exists. `cli/erase-user.ts` validates `baseEnvSchema` and starts `NestFactory.createApplicationContext(CliModule)`, where `CliModule` imports the config, TypeORM, Redis, storage, audit and privacy modules. | Unit test with a missing variable. |
+| CR-017 | Secrets | Secrets (`ANTHROPIC_API_KEY`, `DATABASE_URL` and `REDIS_URL` (both contain passwords), `DATA_ENCRYPTION_KEYS`, `IP_HASH_SALT`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`) live in AWS Secrets Manager and are injected into ECS tasks as environment variables. No secret is committed to git; `.env` files are gitignored and only `.env.example` (no real values) is committed. CI runs `gitleaks` on every push and fails on any finding. | CI job `secrets-scan`. |
+| CR-018 | Configuration validation | All environment variables (§1.7) are validated at startup with a `zod` schema in `apps/api/src/config/env.schema.ts`. A missing or invalid variable stops the process with exit code 1 and a log line naming the variable (never its value). The file exports `dbEnvSchema` (`NODE_ENV`, `APP_ENV`, `DATABASE_URL`, `DATABASE_SSL`), `baseEnvSchema` (`dbEnvSchema` plus every API/worker variable of §1.7 that is not marked "API only" or "Worker only"), `apiEnvSchema` (base plus `PORT`) and `workerEnvSchema` (base plus `WORKER_*`). `main.ts` validates `apiEnvSchema`, `worker.ts` validates `workerEnvSchema`, and `data-source.ts`, `migrate.ts` and `run-seed.ts` validate `dbEnvSchema`; variables of another process are ignored. Code that runs outside the HTTP server (`data-source.ts`, `migrate.ts`, `run-seed.ts`, `cli/erase-user.ts`) first calls Node's `process.loadEnvFile('<repository root>/.env')` when that file exists. `cli/erase-user.ts` validates `baseEnvSchema` and starts `NestFactory.createApplicationContext(CliModule)`, where `CliModule` imports the config, TypeORM, Redis, storage, audit and privacy modules and, since v2.0, the billing module with the Razorpay client (FR-019.10). | Unit test with a missing variable. |
 | CR-019 | CORS | The web app and the API share one origin: in AWS the load balancer routes `/api/*` to the API, and in local the Next.js dev server proxies `/api/*` to the API (`API_PROXY_TARGET`). The API therefore never enables CORS, in any environment. | e2e test: a preflight from another origin gets no `Access-Control-Allow-Origin`. |
 | CR-020 | Input validation | Every request DTO uses `class-validator`. The global `ValidationPipe` is created with `whitelist: true`, `forbidNonWhitelisted: true`, `transform: true`. Unknown fields return 400 `VALIDATION_FAILED` (ERR-006). JSON bodies larger than `JSON_BODY_LIMIT` return 413 `PAYLOAD_TOO_LARGE` (ERR-007). Path IDs are validated as UUID v4. | e2e tests with an unknown field, a bad UUID, a 101 kB body. |
-| CR-021 | Rate limiting | `@nestjs/throttler` with Redis storage (`@nest-lab/throttler-storage-redis`), keyed by `userId` (custom `getTracker` returns `request.user.userId`). Limits: default 120 requests / 60 s; API-005 10 / 3600 s; API-009 10 / 3600 s; API-012 30 / 3600 s; API-015 3 / 3600 s; API-019 and API-020 are excluded (`@SkipThrottle()`). Over the limit: 429 `RATE_LIMITED` (ERR-009) with `Retry-After`. Requests without a valid token are rejected by `PlatformJwtGuard` before throttling runs; floods of such requests are stopped by the AWS WAF rule that blocks an IP sending more than 1000 requests in 5 minutes. If the throttler's Redis storage fails, the request is allowed (fail open, `warn` log), so a Redis problem does not block reads. Throttler keys use the prefix `ro:throttle:`. | e2e test sends 11 uploads in a row and gets 429 on the 11th. |
-| CR-022 | Security headers | API uses `helmet` defaults. The web app's `middleware.ts` runs the next-intl middleware and then, for every page response, generates a nonce (`Buffer.from(crypto.randomUUID()).toString('base64')`), passes it to the app in the request header `x-nonce`, and sets `Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-<nonce>' 'strict-dynamic'` (plus `'unsafe-eval'` only when `NODE_ENV=development`, which `next dev` needs) `; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'` (Next.js applies the nonce to its own scripts; pages are therefore rendered dynamically). It also sets `Strict-Transport-Security: max-age=31536000; includeSubDomains`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. | ZAP baseline scan in staging (NFR-012); Playwright checks there are no CSP violations in the console. |
+| CR-021 | Rate limiting | `@nestjs/throttler` with Redis storage (`@nest-lab/throttler-storage-redis`), keyed by `userId` (custom `getTracker` returns `request.user.userId`). Limits: default 120 requests / 60 s; API-005 10 / 3600 s; API-009 10 / 3600 s; API-012 30 / 3600 s; API-015 3 / 3600 s; API-022 5 / 3600 s; API-023 10 / 3600 s; API-024 5 / 3600 s; API-019, API-020 and API-025 are excluded (`@SkipThrottle()`; Razorpay retries webhooks and is limited only by the WAF rule). Over the limit: 429 `RATE_LIMITED` (ERR-009) with `Retry-After`. Requests without a valid token are rejected by `PlatformJwtGuard` before throttling runs; floods of such requests are stopped by the AWS WAF rule that blocks an IP sending more than 1000 requests in 5 minutes. If the throttler's Redis storage fails, the request is allowed (fail open, `warn` log), so a Redis problem does not block reads. Throttler keys use the prefix `ro:throttle:`. | e2e test sends 11 uploads in a row and gets 429 on the 11th. |
+| CR-022 | Security headers | API uses `helmet` defaults. The web app's `middleware.ts` runs the next-intl middleware and then, for every page response, generates a nonce (`Buffer.from(crypto.randomUUID()).toString('base64')`), passes it to the app in the request header `x-nonce`, and sets `Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-<nonce>' 'strict-dynamic'` (plus `'unsafe-eval'` only when `NODE_ENV=development`, which `next dev` needs) `; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://cdn.razorpay.com; font-src 'self'; connect-src 'self' https://api.razorpay.com https://lumberjack.razorpay.com; frame-src https://api.razorpay.com https://checkout.razorpay.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'` (the Razorpay entries, added in v2.0, let Razorpay Checkout run on P-06; its script `https://checkout.razorpay.com/v1/checkout.js` is loaded with the page nonce, so `'strict-dynamic'` allows it) (Next.js applies the nonce to its own scripts; pages are therefore rendered dynamically). It also sets `Strict-Transport-Security: max-age=31536000; includeSubDomains`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. | ZAP baseline scan in staging (NFR-012); Playwright checks there are no CSP violations in the console. |
 | CR-023 | Encryption | TLS 1.2 or higher on every external connection (ALB policy `ELBSecurityPolicy-TLS13-1-2-2021-06`; RDS and ElastiCache connections use TLS). At rest: RDS and ElastiCache encrypted with AWS KMS; S3 objects use SSE-KMS; the full redacted resume text is additionally encrypted by the application with AES-256-GCM (§5.6). Short resume quotes stored with suggestions (TBL-007) rely on RDS encryption only (NFR-013 states their retention). | Infrastructure review, NFR-010, NFR-011. |
 | CR-024 | Untrusted files | Uploaded files are never executed, rendered in a browser or parsed in the API process. They are parsed only in the worker (CMP-015) inside a `worker_threads` thread with `resourceLimits.maxOldGenerationSizeMb = 512` and a `PARSE_TIMEOUT_MS` timeout. PDF parsing runs with `isEvalSupported: false`. DOCX macros and embedded objects are ignored. | Unit tests with a zip bomb, a 6-page PDF, a password-protected PDF. |
 | CR-025 | Data retention | Personal data is kept only as long as the table in §3.2 NFR-013 says, then deleted by FR-020. Non-production environments contain only synthetic data; production data is never copied to another environment. | Retention job tests; access policy review. |
 | CR-026 | Dependencies | CI runs `npm audit --omit=dev --audit-level=high` and fails on any high or critical finding. Dependabot opens weekly update PRs. | CI job `deps-audit`. |
 | CR-027 | Prompt injection | Resume text is untrusted. It is passed to the AI only inside `<resume_text>` tags, the system prompt tells the model to ignore instructions inside it (§4.7.1), and the AI output is validated against a strict schema (§4.7.2) before use. The AI has no tools and no access to other data. | Unit test with a resume containing "Ignore previous instructions". |
+| CR-037 | Payment security | Card, UPI and bank details never reach the module: payments are made in Razorpay Checkout (PCI DSS scope stays with Razorpay, SAQ A for SurfingBear). Every checkout callback (API-023) and every webhook (API-025) is accepted only after an HMAC-SHA256 signature check with a constant-time compare (`crypto.timingSafeEqual`): checkout `HMAC(razorpay_payment_id + "\|" + razorpay_subscription_id, RAZORPAY_KEY_SECRET)`, webhook `HMAC(raw request body, RAZORPAY_WEBHOOK_SECRET)`, both lowercase hex. The price comes only from the Razorpay plan `RAZORPAY_PLAN_ID`, never from the client. `RAZORPAY_KEY_ID` is the only Razorpay value sent to the browser. | Unit tests with valid, changed and missing signatures; code review; `gitleaks`. |
 
 ### 1.6 Internationalization (i18n)
 
@@ -298,13 +324,14 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | `AUTH_JWKS_URL` | `http://localhost:4100/.well-known/jwks.json` | `<AUTH_ISSUER>/.well-known/jwks.json` | `<AUTH_ISSUER>/.well-known/jwks.json` | `<AUTH_ISSUER>/.well-known/jwks.json` |
 | `PLATFORM_LOGIN_URL` | `http://localhost:4100/dev/login` | `https://dev.surfingbear.com/login` | `https://staging.surfingbear.com/login` | `https://surfingbear.com/login` |
 | `PLATFORM_HOME_URL` | `http://localhost:4100/` | `https://dev.surfingbear.com/` | `https://staging.surfingbear.com/` | `https://surfingbear.com/` |
-| `PLATFORM_UPGRADE_URL` | `http://localhost:4100/pricing` | `https://dev.surfingbear.com/pricing?ref=resume-optimizer` | `https://staging.surfingbear.com/pricing?ref=resume-optimizer` | `https://surfingbear.com/pricing?ref=resume-optimizer` |
+| `PLATFORM_UPGRADE_URL` | **Deprecated (v2.0)**: the upgrade link now opens P-06 in this module | — | — | — |
 | AI | `AI_MODE=mock` (deterministic fake, §4.7.6) | `live`, Anthropic workspace `ro-dev` | `live`, workspace `ro-staging` | `live`, workspace `ro-prod` |
 | PostgreSQL | `postgres:16-alpine` container | RDS `db.t4g.small`, single-AZ | RDS `db.t4g.medium`, single-AZ | RDS `db.m7g.large`, Multi-AZ, PITR 7 days |
 | Redis | `redis:7-alpine` container | ElastiCache `cache.t4g.micro` | `cache.t4g.small` | `cache.r7g.large`, 1 replica, Multi-AZ |
 | S3 | LocalStack 3 | bucket `sb-ro-resumes-dev` | `sb-ro-resumes-staging` | `sb-ro-resumes-prod` |
 | Log level | `debug` | `debug` | `info` | `info` |
 | Data | Synthetic | Synthetic | Synthetic | Real |
+| Payments (v2.0) | `PAYMENT_MODE=mock` (§4.13.4) | Razorpay test mode | Razorpay test mode | Razorpay live mode |
 | Deploy trigger | — | Every merge to `main` | Every tag `v*.*.*` | Same tag, after manual approval |
 
 **Environment variables (API and worker):**
@@ -322,7 +349,7 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | `AUTH_ISSUER` | `http://localhost:4100` | Yes | prod: `https://auth.surfingbear.com` |
 | `AUTH_AUDIENCE` | `resume-optimizer` | Yes | |
 | `AUTH_COOKIE_NAME` | `sb_access_token` | Yes | |
-| `PLATFORM_UPGRADE_URL` | `http://localhost:4100/pricing` | Yes | prod: `https://surfingbear.com/pricing?ref=resume-optimizer` |
+| `PLATFORM_UPGRADE_URL` | — | No | **Deprecated (v2.0)**, no longer read; `upgradeUrl` is `<APP_ORIGIN>/<locale>/pro` (FR-012.2) |
 | `AI_MODE` | `mock` | Yes | `mock` or `live`; `mock` is rejected when `APP_ENV=prod` |
 | `AI_MODEL` | `claude-opus-5-5` | Yes | |
 | `AI_MOCK_DELAY_MS` | `1000` | No | Delay of `MockAiClient` (§4.7.6); default `1000` |
@@ -335,6 +362,11 @@ The API puts `{ userId, plan, isAdmin }` on `request.user`. Nothing else from th
 | `DATA_ENCRYPTION_KEYS` | `{"1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}` (32 zero bytes; local and CI only) | Yes | Secret. JSON map version → base64 key; zod checks every value decodes to exactly 32 bytes, and rejects the all-zero key when `APP_ENV` is `staging` or `prod` |
 | `DATA_ENCRYPTION_ACTIVE_KEY_VERSION` | `1` | Yes | Must exist in the map |
 | `IP_HASH_SALT` | `local-dev-salt-not-a-secret-0000000` (local and CI only) | Yes | Secret, at least 32 characters (zod) |
+| `PAYMENT_MODE` | `mock` | Yes | `mock` or `live`; `mock` is rejected when `APP_ENV=prod` (§4.13.4) |
+| `RAZORPAY_KEY_ID` | `rzp_test_localdummy0000` | When `PAYMENT_MODE=live` | Public key id, also sent to the browser in API-022 |
+| `RAZORPAY_KEY_SECRET` | `local-dummy-razorpay-secret` | When `PAYMENT_MODE=live` | Secret (CR-017, CR-037) |
+| `RAZORPAY_WEBHOOK_SECRET` | `local-dummy-webhook-secret` | Yes, in both modes (API-025 always checks the HMAC; tests sign their fixture events with it) | Secret; the same value is entered in the Razorpay dashboard webhook (§4.13.1) |
+| `RAZORPAY_PLAN_ID` | `plan_localdummy0000` | When `PAYMENT_MODE=live` | Razorpay plan of `PRO_PRICE_PAISE` per month, one per environment (§4.13.1) |
 | `GRIEVANCE_EMAIL` | `grievance@surfingbear.com` | Yes | Shown in the notice (ASM-011) |
 | `LOG_LEVEL` | `debug` | Yes | |
 | `METRICS_PORT` | `9464` | Yes | Prometheus `/metrics`, not exposed through the ALB. In AWS API and worker both use `9464` (separate tasks). Locally the root script `dev:worker` starts the worker with `METRICS_PORT=9465` (via `cross-env`), so both can run on one laptop. When `NODE_ENV=test` no `/metrics` server is started, and each Nest application registers its metrics on its own `prom-client` `Registry` instance, so API and worker modules can run in one Jest process |
@@ -360,7 +392,7 @@ Locally and in CI, one `.env` file at the repository root (copied from the commi
 | CR-032 | CI | GitHub Actions workflow `ci.yml` runs on every pull request and every push to `main`, with the jobs listed in §4.12.5. A PR cannot merge unless all jobs pass. | Branch protection on `main` requires every `ci.yml` job. |
 | CR-033 | Release | Workflow `deploy.yml` (steps in §4.12.6): on push to `main`, build two Docker images (`sb-ro-api` and `sb-ro-web`, §4.12.4; the worker uses the `sb-ro-api` image with command `node dist/worker.js`), tag them with the git SHA, push to the ECR repositories of the same names, run migrations as a one-off ECS task (`node dist/database/migrate.js`), then update the ECS services in dev. On tag `v<major>.<minor>.<patch>`, the same images are deployed to staging, then to prod after one approval in the GitHub environment `production` (Tech Lead). After each deploy a smoke test calls API-019 and API-020 (must return 200), `GET /healthz` on the web app (must return 200), and API-002 without a token (must return 401 `AUTH_REQUIRED`, which proves routing and the auth guard without needing a real user token). | Workflow review; deployment history. |
 | CR-034 | Rollback | ECS deployment circuit breaker with automatic rollback is on for every service. Manual rollback: run `deploy.yml` with `workflow_dispatch` inputs `environment` (`dev`, `staging` or `prod`) and `imageTag=<previous SHA>`; it skips the build and migration steps and redeploys that tag. Target: rollback finished within 15 min. Migrations are never rolled back in prod. | Rollback drill in staging once per quarter. |
-| CR-035 | Database migrations | TypeORM `synchronize` is `false` in every environment, including local. Schema changes ship only as TypeORM migration files in `apps/api/src/database/migrations`. A release may only add tables, columns (nullable or with a default) or indexes ("expand"). Dropping or renaming happens in a later release, after no deployed code uses the old shape ("contract"). | Code review checklist; CI runs `migration:run`, then `migration:revert` until no migration is left, then `migration:run` again, on an empty DB (§4.12.5 job 6). |
+| CR-035 | Database migrations | TypeORM `synchronize` is `false` in every environment, including local. Schema changes ship only as TypeORM migration files in `apps/api/src/database/migrations`. A release may only add tables, columns (nullable or with a default) or indexes, widen a `varchar`, or replace a CHECK constraint with one that accepts every value the old one accepted ("expand"; TBL-010 uses the last two in v2.0). Dropping or renaming happens in a later release, after no deployed code uses the old shape ("contract"). | Code review checklist; CI runs `migration:run`, then `migration:revert` until no migration is left, then `migration:run` again, on an empty DB (§4.12.5 job 6). |
 | CR-036 | Zero-downtime deploy | ECS rolling deploy with `minimumHealthyPercent: 100`, `maximumPercent: 200`. The ALB target group health check is `GET /api/v1/health/ready` (API) and `GET /healthz` (web: a route handler `app/healthz/route.ts` that returns `200 ok`, excluded from the next-intl middleware matcher), interval 15 s, healthy threshold 2. Worker tasks stop gracefully: on `SIGTERM` they stop taking new jobs and finish running jobs within 120 s (`stopTimeout: 120`). | Staging deploy under load test shows 0 failed requests. |
 
 ---
@@ -442,7 +474,10 @@ surfingbear-resume-optimizer/
 │   │   │   │   ├── catalog/      # API-002
 │   │   │   │   ├── privacy/      # API-003, API-004, API-014, API-015
 │   │   │   │   ├── resumes/      # API-005 .. API-008
-│   │   │   │   ├── analyses/     # API-009 .. API-011, API-013
+│   │   │   │   ├── analyses/     # API-009 .. API-011, API-013, API-026 (compare.service.ts, v2.0)
+│   │   │   │   ├── billing/      # API-021 .. API-024, entitlement.service.ts, razorpay/ (razorpay.client.ts interface,
+│   │   │   │   │                 # live-razorpay.client.ts, mock-razorpay.client.ts) (v2.0)
+│   │   │   │   ├── webhooks/     # API-025 razorpay-webhook.controller.ts (v2.0)
 │   │   │   │   ├── usage/        # quota reserve / commit / release (used by analyses, worker)
 │   │   │   │   ├── reports/      # API-012 (pdfmake)
 │   │   │   │   ├── admin/        # API-016 .. API-018
@@ -474,10 +509,12 @@ surfingbear-resume-optimizer/
 │       │   ├── middleware.ts     # next-intl routing + CSP nonce (CR-022); matcher excludes /api, /healthz, static files
 │       │   ├── app/healthz/route.ts  # web health check (CR-036)
 │       │   ├── app/[locale]/     # layout.tsx, page.tsx (P-01), analyses/page.tsx (P-03),
-│       │   │                     # analyses/[analysisId]/page.tsx (P-02), privacy/page.tsx (P-04)
+│       │   │                     # analyses/[analysisId]/page.tsx (P-02), privacy/page.tsx (P-04),
+│       │   │                     # analyses/compare/page.tsx (P-05), pro/page.tsx (P-06) (v2.0)
 │       │   ├── components/       # ConsentDialog, UploadPanel, RoleLevelForm, ScoreGauge,
 │       │   │                     # DimensionList, MissingSkills, SuggestionCard, LockedSuggestions,
-│       │   │                     # HistoryTable, DeleteDataDialog, Header, LanguageSwitcher
+│       │   │                     # HistoryTable, DeleteDataDialog, Header, LanguageSwitcher,
+│       │   │                     # ProPlanCard, ProTermsDialog, CompareView, ProUpsell (v2.0)
 │       │   ├── lib/api/          # client.ts (fetch wrapper), endpoints.ts, types.ts (from §6)
 │       │   ├── lib/constants.ts  # the (web) constants of §0.5
 │       │   ├── lib/runtime-config.tsx  # RuntimeConfigProvider, useRuntimeConfig (§1.7)
@@ -596,27 +633,32 @@ Priority: **Must** = needed for launch; **Should** = planned for launch, can sli
 
 | ID | Title | Description | Priority | Acceptance criteria |
 |---|---|---|---|---|
-| FR-001 | Platform-authenticated access | Any user logged in to the SurfingBear platform can use the module without a separate login. The module trusts the platform token (§1.1). | Must | 1. A request with a valid token reaches the endpoint and `request.user.userId` equals the token `sub`. 2. A request without a token returns 401 `AUTH_REQUIRED`. 3. A request with an expired, wrongly signed, wrong-issuer or wrong-audience token returns 401 `AUTH_TOKEN_INVALID`. 4. When the web app receives 401 from any API call, it redirects the browser to `PLATFORM_LOGIN_URL?returnTo=<URL-encoded current URL>` within 1 s. 5. `plan: "pro"` gives PRO limits; `plan: "free"`, a missing `plan` or any other value gives FREE limits. 6. `roles` containing `ro_admin` allows API-016 to API-018; otherwise they return 403 `FORBIDDEN`. |
-| FR-002 | Privacy notice and consent | Before any resume is processed, the user reads the privacy notice (§4.9) and gives consent, as required by DPDP Act section 6. Consent is recorded with the notice version. | Must | 1. API-001 returns `consent.required = true` when the user has no `ACTIVE` consent row for `NOTICE_VERSION`. 2. While `consent.required` is true, API-005, API-006, API-007, API-009, API-010, API-011 and API-012 return 403 `CONSENT_REQUIRED`. All other endpoints (API-001 to API-004, API-008, API-013 to API-020) work without consent, so a user can always read the notice, see and delete their data, and admins can manage the catalog. 3. API-004 with `noticeVersion = NOTICE_VERSION` creates one `ACTIVE` row in TBL-002 (locale, hashed IP, timestamp) and returns 201. 4. API-004 with any other `noticeVersion` returns 409 `CONSENT_VERSION_MISMATCH` and creates nothing. 5. Accepting again when an `ACTIVE` row for the same version exists returns 200 with the existing consent and creates nothing. 6. When `NOTICE_VERSION` changes, every older `ACTIVE` consent no longer counts; on acceptance of the new version the old row becomes `SUPERSEDED` with `ended_at` = the Clock time (§2.2 rule 6), in the same transaction. 7. The consent check result is cached in Redis key `ro:consent:<NOTICE_VERSION>:<userId>` for `CONSENT_CACHE_TTL_S` seconds with value `1` (active consent for that version) or `0` (none); the key is deleted on accept and on erasure. Because the version is part of the key, changing `NOTICE_VERSION` never reuses an old cached result. The cache is used only for `GET` requests; `POST`, `PATCH`, `PUT` and `DELETE` always read TBL-002. If Redis fails, the guard reads TBL-002 directly. Deleting the key after accept or erasure is best-effort: a failure is logged at `warn` and does not change the response. If two accept requests race and the second hits the unique index `ux_consents__user_id_active` (SQLSTATE `23505`), it re-reads the active row and returns 200 with it (FR-002.5). 8. The web app shows the notice in the current locale (`en`, `hi` or `ko`) in a blocking dialog on P-01, P-02 and P-03; the Accept button is enabled only after the user ticks "I have read and agree". |
+| FR-001 | Platform-authenticated access | Any user logged in to the SurfingBear platform can use the module without a separate login. The module trusts the platform token (§1.1). | Must | 1. A request with a valid token reaches the endpoint and `request.user.userId` equals the token `sub`. 2. A request without a token returns 401 `AUTH_REQUIRED`. 3. A request with an expired, wrongly signed, wrong-issuer or wrong-audience token returns 401 `AUTH_TOKEN_INVALID`. 4. When the web app receives 401 from any API call, it redirects the browser to `PLATFORM_LOGIN_URL?returnTo=<URL-encoded current URL>` within 1 s. 5. (changed v2.0) The plan comes from the Resume Pro entitlement (FR-023); the token's `plan` claim is ignored, whatever its value. 6. `roles` containing `ro_admin` allows API-016 to API-018; otherwise they return 403 `FORBIDDEN`. |
+| FR-002 | Privacy notice and consent | Before any resume is processed, the user reads the privacy notice (§4.9) and gives consent, as required by DPDP Act section 6. Consent is recorded with the notice version. | Must | 1. API-001 returns `consent.required = true` when the user has no `ACTIVE` consent row for `NOTICE_VERSION`. 2. While `consent.required` is true, API-005, API-006, API-007, API-009, API-010, API-011, API-012, API-022 and API-026 return 403 `CONSENT_REQUIRED`. All other endpoints (API-001 to API-004, API-008, API-013 to API-021, API-023 to API-025) work without consent, so a user can always read the notice, see and delete their data, and admins can manage the catalog. 3. API-004 with `noticeVersion = NOTICE_VERSION` creates one `ACTIVE` row in TBL-002 (locale, hashed IP, timestamp) and returns 201. 4. API-004 with any other `noticeVersion` returns 409 `CONSENT_VERSION_MISMATCH` and creates nothing. 5. Accepting again when an `ACTIVE` row for the same version exists returns 200 with the existing consent and creates nothing. 6. When `NOTICE_VERSION` changes, every older `ACTIVE` consent no longer counts; on acceptance of the new version the old row becomes `SUPERSEDED` with `ended_at` = the Clock time (§2.2 rule 6), in the same transaction. 7. The consent check result is cached in Redis key `ro:consent:<NOTICE_VERSION>:<userId>` for `CONSENT_CACHE_TTL_S` seconds with value `1` (active consent for that version) or `0` (none); the key is deleted on accept and on erasure. Because the version is part of the key, changing `NOTICE_VERSION` never reuses an old cached result. The cache is used only for `GET` requests; `POST`, `PATCH`, `PUT` and `DELETE` always read TBL-002. If Redis fails, the guard reads TBL-002 directly. Deleting the key after accept or erasure is best-effort: a failure is logged at `warn` and does not change the response. If two accept requests race and the second hits the unique index `ux_consents__user_id_active` (SQLSTATE `23505`), it re-reads the active row and returns 200 with it (FR-002.5). 8. The web app shows the notice in the current locale (`en`, `hi` or `ko`) in a blocking dialog on P-01, P-02 and P-03; the Accept button is enabled only after the user ticks "I have read and agree". |
 | FR-003 | Job role and experience level catalog | The user picks a target job role from a fixed catalog and one of five experience levels. | Must | 1. API-002 returns all job roles with `is_active = true`, ordered by `display_order` then `code`, with `name` in the request locale. 2. API-002 returns exactly the five levels `FRESHER`, `JUNIOR`, `MID`, `SENIOR`, `LEAD` in that order with labels and year ranges from §5.5. 3. Every environment contains the 12 seed roles from §5.5: the migration task (`node dist/database/migrate.js`) runs pending migrations and then the seed, and `npm run db:seed` runs the same seed locally. The seed uses `INSERT … ON CONFLICT (code) DO NOTHING`, so it never changes an existing row (admin edits and deactivations survive) and running it twice leaves 12 rows. 4. The API-002 response is cached in Redis key `ro:catalog:v1:<locale>` for `CATALOG_CACHE_TTL_S` seconds and the cache is deleted when an admin creates or updates a role. A Redis error on cache read or write falls back to the database with a `warn` log; the delete after an admin change is best-effort. 5. Inactive roles never appear in API-002. |
 | FR-004 | Upload resume | The user uploads one resume file. The API checks size and type, stores the raw file in S3 temporarily and queues it for parsing. | Must | 1. Accepted: files whose name ends in `.pdf` (case-insensitive) and whose first 5 bytes are `%PDF-`, or whose name ends in `.docx` and whose first 4 bytes are `50 4B 03 04` (ZIP) or first 8 bytes are `D0 CF 11 E0 A1 B1 1A E1` (encrypted Office file). The client-sent MIME type is ignored. 2. Any other file returns 415 `UNSUPPORTED_FILE_TYPE`, including `.doc`, `.txt`, images and a `.pdf` whose bytes are not PDF. 3. A file larger than `MAX_FILE_SIZE_BYTES` returns 413 `FILE_TOO_LARGE`; a file of exactly `MAX_FILE_SIZE_BYTES` is accepted. 4. A request without a `file` part, or with a 0-byte file, returns 400 `FILE_REQUIRED`. 5. On success, in this order: (a) `PutObject` to S3 key `uploads/<yyyy>/<mm>/<dd>/<resumeId>.<pdf\|docx>` (UTC date of the upload; bucket-default SSE-KMS, no SSE headers sent); (b) insert and commit a TBL-003 row with `parse_status = PENDING` and `expires_at = created_at + RESUME_RETENTION_DAYS`; (c) enqueue job `resume-parse` with `jobId = resumeId`; (d) write audit `RESUME_UPLOADED` (if this insert fails, it is logged at `error` and the response is still 201, CMP-012); (e) return 201 with the resume (API-005). The row is committed before enqueueing, so the worker always finds it. 6. If any of (a)–(c) fails: delete the TBL-003 row if it was inserted, delete the S3 object (best effort) and return 503 `SERVICE_UNAVAILABLE`; no TBL-003 row and no audit row remain. 7. The original file name is sanitized (path parts removed, control characters removed, trimmed to 255 characters) and stored; it is never logged. 8. Rate limit: 10 uploads per user per hour (CR-021). 9. A user who already has `MAX_STORED_RESUMES` non-expired resumes gets 409 `RESUME_LIMIT_REACHED` with `error.meta = { limit }` and must delete one first (FR-016). The count and the insert run in one transaction holding `pg_advisory_xact_lock(hashtext('resumes:' \|\| user_id))`, so parallel uploads cannot exceed the limit; when the limit is hit after `PutObject`, the S3 object is deleted. |
 | FR-005 | Parse and redact resume | The worker extracts text from the file, checks it, removes contact details and ID numbers, encrypts the result and deletes the raw file. | Must | 1. A PDF with more than `MAX_PDF_PAGES` pages becomes `FAILED` with `RESUME_TOO_LONG` without extracting text. 2. A password-protected PDF, or a DOCX that is an encrypted Office file, becomes `FAILED` with `RESUME_ENCRYPTED`. 3. A file that cannot be opened, a DOCX with more than `DOCX_MAX_ZIP_ENTRIES` entries or more than `DOCX_MAX_UNCOMPRESSED_BYTES` uncompressed, a DOCX without `word/document.xml`, or parsing that takes longer than `PARSE_TIMEOUT_MS`, becomes `FAILED` with `RESUME_CORRUPT`. 4. Normalized text (§4.8.3) shorter than `MIN_TEXT_CHARS` becomes `FAILED` with `RESUME_NO_TEXT`; longer than `MAX_TEXT_CHARS` becomes `FAILED` with `RESUME_TOO_LONG`. 5. On success: `parse_status = PARSED`, `char_count`, `page_count` (PDF only), `parsed_at` set; `text_enc` holds the redacted text (§4.8.4) encrypted with AES-256-GCM (§5.6). 6. After success **or** failure (including the `INTERNAL_ERROR` paths of FR-005.8 and §4.8.1) the raw S3 object is deleted and `storage_key` set to NULL. If deletion fails it is logged at `warn` and the S3 lifecycle rule (expiry after `RAW_FILE_LIFECYCLE_DAYS` day) removes the object within `RAW_FILE_MAX_HOURS` hours. 7. Applying the §4.8.4 rules to the stored redacted text changes nothing, i.e. it contains no email, URL, Aadhaar or PAN match and no phone match with 10–13 digits (unit tests with fixtures). 8. A resume still `PENDING` `PARSE_STALE_AFTER_MS` after `created_at` is set to `FAILED` with `INTERNAL_ERROR` by the maintenance job (FR-020). 9. p95 time from upload to `PARSED` ≤ 5 s (NFR-003). 10. Normalized text in which Latin-script letters are fewer than `MIN_LATIN_LETTER_RATIO` of all letters becomes `FAILED` with `RESUME_LANGUAGE_UNSUPPORTED`, so a resume written in Devanagari or another script is rejected before any AI call or quota use; English resumes in Latin script that the AI still detects as another language fail later (FR-008.6). |
 | FR-006 | Create analysis | The user starts an analysis for a parsed resume, a job role and an experience level. The work runs in the background. | Must | 1. API-009 with a valid body returns 202 with `status = QUEUED` and a `Location` header, inserts a TBL-004 row (`plan_at_creation`, `period_month`, `prompt_version = PROMPT_VERSION`, `expires_at = created_at + ANALYSIS_RETENTION_DAYS`) and enqueues job `resume-analysis` with `jobId = analysisId`. 2. After the global guards (authentication, CSRF, rate limit, consent; CMP-004), checks run in this order and the first failure is returned: body validation (`VALIDATION_FAILED`) → resume exists, is owned and has not expired (`NOT_FOUND`) → resume `PENDING` (`RESUME_NOT_READY`) → resume `FAILED` (`RESUME_PARSE_FAILED`) → job role exists (`NOT_FOUND`) and is active (`JOB_ROLE_UNAVAILABLE`) → same resume + role + level already `QUEUED`/`PROCESSING` (`DUPLICATE_ANALYSIS`) → user already has `MAX_CONCURRENT_ANALYSES` analyses `QUEUED`/`PROCESSING` (`CONCURRENT_ANALYSIS_LIMIT`) → quota (FR-007, `QUOTA_EXCEEDED`). 3. The duplicate, concurrency and quota checks run inside one transaction that holds a row lock on the user's TBL-008 row, so two parallel requests can never both pass when only one slot is left. Inside that transaction the resume is read again with `SELECT … FOR SHARE` (gone → `NOT_FOUND`), and API-008 locks the resume row `FOR UPDATE` before its `RESUME_IN_USE` check, so a resume cannot be deleted while an analysis of it is being created. 4. If enqueueing fails after the row is committed, the analysis is set to `FAILED` with `INTERNAL_ERROR`, the reservation is released, and the API returns 503 `SERVICE_UNAVAILABLE`. 5. Rate limit: 10 creations per user per hour (CR-021). |
-| FR-007 | Monthly quota | FREE users may complete `FREE_MONTHLY_ANALYSES` analyses per period month and PRO users `PRO_MONTHLY_ANALYSES`. Only completed analyses count. | Must | 1. The period month is the calendar month in `QUOTA_TIME_ZONE` at the moment the analysis is created; an analysis created at 23:59 IST on the 31st counts for that month even if it completes on the 1st. 2. Creating an analysis adds 1 to `reserved_count`; completion moves it to `consumed_count` (reserved −1, consumed +1); failure releases it (reserved −1). Both happen in the same transaction as the status change. 3. Creation is refused with 403 `QUOTA_EXCEEDED` when `consumed_count + reserved_count >= limit(current plan)`; `error.meta` contains `limit`, `used` (= consumed), `inProgress` (= reserved) and `resetsAt`. 4. `resetsAt` is 00:00 IST on the 1st of the next month, as UTC (for October 2026: `2026-10-31T18:30:00.000Z`). 5. The limit uses the plan in the **current** token, so a FREE user who upgrades mid-month to PRO can immediately create up to 30 minus what they already used. 6. Deleting an analysis does not give quota back. 7. API-001 shows `limit`, `used` (= consumed), `inProgress` (= reserved), `remaining = max(0, limit − consumed − reserved)` and `resetsAt`. 8. A failed analysis (any error code) never changes `consumed_count`. 9. Erasure (FR-019) does not delete TBL-008 rows, so erasing data does not reset the current period's usage. |
+| FR-007 | Monthly quota | FREE users may complete `FREE_MONTHLY_ANALYSES` analyses per period month; since v2.0, Resume Pro users have no monthly limit (FR-023). Completed and running analyses count toward the limit; failed ones never do. | Must | 1. The period month is the calendar month in `QUOTA_TIME_ZONE` at the moment the analysis is created; an analysis created at 23:59 IST on the 31st counts for that month even if it completes on the 1st. 2. Creating an analysis adds 1 to `reserved_count`; completion moves it to `consumed_count` (reserved −1, consumed +1); failure releases it (reserved −1). Both happen in the same transaction as the status change. 3. Creation is refused with 403 `QUOTA_EXCEEDED` when the user is FREE and `consumed_count + reserved_count >= FREE_MONTHLY_ANALYSES`; `error.meta` contains `limit`, `used` (= consumed), `inProgress` (= reserved) and `resetsAt`. 4. `resetsAt` is 00:00 IST on the 1st of the next month, as UTC (for October 2026: `2026-10-31T18:30:00.000Z`). 5. (changed v2.0) The limit depends on the plan at creation time (FR-023): FREE users have `FREE_MONTHLY_ANALYSES`, PRO users have none. A FREE user who has used the FREE limit can create analyses again as soon as Pro starts. 6. Deleting an analysis does not give quota back. 7. API-001 shows `limit`, `used` (= consumed), `inProgress` (= reserved), `remaining = max(0, limit − consumed − reserved)` and `resetsAt`. For PRO users (v2.0) `limit` and `remaining` are `null` and `used` / `inProgress` show the PRO counters of criterion 10. 8. A failed analysis (any error code) never changes `consumed_count`. 9. Erasure (FR-019) does not delete TBL-008 rows, so erasing data does not reset the current period's usage. 10. (v2.0) An analysis created on the PRO plan (`plan_at_creation = PRO`) uses the counters `pro_reserved_count` and `pro_consumed_count` with the same reserve, commit and release rules, and these counters are never compared with a limit. Analyses made while PRO therefore never count toward the FREE limit: when Pro ends mid-month, the FREE limit applies only to FREE-plan analyses of that month. |
 | FR-008 | ATS scoring | The worker asks the AI to score the resume on six dimensions and computes the overall score. | Must | 1. Every completed analysis has exactly six TBL-005 rows, one per dimension code in §4.7.3, each with an integer score 0–100 and a rationale of 1–400 characters. 2. The weight stored per row equals the §4.7.3 weight at the time of analysis. 3. `overall_score = floor((Σ score × weight + 50) / 100)`, an integer 0–100 (§4.7.4); with scores 70/50/80/90/60/75 the result is 70. 4. `score_band` is `NEEDS_WORK` (0–49), `FAIR` (50–69), `GOOD` (70–84) or `EXCELLENT` (85–100). 5. The AI is called with the exact prompt in §4.7.1 and structured output schema in §4.7.2. 6. If the AI says `isResume = false` the analysis fails with `NOT_A_RESUME`; if `detectedLanguage` is not `en` it fails with `RESUME_LANGUAGE_UNSUPPORTED`. |
 | FR-009 | Missing skills | The result lists skills that are important for the chosen role and level but are not shown in the resume. Which core skills of the role are missing is decided by code from the catalog (TBL-001); the AI only rates their importance, explains them, and may add a few extra skills. | Must | 1. A completed analysis has 0 to `MAX_MISSING_SKILLS` TBL-006 rows ordered by `display_order` starting at 1 with no gaps. 2. Each has `skill` (1–80 chars), `importance` (`CRITICAL`, `IMPORTANT` or `NICE_TO_HAVE`), `reason` (1–300 chars) and `source` (`CATALOG` or `AI`). 3. Every core skill of the role for which none of its `matchTerms` is found in the redacted resume text (whole word, case-insensitive, §4.7.5 step 4) has a `CATALOG` row, unless the `MAX_MISSING_SKILLS` cap cuts it off; no core skill whose term is found has a row. 4. At most `MAX_AI_EXTRA_SKILLS` rows have source `AI`; none of them equals a core skill name or match term, and none is found in the resume text. 5. Rows are ordered `CRITICAL`, then `IMPORTANT`, then `NICE_TO_HAVE`; inside a group, `CATALOG` rows (in catalog order) come before `AI` rows (in AI order). 6. If the AI gives no rating for a missing core skill, the row uses importance `IMPORTANT` and the reason "This is a core skill for the selected role." 7. Missing skills are shown in full to FREE and PRO users. |
 | FR-010 | Rewrite suggestions | The result suggests better wording for weak lines, ordered from highest to lowest impact. | Must | 1. A completed analysis has 0 to `MAX_SUGGESTIONS` TBL-007 rows with `priority` 1..n and no gaps. 2. Every `original_text` occurs in the redacted resume text after whitespace normalization (§4.7.5); suggestions that do not match are dropped before numbering. 3. Suggestions whose `suggested_text` equals `original_text`, or whose `original_text` is longer than 500 or `suggested_text` longer than 600 characters, are dropped. 4. Each suggestion has `section` and `issue_type` from the enums in TBL-007. 5. The AI is instructed never to invent facts and to use placeholders such as `[X%]` for missing numbers (§4.7.1), and the system enforces it: a suggestion whose `suggestedText` contains a number (outside `[…]` placeholders) that does not occur in its `originalText` is dropped (§4.7.5 step 5). With the `NEW_NUMBER_FIXTURE` mock case (§4.7.6), 5 suggestions are produced and 4 are stored. |
 | FR-011 | Analysis status and failure handling | The user can follow the analysis and always gets a final state, even when the AI fails. | Must | 1. Status moves only along `QUEUED → PROCESSING → COMPLETED` or `QUEUED/PROCESSING → FAILED` (§4.3.6). 2. AI request timeouts, connection errors and HTTP 408, 409, 429 and 5xx responses are retried by the SDK up to `AI_SDK_MAX_RETRIES` times; if all fail the analysis is `FAILED` with `AI_UNAVAILABLE`. 3. AI output that is not valid JSON, fails the §4.7.2 schema, stops with `max_tokens`, or is a refusal is retried `AI_INVALID_OUTPUT_RETRIES` time(s); then `FAILED` with `AI_OUTPUT_INVALID`. 4. Any analysis not finished `ANALYSIS_STALE_AFTER_MS` after `queued_at` is set to `FAILED` with `ANALYSIS_TIMEOUT` by the maintenance job, which runs every minute. 5. Unexpected worker exceptions are retried by BullMQ (3 attempts, exponential backoff starting at 5 s); after the last attempt the analysis is `FAILED` with `INTERNAL_ERROR`. 6. Every failure releases the quota reservation (FR-007.2). 7. API-011 returns `errorCode` and a localized `errorMessage` for `FAILED` analyses. 8. The web app polls API-011 as described in P-02 and stops polling when the status is `COMPLETED` or `FAILED`. 9. While the AI circuit is open (§4.7.7), an analysis picked up by that worker task fails with `AI_UNAVAILABLE` without sending an AI request, within 5 s, and its reservation is released. |
-| FR-012 | View result with plan gating | The user sees the complete result; FREE users see only the first suggestions. | Must | 1. API-011 for a `COMPLETED` analysis returns overall score, band, summary, six dimensions (localized names), all missing skills and suggestions. 2. When the **current** plan is FREE, `suggestions` contains only rows with `priority <= FREE_VISIBLE_SUGGESTIONS`, `lockedSuggestionCount = max(0, total − FREE_VISIBLE_SUGGESTIONS)` and `upgradeUrl = PLATFORM_UPGRADE_URL`. 3. The text of locked suggestions is never sent to a FREE user in any API response (checked by an e2e test that searches the raw response body). 4. When the current plan is PRO, all suggestions are returned, `lockedSuggestionCount = 0` and `upgradeUrl = null`. 5. Gating is applied when reading, so a user who upgrades sees the previously locked suggestions of old analyses. 6. For any other status, `result` is `null`. |
+| FR-012 | View result with plan gating | The user sees the complete result; FREE users see only the first suggestions. | Must | 1. API-011 for a `COMPLETED` analysis returns overall score, band, summary, six dimensions (localized names), all missing skills and suggestions. 2. When the **current** plan is FREE, `suggestions` contains only rows with `priority <= FREE_VISIBLE_SUGGESTIONS`, `lockedSuggestionCount = max(0, total − FREE_VISIBLE_SUGGESTIONS)` and `upgradeUrl = <APP_ORIGIN>/<locale>/pro`, the Resume Pro page P-06 (changed in v2.0). 3. The text of locked suggestions is never sent to a FREE user in any API response (checked by an e2e test that searches the raw response body). 4. When the current plan is PRO, all suggestions are returned, `lockedSuggestionCount = 0` and `upgradeUrl = null`. 5. Gating is applied when reading, so a user who upgrades sees the previously locked suggestions of old analyses. 6. For any other status, `result` is `null`. |
 | FR-013 | Download PDF report | The user downloads the analysis as a PDF file. | Must | 1. API-012 for a `COMPLETED` analysis returns `200`, `Content-Type: application/pdf`, `Content-Disposition: attachment; filename="resume-analysis-<yyyyMMdd>-<first 8 chars of analysisId>.pdf"` (date = analysis creation date in IST) and `Cache-Control: no-store`. 2. The PDF follows the layout in §4.10 and applies the same gating as FR-012 (a FREE user's PDF contains at most 3 suggestions and the locked box of §4.10 block 8). 3. For an analysis that is not `COMPLETED` it returns 409 `ANALYSIS_NOT_COMPLETED`. 4. The PDF is generated on request and never stored. 5. The PDF is in English regardless of locale (ASM-004). 6. p95 generation time ≤ 3 s (NFR-005). 7. Each download writes audit action `REPORT_DOWNLOADED`. 8. Rate limit: 30 downloads per user per hour. |
-| FR-014 | Analysis history | The user sees a list of their past analyses. | Must | 1. API-010 returns only the caller's analyses, newest first (`created_at DESC, id DESC`), paginated (§6.1). 2. Each item has id, status, job role (code and localized name), experience level, overall score and band (null unless completed), resume file name, `createdAt`, `completedAt`. 3. Analyses past `expires_at` are never returned: every read of TBL-003 and TBL-004 (API-006, API-007, API-008, API-009, API-010, API-011, API-012, API-013, API-014) filters `expires_at > $now`, so an expired row behaves as deleted until FR-020 removes it. 4. P-03 shows 10 items per page with page controls and an empty state with a link to P-01. |
+| FR-014 | Analysis history | The user sees a list of their past analyses. | Must | 1. API-010 returns only the caller's analyses, newest first (`created_at DESC, id DESC`), paginated (§6.1). 2. Each item has id, status, job role (code and localized name), experience level, overall score and band (null unless completed), resume file name, `createdAt`, `completedAt`. 3. Analyses past `expires_at` are never returned: every read of TBL-003 and TBL-004 (API-006, API-007, API-008, API-009, API-010, API-011, API-012, API-013, API-014 and, since v2.0, API-026) filters `expires_at > $now`, so an expired row behaves as deleted until FR-020 removes it. 4. P-03 shows 10 items per page with page controls and an empty state with a link to P-01. 5. (v2.0) The history list stays exactly the same for FREE users (ASM-019). PRO users can also select two completed analyses on P-03 and compare them (FR-025). |
 | FR-015 | Resume library and reuse | The user can run another analysis on a previously uploaded resume (for a different role or level) without uploading again, for `RESUME_RETENTION_DAYS` days. | Should | 1. API-006 lists the caller's resumes that have not expired, newest first, paginated, with parse status and `expiresAt`. 2. P-01 offers "Use a previous resume" listing only `PARSED` resumes. 3. API-009 accepts any of the caller's `PARSED` resumes. 4. From `expires_at` on, the resume is treated as deleted (FR-014.3): API-007 returns 404 and API-009 returns `NOT_FOUND`; FR-020 deletes the row at its next run. |
 | FR-016 | Delete resume | The user deletes one uploaded resume. | Must | 1. API-008 deletes the TBL-003 row and the S3 object (if `storage_key` is not null) and returns 204. 2. If any analysis using this resume is `QUEUED` or `PROCESSING`, it returns 409 `RESUME_IN_USE` and deletes nothing. 3. Existing analyses of the resume stay; their `resume_id` becomes NULL (FK `ON DELETE SET NULL`) and they keep `resume_filename`. 4. Writes audit action `RESUME_DELETED`. 5. Deleting another user's or a non-existent resume returns 404. |
 | FR-017 | Delete analysis | The user deletes one analysis. | Must | 1. API-013 deletes the TBL-004 row and, by cascade, its TBL-005, TBL-006 and TBL-007 rows, and returns 204. 2. A `QUEUED` or `PROCESSING` analysis returns 409 `ANALYSIS_IN_PROGRESS`. 3. Quota is not returned (FR-007.6). 4. Writes audit action `ANALYSIS_DELETED`. |
-| FR-018 | View my data | The user can see a summary of all personal data the module holds about them and who processes it (DPDP Act section 11). | Must | 1. API-014 returns consents, resumes (metadata only, no text), analyses (metadata and scores), usage rows, retention periods, the list of processors and the grievance email (§6.2). 2. Each list returns at most 1000 items, newest first, with `truncated: true` when more exist. 3. Works without active consent. 4. Writes audit action `DATA_SUMMARY_VIEWED`. 5. P-04 shows this data and the grievance contact. |
-| FR-019 | Withdraw consent and erase all data | The user withdraws consent; the module deletes all their personal data (DPDP Act sections 6(4) and 8(7)). It is as easy as giving consent: one button and one confirmation. | Must | 1. API-015 with body `{ "confirm": "DELETE" }` (exact, case-sensitive) runs in one transaction: deletes all the user's TBL-004 rows (children cascade) and TBL-003 rows, sets every `ACTIVE` TBL-002 row to `WITHDRAWN` with `ended_at` = the Clock time, inserts one TBL-009 row with counts, and writes audit action `DATA_ERASED`. 2. Any other `confirm` value returns 400 `VALIDATION_FAILED`. 3. After the transaction it deletes any remaining raw S3 objects of those resumes; failures are left to the lifecycle rule (removed within `RAW_FILE_MAX_HOURS` hours). 4. It deletes Redis key `ro:consent:<NOTICE_VERSION>:<userId>`. 5. Analyses that were `QUEUED` or `PROCESSING` are deleted too. The transaction first runs `DELETE FROM analyses WHERE user_id = $1 RETURNING status, period_month` and then, per `period_month`, subtracts the number of returned `QUEUED`/`PROCESSING` rows from `reserved_count`, so no reservation stays held and none is released twice (a worker saving at the same moment locks the analysis row first and then finds it gone). The worker discards their results (§4.8.5). 6. The response (200) contains the counts. After it, API-001 shows `consent.required = true`, `usage.used` unchanged and `usage.inProgress = 0`, and the resume and analysis lists are empty. 7. Kept after erasure, with reason: TBL-002 rows (proof that consent was given and withdrawn, `AUDIT_RETENTION_DAYS`), TBL-009 (proof of erasure, `AUDIT_RETENTION_DAYS`), TBL-010 (security logs, DPDP Rules 2025 rule 6), TBL-008 (only the user ID and counts; keeping them stops a user from resetting the FREE limit by erasing; purged by FR-020 after the previous month; stated in the notice). None of these contain resume content. 8. p95 ≤ 2 s for a user with 100 analyses. 9. A request that reaches the grievance officer instead (DPDP Act section 13) is carried out by an operator as a one-off ECS task with the `ro-migrate` task definition and the command `node dist/cli/erase-user.js <userId>`. The argument must match the `sub` format of CR-002 (otherwise exit code 2); the command prints the API-015 response body as JSON and exits 0, or exits 1 on any other error. It runs the same service method as API-015 (without `confirm`) and writes audit actor `SYSTEM` with `DATA_ERASED` metadata `source: "GRIEVANCE"` (API-015 writes `source: "USER"`). Erasure started automatically by the platform is out of scope (OOS-014). |
-| FR-020 | Automatic retention and cleanup | The system deletes data when its retention period ends and closes stuck work. | Must | 1. Job `retention-purge` runs daily at 02:00 IST (BullMQ repeat `{ pattern: '0 2 * * *', tz: 'Asia/Kolkata' }`) and deletes, in batches of 500: TBL-003 rows with `expires_at < $now` that are not used by a `QUEUED`/`PROCESSING` analysis; TBL-004 rows with `expires_at < $now`; TBL-002 rows with status `SUPERSEDED` or `WITHDRAWN` and `ended_at < $now − AUDIT_RETENTION_DAYS`; TBL-009 rows with `expires_at < $now`; TBL-010 rows with `occurred_at < $now − AUDIT_RETENTION_DAYS`; TBL-008 rows whose `period_month` is older than the previous month. 2. Each run writes one audit row `RETENTION_PURGE` with the counts in `metadata`. 3. Job `stale-janitor` runs every minute (`{ every: 60000 }`) and applies FR-005.8 and FR-011.4. 4. Both jobs are safe to run twice at the same time (deletes and updates are idempotent; the janitor updates with `WHERE status IN (...)`). 5. The S3 bucket has a lifecycle rule that expires objects under `uploads/` after `RAW_FILE_LIFECYCLE_DAYS` day. |
+| FR-018 | View my data | The user can see a summary of all personal data the module holds about them and who processes it (DPDP Act section 11). | Must | 1. API-014 returns consents, resumes (metadata only, no text), analyses (metadata and scores), usage rows, subscriptions and payments (v2.0), retention periods, the list of processors and the grievance email (§6.2). 2. Each list returns at most 1000 items, newest first, with `truncated: true` when more exist. 3. Works without active consent. 4. Writes audit action `DATA_SUMMARY_VIEWED`. 5. P-04 shows this data and the grievance contact. |
+| FR-019 | Withdraw consent and erase all data | The user withdraws consent; the module deletes all their resume and analysis data (DPDP Act sections 6(4) and 8(7)); only the records of criterion 7, kept for a legal reason, remain. It is as easy as giving consent: one button and one confirmation. | Must | 1. API-015 with body `{ "confirm": "DELETE" }` (exact, case-sensitive) runs in one transaction: deletes all the user's TBL-004 rows (children cascade) and TBL-003 rows, sets every `ACTIVE` TBL-002 row to `WITHDRAWN` with `ended_at` = the Clock time, inserts one TBL-009 row with counts, and writes audit action `DATA_ERASED`. 2. Any other `confirm` value returns 400 `VALIDATION_FAILED`. 3. After the transaction it deletes any remaining raw S3 objects of those resumes; failures are left to the lifecycle rule (removed within `RAW_FILE_MAX_HOURS` hours). 4. It deletes Redis key `ro:consent:<NOTICE_VERSION>:<userId>`. 5. Analyses that were `QUEUED` or `PROCESSING` are deleted too. The transaction first runs `DELETE FROM analyses WHERE user_id = $1 RETURNING status, period_month, plan_at_creation` and then, per `period_month` and plan, subtracts the number of returned `QUEUED`/`PROCESSING` rows from `reserved_count` (FREE) or `pro_reserved_count` (PRO, FR-007.10), so no reservation stays held and none is released twice (a worker saving at the same moment locks the analysis row first and then finds it gone). The worker discards their results (§4.8.5). 6. The response (200) contains the counts. After it, API-001 shows `consent.required = true`, `usage.used` unchanged and `usage.inProgress = 0`, and the resume and analysis lists are empty. 7. Kept after erasure, with reason: TBL-002 rows (proof that consent was given and withdrawn, `AUDIT_RETENTION_DAYS`), TBL-009 (proof of erasure, `AUDIT_RETENTION_DAYS`), TBL-010 (security logs, DPDP Rules 2025 rule 6), TBL-008 (only the user ID and counts; keeping them stops a user from resetting the FREE limit by erasing; purged by FR-020 after the previous month; stated in the notice), and since v2.0 TBL-011 and TBL-012 (payment records the law requires, criterion 10). None of these contain resume content. 8. p95 ≤ 2 s for a user with 100 analyses. 9. A request that reaches the grievance officer instead (DPDP Act section 13) is carried out by an operator as a one-off ECS task with the `ro-migrate` task definition and the command `node dist/cli/erase-user.js <userId>`. The argument must match the `sub` format of CR-002 (otherwise exit code 2); the command prints the API-015 response body as JSON and exits 0, or exits 1 on any other error. It runs the same service method as API-015 (without `confirm`) and writes audit actor `SYSTEM` with `DATA_ERASED` metadata `source: "GRIEVANCE"` (API-015 writes `source: "USER"`). Erasure started automatically by the platform is out of scope (OOS-014). 10. (v2.0, made exact in v2.1) Before the erasure transaction, under the billing lock of FR-022.3, the user's open subscription is cancelled as API-024 would (FR-024.1 and FR-024.4): an `ACTIVE` subscription that renews and grants Pro is cancelled at the end of the paid cycle, so no further charge happens while the days already paid for stay usable; an `ACTIVE` subscription that is already cancelling is left as it is; any other open subscription is cancelled immediately. Each cancel is saved in its own short transaction before the erasure transaction starts. If Razorpay cannot be reached, API-015 returns 503 `PAYMENT_PROVIDER_UNAVAILABLE` and deletes nothing. If the erasure transaction then fails, API-015 returns 500 and a retry is safe: the cancel is already saved and is not repeated (FR-024.3). TBL-011 and TBL-012 rows are kept for `PAYMENT_RECORD_RETENTION_DAYS` after the subscription ends, because the law requires it (ASM-020); they contain no resume data and no payer contact data. |
+| FR-020 | Automatic retention and cleanup | The system deletes data when its retention period ends and closes stuck work. | Must | 1. Job `retention-purge` runs daily at 02:00 IST (BullMQ repeat `{ pattern: '0 2 * * *', tz: 'Asia/Kolkata' }`) and deletes, in batches of 500: TBL-003 rows with `expires_at < $now` that are not used by a `QUEUED`/`PROCESSING` analysis; TBL-004 rows with `expires_at < $now`; TBL-002 rows with status `SUPERSEDED` or `WITHDRAWN` and `ended_at < $now − AUDIT_RETENTION_DAYS`; TBL-009 rows with `expires_at < $now`; TBL-010 rows with `occurred_at < $now − AUDIT_RETENTION_DAYS`; TBL-008 rows whose `period_month` is older than the previous month; since v2.0 also TBL-011 rows with `expires_at < $now` (their TBL-012 rows by cascade) and TBL-013 rows with `expires_at < $now`. 2. Each run writes one audit row `RETENTION_PURGE` with the counts in `metadata`. 3. Job `stale-janitor` runs every minute (`{ every: 60000 }`) and applies FR-005.8 and FR-011.4. 4. Both jobs are safe to run twice at the same time (deletes and updates are idempotent; the janitor updates with `WHERE status IN (...)`). 5. The S3 bucket has a lifecycle rule that expires objects under `uploads/` after `RAW_FILE_LIFECYCLE_DAYS` day. |
 | FR-021 | Manage job role catalog | An admin adds roles, edits them and turns them on or off. | Should | 1. API-016 lists all roles including inactive ones. 2. API-017 creates a role; a duplicate `code` returns 409 `JOB_ROLE_CODE_EXISTS`. 3. API-018 changes `nameEn`, `nameHi`, `nameKo`, `description`, `coreSkills`, `isActive` or `displayOrder`; `code` cannot be changed (sending it returns 400 `VALIDATION_FAILED`). 4. Roles are never deleted; deactivated roles disappear from API-002 and are rejected by API-009 with `JOB_ROLE_UNAVAILABLE`, while existing analyses keep showing them. 5. Every create writes audit action `JOB_ROLE_CREATED`. An update writes `JOB_ROLE_UPDATED` with `changedFields`: the API field names (camelCase) whose new value differs from the stored value (strings compared after trimming and case-sensitively; `coreSkills` compared element by element in order, including each `matchTerms` list, so a reordering counts as a change). If no value differs, API-018 returns 200 with the unchanged role and writes no audit row. 6. Every create and every update that changed a value deletes the catalog cache keys `ro:catalog:v1:en`, `ro:catalog:v1:hi` and `ro:catalog:v1:ko` (FR-003.4). |
+| FR-022 | Subscribe to Resume Pro (v2.0) | A FREE user buys Resume Pro for `PRO_PRICE_PAISE` (₹299) a month through Razorpay Checkout on P-06. | Must | 1. API-022 requires consent (FR-002) and a body `termsVersion` equal to `PRO_TERMS_VERSION` (the Pro terms of §4.9.1, shown on P-06 with a checkbox); another value returns 409 `PRO_TERMS_VERSION_MISMATCH` (ERR-042, v2.1) with `details: [{ field: "termsVersion", issue: "current is <PRO_TERMS_VERSION>" }]`. 2. A user who is already PRO (FR-023.1) gets 409 `ALREADY_PRO` with `error.meta = { proUntil }`. 3. **Billing lock** (v2.1): API-022, API-024 and erasure (FR-019.10) take a session-level `pg_advisory_lock(hashtext('billing:' \|\| user_id))` on one dedicated pooled connection and release it with `pg_advisory_unlock` in a `finally`; it is held for at most two Razorpay calls (`RAZORPAY_TIMEOUT_MS` each). Razorpay is called outside any transaction; each result is then saved in a short transaction on the same connection with a guarded `UPDATE … WHERE id = $id AND status = <status read before the call>`. When the guarded update changes no row (a webhook changed the row meanwhile), the row is read again and the response is built from it. Under the lock, a `CREATED` subscription younger than `CHECKOUT_EXPIRY_MS` is returned again. Any other open subscription that grants no Pro (`CREATED` older than that, `AUTHENTICATED`, `PENDING`, `HALTED`, `PAUSED`, or `ACTIVE` whose Pro has ended because it is cancelling or past the renewal grace) is first fetched from Razorpay: if Razorpay reports it ended (`cancelled`, `completed`, `expired`), the row takes that status (§4.13.2, audit `SUBSCRIPTION_ENDED`); otherwise it is cancelled at Razorpay immediately and marked `CANCELLED` (audit `SUBSCRIPTION_CANCELLED`). This is what lets a user subscribe again after `paid_until` (FR-024.8). 4. Then it creates a Razorpay subscription (`plan_id = RAZORPAY_PLAN_ID`, `total_count = RAZORPAY_TOTAL_COUNT`, `customer_notify = 1`, `notes = { userId }`), stores a TBL-011 row with status `CREATED` and the accepted `terms_version`, writes audit `SUBSCRIPTION_CHECKOUT`, and returns 201 with what Checkout needs. The amount comes from the Razorpay plan, never from the client. 5. After payment, P-06 sends the three values from the Checkout handler to API-023, which checks the signature (CR-037); a mismatch returns 400 `PAYMENT_SIGNATURE_INVALID` and changes nothing. 6. With a valid signature, API-023 fetches the subscription and the payment from Razorpay. If the payment is `captured` and the subscription has a `current_end`, then in one transaction with the TBL-011 row locked `FOR UPDATE` it inserts the TBL-012 row (`ON CONFLICT (razorpay_payment_id) DO NOTHING`), sets status `ACTIVE` unless the row is terminal, `paid_until = GREATEST(paid_until, current_end)` and `last_event_at = $now`, writes audit `SUBSCRIPTION_ACTIVATED` only when its insert added the subscription's first payment (§4.13.3), deletes the plan cache after COMMIT, and returns the entitlement: the user is PRO from the next request. If the payment is not captured yet, or Razorpay has not set `current_end` yet, it changes nothing and returns 200 with the current plan and `activationPending: true`, and the webhook or the reconciliation activates Pro (FR-026). 7. If Razorpay cannot be reached in step 6, API-023 returns 503 `PAYMENT_PROVIDER_UNAVAILABLE`; nothing is granted on the signature alone. The webhook or the hourly reconciliation (FR-026.6) activates Pro, and P-06 polls API-021 every `PRO_ACTIVATION_POLL_MS` for up to `PRO_ACTIVATION_POLL_MAX_MS`. 8. A checkout the user closes without paying leaves a `CREATED` row that grants nothing; FR-026.6 cancels it after `CHECKOUT_EXPIRY_MS`. 9. No card, UPI or bank detail and no payer contact detail is stored (CR-037, FR-026.7). 10. Rate limits: API-022 5 per hour, API-023 10 per hour (CR-021). |
+| FR-023 | Resume Pro entitlement (v2.0) | The module decides from its own subscription data whether a user is PRO. PRO gives unlimited analyses, all suggestions and comparison; FREE users stay exactly as before. | Must | 1. `planOf(userId)` is `PRO` when the user has a TBL-011 row with `paid_until > $now`, or a row with status `ACTIVE`, `cancel_at_period_end = false` and `paid_until + RENEWAL_GRACE_MS > $now` (a renewal Razorpay has not charged yet); otherwise `FREE`. The JWT `plan` claim is ignored. 2. (v2.1 wording) The result is cached in Redis only (no in-process copy), under `ro:plan:<userId>`, as JSON `{ plan, proUntil, cancelAtPeriodEnd, validUntil }`. `validUntil` is the next moment the plan can change by time alone: `paid_until` while it is in the future, `paid_until + RENEWAL_GRACE_MS` during the renewal grace, and `null` for FREE. The TTL is `PLAN_CACHE_TTL_S` seconds, or the whole seconds left until `validUntil` if fewer (at least 1), and an entry whose `validUntil` is not after `$now` is treated as a miss, so PRO never lasts past its end because of the cache. Every transaction that changes the user's TBL-011 or TBL-012 rows deletes the key after COMMIT. A Redis error falls back to the database. 3. PRO has no monthly limit (FR-007.5). The rate limit (CR-021, 10 creations per hour) and `MAX_CONCURRENT_ANALYSES` still apply, so one user can start at most 240 analyses a day. More than `PRO_FAIR_USE_DAILY_ALERT` completed analyses by one user in 24 h raise the P2 alarm "Pro heavy use" (§4.11); nothing is blocked. 4. PRO sees all suggestions in API-011 and API-012 (FR-012.4), also for analyses made while FREE. 5. PRO can compare analyses (FR-025). 6. Each `subscription.charged` webhook extends `paid_until` to that cycle's `current_end` and stores a TBL-012 row (FR-026); `paid_until` never moves backwards (refunds are out of scope, OOS-015). 7. If a renewal charge fails (status `PENDING` or `HALTED`), the grace of criterion 1 stops and the user becomes FREE at `paid_until`; a later successful charge makes them PRO again. 8. When Pro ends, the user is FREE with all data kept; suggestions beyond `FREE_VISIBLE_SUGGESTIONS` are locked again (FR-012.5). 9. API-001 and API-021 show `plan`, `proUntil` (the `paid_until` of the row that grants Pro, or null) and `cancelAtPeriodEnd`. |
+| FR-024 | Cancel Resume Pro (v2.0) | The user cancels at any time; Pro continues until the end of the paid month. | Must | 1. API-024 runs under the billing lock (FR-022.3). For an `ACTIVE` subscription with `cancel_at_period_end = false` that grants Pro (FR-023.1), it cancels at Razorpay with `cancel_at_cycle_end = 1`, sets `cancel_at_period_end = true`, `cancel_requested_at` and `last_event_at = $now`, deletes the plan cache, writes audit `SUBSCRIPTION_CANCEL_REQUESTED`, and returns `proUntil = paid_until`. 2. No further charge happens. Because `cancel_at_period_end` is true, the renewal grace (FR-023.1) no longer applies, so Pro ends exactly at `paid_until`, the end of the paid month (ASM-022). 3. Calling API-024 again while the cancelled subscription still grants Pro returns 200 with the same body and calls nothing. 4. Any other open subscription (`CREATED`, `AUTHENTICATED`, `PENDING`, `HALTED`, `PAUSED`, or `ACTIVE` that no longer grants Pro) is cancelled immediately (`cancel_at_cycle_end = 0`), becomes `CANCELLED` with `ended_at` and `expires_at` (§4.13.2), and writes audit `SUBSCRIPTION_CANCELLED`. `paid_until` is not changed, so time already paid for is kept; the response has the plan computed after the cancel. 5. A user without an open subscription gets 409 `NO_ACTIVE_SUBSCRIPTION`. 6. If Razorpay cannot be reached, API-024 returns 503 `PAYMENT_PROVIDER_UNAVAILABLE` and nothing changes. If Razorpay rejects the cancel with a 4xx, the module fetches the subscription: when Razorpay reports it ended (`cancelled`, `completed`, `expired`), the row takes that status (§4.13.2, audit `SUBSCRIPTION_ENDED`) and API-024 returns 200; otherwise 500 `INTERNAL_ERROR`. 7. When Razorpay ends the subscription (webhook `subscription.cancelled` or `subscription.completed`), the row becomes `CANCELLED` or `COMPLETED` with `ended_at`, and `expires_at = ended_at + PAYMENT_RECORD_RETENTION_DAYS`; audit `SUBSCRIPTION_ENDED`. 8. While `paid_until` is in the future, API-022 returns `ALREADY_PRO` even after a cancel; undoing a cancel is out of scope (OOS-016). After `paid_until` the user can subscribe again (FR-022). |
+| FR-025 | Compare two analyses (v2.0) | A PRO user compares two of their completed analyses. | Must | 1. API-026 requires PRO, checked before the query parameters; a FREE user gets 403 `PRO_REQUIRED`, and P-03 and P-05 show an upsell to P-06. 2. Then, in this order: both IDs are UUID v4 (`VALIDATION_FAILED`); the IDs differ (`VALIDATION_FAILED`, `details: [{ field: "targetId", issue: "sameAsBase" }]`); both analyses belong to the user and are not expired (`NOT_FOUND`); both are `COMPLETED` (409 `ANALYSIS_NOT_COMPLETED`). 3. The response has both summaries, `overallDelta = target.overallScore − base.overallScore`, `bandChanged`, and the six dimensions in §4.7.3 order with `baseScore`, `targetScore` and `delta`, using the scores stored with each analysis. 4. `sameRole` is true when both analyses have the same job role, `sameLevel` when they have the same experience level. Comparison is allowed in every case; the UI warns when either is false. 5. When `sameRole` is true, `missingSkills` lists `resolved` (missing in base, not in target), `stillMissing` and `newlyMissing`, compared case-insensitively by skill name after trimming, and sorted alphabetically; `resolved` keeps the base analysis's spelling, `stillMissing` and `newlyMissing` keep the target's. When `sameRole` is false, `missingSkills` is `null`, because skill lists of different roles cannot be compared. 6. It works for every analysis the user still has, including analyses made while FREE and after the resume text was purged, because it reads only stored results. 7. P-03 lets a PRO user select exactly two completed analyses and opens P-05 with the older one as `baseId`. |
+| FR-026 | Payment events and reconciliation (v2.0) | Razorpay webhooks keep subscriptions current; an hourly job repairs anything a webhook missed. | Must | 1. API-025 accepts a webhook only with a valid `X-Razorpay-Signature` (CR-037) computed over the raw body (NestJS `rawBody: true`, body at most `JSON_BODY_LIMIT`); otherwise 400 `WEBHOOK_SIGNATURE_INVALID` and nothing is stored. The order is: read the raw body, check the signature, parse the JSON, validate the fields read. 2. In one transaction it inserts the event into TBL-013 keyed by the `x-razorpay-event-id` header (`ON CONFLICT DO NOTHING`); an event already stored returns 200 and changes nothing. If processing fails, the transaction rolls back and API-025 returns 500, so Razorpay retries and the event is processed again. 3. Events are handled as in §4.13.3; unknown event types and events for unknown subscriptions are stored with result `IGNORED` and get 200. 4. Out-of-order and late events (v2.1 wording): an event is **stale** when its `created_at` is older than the row's `last_event_at`, or when the row is already terminal (`CANCELLED`, `COMPLETED`, `EXPIRED`). A stale event is stored with result `STALE` and changes no status or period field; only a stale `subscription.charged` still stores its payment and extends `paid_until` with `GREATEST`, because the money was taken. A non-stale event applies its §4.13.3 row and sets `last_event_at = GREATEST(last_event_at, created_at)`. API-022, API-023, API-024 and the reconcile job set `last_event_at = $now` when they change a row. Terminal rows never change status again, so `SUBSCRIPTION_ENDED` is written once per subscription. 5. API-025 makes no outbound calls and responds within NFR-026. 6. Job `subscription-reconcile` runs every hour at minute 15 (BullMQ repeat `{ pattern: '15 * * * *', tz: 'Asia/Kolkata' }`). For every open subscription it fetches the Razorpay subscription and applies the §4.13.3 rules as if the matching webhook had arrived; it cancels `CREATED` rows older than `CHECKOUT_EXPIRY_MS` and `HALTED` rows at Razorpay. Every correction that a webhook should have delivered (a status, period or `paid_until` change, or a stored payment) adds 1 to `ro_subscription_reconcile_changes_total`; its own cancels of abandoned and `HALTED` rows add 1 to `ro_subscription_expiry_cancels_total` instead (v2.1). It processes `RECONCILE_BATCH_SIZE` subscriptions at a time with `RECONCILE_BATCH_GAP_MS` between batches. 7. No webhook body is stored; only the IDs, statuses, amounts and times listed in TBL-011 to TBL-013. Payer email, phone, card, UPI and bank details are discarded (CR-011, CR-037). 8. At worker start in `PAYMENT_MODE=live`, the worker fetches plan `RAZORPAY_PLAN_ID` and checks amount `PRO_PRICE_PAISE`, currency `INR`, period `monthly` and interval `1`; a mismatch is logged at `error` and sets `ro_razorpay_plan_mismatch` to 1 (P1 alarm). If Razorpay cannot be reached at start, the worker logs `warn` and starts anyway; the check then runs at the start of every `subscription-reconcile` run until it succeeds. A captured payment whose amount or currency differs is still stored and still grants Pro, because the user paid, and adds 1 to `ro_payment_amount_mismatch_total`. |
 
 ### 3.2 Non-functional requirements
 
@@ -624,7 +666,7 @@ All performance targets are measured server-side in the AWS region (excluding th
 
 | ID | Category | Requirement | Measurable target | How it is verified |
 |---|---|---|---|---|
-| NFR-001 | Performance | Read APIs (API-001, 002, 003, 006, 007, 010, 011, 014) are fast. | p95 ≤ 300 ms and p99 ≤ 800 ms at 50 requests/s for 10 min. | k6 script `perf/read-apis.js` in staging before each prod release. |
+| NFR-001 | Performance | Read APIs (API-001, 002, 003, 006, 007, 010, 011, 014 and, since v2.0, 021 and 026) are fast. | p95 ≤ 300 ms and p99 ≤ 800 ms at 50 requests/s for 10 min. | k6 script `perf/read-apis.js` in staging before each prod release. |
 | NFR-002 | Performance | Upload (API-005) is fast. | p95 ≤ 2 s for a 5 MiB file at 5 uploads/s. | k6 `perf/upload.js`. |
 | NFR-003 | Performance | Parsing finishes quickly. | p95 ≤ 5 s from `resumes.created_at` to `parsed_at`, for resumes that end `PARSED`. | Metric `ro_parse_duration_seconds`; k6 `perf/upload.js`. |
 | NFR-004 | Performance | Analyses finish in about a minute. | From `queued_at` to `COMPLETED`: p50 ≤ 60 s, p95 ≤ 120 s. | Metric `ro_analysis_duration_seconds` over 7 days in staging and prod. |
@@ -636,19 +678,23 @@ All performance targets are measured server-side in the AWS region (excluding th
 | NFR-010 | Security | Data in transit is encrypted. | 100% of external endpoints accept only TLS ≥ 1.2; HSTS `max-age=31536000`. | `testssl.sh` in staging release check. |
 | NFR-011 | Security | Data at rest is encrypted. | RDS, ElastiCache, S3 encrypted with KMS; 100% of `resumes.text_enc` values decrypt only with the app key (AES-256-GCM). | Infrastructure review; unit test that the DB value is not plain text. |
 | NFR-012 | Security | The application is tested for common weaknesses. | OWASP ASVS 4.0.3 Level 2 checklist passed; 0 high or critical findings from `npm audit` and from the OWASP ZAP baseline scan before each prod release. | CI `deps-audit`; ZAP job in the release pipeline. |
-| NFR-013 | Privacy | Data is kept only as long as needed. | Raw file: deleted right after parsing; if that fails, the S3 lifecycle removes it within `RAW_FILE_MAX_HOURS` (48) hours. Redacted resume text and resume metadata: `RESUME_RETENTION_DAYS` days. Analyses, including the resume file name and the short resume quotes in suggestions (at most 10 lines of at most 500 characters): `ANALYSIS_RETENTION_DAYS` days. Ended consents, erasure records, audit events: `AUDIT_RETENTION_DAYS` days. Usage rows: current and previous period month. Logs: 365 days in prod (CR-013). | FR-020 tests; daily metric `ro_retention_overdue_rows` = 0. |
+| NFR-013 | Privacy | Data is kept only as long as needed. | Raw file: deleted right after parsing; if that fails, the S3 lifecycle removes it within `RAW_FILE_MAX_HOURS` (48) hours. Redacted resume text and resume metadata: `RESUME_RETENTION_DAYS` days. Analyses, including the resume file name and the short resume quotes in suggestions (at most 10 lines of at most 500 characters): `ANALYSIS_RETENTION_DAYS` days. Ended consents, erasure records, audit events: `AUDIT_RETENTION_DAYS` days. Usage rows: current and previous period month. Since v2.0: subscription and payment records (TBL-011, TBL-012) for `PAYMENT_RECORD_RETENTION_DAYS` after the subscription ends, also after erasure (ASM-020); webhook event records (TBL-013) for `PAYMENT_EVENT_RETENTION_DAYS`. Logs: 365 days in prod (CR-013). | FR-020 tests; daily metric `ro_retention_overdue_rows` = 0. |
 | NFR-014 | Privacy | Erasure is complete and fast. | After API-015 returns, 0 rows in TBL-003 to TBL-007 for that user; raw files gone within `RAW_FILE_MAX_HOURS` (48) hours. | e2e test; S3 inventory check. |
 | NFR-015 | Privacy | Only redacted text reaches the AI. | 0 redactable matches (as defined by the §4.8.4 rules, including the 10–13 digit condition for phones) in the `<resume_text>` part of any AI request. | Unit tests on the §2.5 fixtures; the AI client re-runs the redaction rules on the resume text before sending and fails the analysis with `INTERNAL_ERROR` if anything would still be redacted (§4.8.4). |
 | NFR-016 | Privacy | No personal data in logs. | 0 matches of email, phone, Aadhaar and fixture names in logs. | (1) CI: the `api-e2e` job writes all API and worker log lines to `apps/api/test/output/logs.ndjson`, and `apps/api/test/scan-logs.ts` fails the job on any match (it skips the fields `time`, `requestId`, `jobId`, `userId`, `traceId` and `spanId`, scans every other string value, and first removes UUIDs matching `/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi` and BullMQ repeat job IDs matching `/repeat:[\w-]+:\d+/g`, which would otherwise look like phone numbers) of the §4.8.4 rules or of a name in `apps/api/test/fixtures/names.json` (the names used in the synthetic resume fixtures). (2) Staging: one CloudWatch Logs metric filter per fixture name (quoted term pattern) on the staging log groups, publishing metric `ro_pii_log_matches`; alarm on any value > 0. |
 | NFR-017 | Observability | The system can be monitored and debugged. | 100% of requests and jobs log a `requestId`; metrics in §4.11 exported; alarms in §4.11 configured; traces sampled at 10% (parent-based head sampling). | Release checklist; alarm test in staging. |
-| NFR-018 | Cost | AI cost is controlled. | Average AI cost per completed analysis ≤ US$0.20 (tokens × the model price; Claude Opus 5.5 is US$4 per million input and US$20 per million output tokens; thinking tokens are billed as output and are included in `usage.output_tokens`, which is what `output_tokens` stores). Monthly AI spend alarm at 80% of the budget set in the Anthropic console. | Metric `ro_ai_tokens_total`; monthly report. |
-| NFR-019 | Accessibility | The web app is usable with assistive technology. | WCAG 2.1 AA; Lighthouse accessibility score ≥ 90 on P-01 to P-04; all actions work with keyboard only. | Lighthouse CI on every PR; manual keyboard test before release. |
+| NFR-018 | Cost | AI cost is controlled. | Average AI cost per completed analysis ≤ US$0.20 (tokens × the model price; Claude Opus 5.5 is US$4 per million input and US$20 per million output tokens; thinking tokens are billed as output and are included in `usage.output_tokens`, which is what `output_tokens` stores). Monthly AI spend alarm at 80% of the budget set in the Anthropic console. Since v2.1 also: average AI cost per Pro user per month ≤ US$1.60 (ASM-023), from `ro_ai_tokens_total{plan="PRO"}` divided by `ro_pro_subscriptions_active`. | Metric `ro_ai_tokens_total`; monthly report. |
+| NFR-019 | Accessibility | The web app is usable with assistive technology. | WCAG 2.1 AA; Lighthouse accessibility score ≥ 90 on P-01 to P-06; all actions work with keyboard only. | Lighthouse CI on every PR; manual keyboard test before release. |
 | NFR-020 | Compatibility | Works on common browsers and phones. | Latest 2 versions of Chrome, Edge, Firefox, Safari; Safari iOS 16+; Chrome Android 120+; layouts work from 360 px wide. | Playwright runs on Chromium, Firefox, WebKit and a 360 × 800 viewport. |
 | NFR-021 | Maintainability | Code is tested and CI is fast. | Line coverage ≥ 80% in `apps/api/src/modules` and `apps/api/src/worker`; CI ≤ 15 min. | Jest coverage threshold in `jest.config.ts`; CI duration metric. |
 | NFR-022 | AI quality | AI results are valid and stable. | ≥ 98% of first AI responses pass the §4.7.2 schema; on a golden set of 50 synthetic resumes analysed twice, the two overall scores differ by ≤ 10 points for ≥ 90% of resumes. | Script `apps/api/test/ai-golden.ts` run against the live model before changing `AI_MODEL` or `PROMPT_VERSION`. Its 50 resumes are generated by `build-fixtures.ts` into `test/fixtures/out/golden/` as DOCX files named `<LEVEL>-<ROLE_CODE>-<n>.docx`: 10 per experience level, spread over the 12 seed roles, filled from one template with the names in `names.json` and a fixed random seed (`42`). Each file goes through `parse-runner` → §4.8.3 → §4.8.4 → `AnthropicAiClient` → §4.7.5 → scoring, without the database or the queue. It writes `test/output/ai-golden.json` with the first-pass schema rate, the score difference per resume, and pass or fail for both thresholds. |
 | NFR-023 | Compliance | Personal data breaches are reported. | Breach detected → Data Protection Board and affected users informed without delay; detailed report to the Board within 72 h (DPDP Rules 2025 rule 7). Runbook `docs/runbooks/data-breach.md` exists and is tested once a year. | Tabletop exercise record. |
 | NFR-024 | Internationalization | The UI is available in English, Hindi and Korean. | 100% of UI strings are in `messages/*.json`; `hi.json` and `ko.json` each cover 100% of the keys in `en.json` before prod release. | CR-028 lint rule on every PR; key-coverage script `apps/web/scripts/check-messages.ts` runs in the prod deploy job of `deploy.yml` and blocks the prod deploy if a key is missing (on PRs, missing `hi` or `ko` keys only warn, because CR-028 allows the `en` fallback during development). |
-| NFR-025 | Resilience | When one dependency is down, every flow behaves as the degraded-operation matrix in §4.4.1 says: no request waits longer than 5 s because of the outage, no quota unit is lost or counted twice, and the service recovers without manual steps when the dependency returns. | 100% of the §4.4.1 cells pass. | `apps/api/test/outage.e2e-spec.ts`, one case per §4.4.1 row. Every case starts the API and the worker with all dependencies up (the app needs PostgreSQL at boot; in AWS, ECS restarts a task that fails to start). PostgreSQL, Redis, S3 and the JWKS are reached through a TCP proxy that the test owns (`net.createServer` piping to the real service on a random port): the test warms the caches, closes the proxy and destroys its open sockets to cause the outage, checks the row, then reopens it to check recovery. Anthropic is tested with `AI_MODE=live`, `ANTHROPIC_API_KEY=test` and `ANTHROPIC_BASE_URL` pointing at a closed local port. The JWKS case also moves the Clock 24 h past the last good fetch. |
+| NFR-025 | Resilience | When one dependency is down, every flow behaves as the degraded-operation matrix in §4.4.1 says: no request waits longer than 5 s because of the outage, no quota unit is lost or counted twice, and the service recovers without manual steps when the dependency returns. | 100% of the §4.4.1 cells pass. | `apps/api/test/outage.e2e-spec.ts`, one case per §4.4.1 row. Every case starts the API and the worker with all dependencies up (the app needs PostgreSQL at boot; in AWS, ECS restarts a task that fails to start). PostgreSQL, Redis, S3 and the JWKS are reached through a TCP proxy that the test owns (`net.createServer` piping to the real service on a random port): the test warms the caches, closes the proxy and destroys its open sockets to cause the outage, checks the row, then reopens it to check recovery. Anthropic is tested with `AI_MODE=live`, `ANTHROPIC_API_KEY=test` and `ANTHROPIC_BASE_URL` pointing at a closed local port. Razorpay (v2.1) is tested in `PAYMENT_MODE=live` with the `RazorpayClient` provider overridden (`overrideProvider`) by a double whose every call rejects with `PaymentProviderUnavailableError`. The JWKS case also moves the Clock 24 h past the last good fetch. |
+| NFR-026 | Performance | Razorpay webhooks are processed quickly and exactly once (v2.0). | p95 ≤ 500 ms for API-025; sending every fixture event twice and in reverse order leaves the same TBL-011 and TBL-012 rows as sending them once in order. | `billing.e2e-spec.ts` with signed fixture events |
+| NFR-027 | Correctness | Plan changes take effect quickly and never cut paid time (v2.0). | (v2.1 wording) After API-023 or a webhook commits, the user's next request on any API task sees the new plan, because the shared Redis key is deleted after COMMIT (only a request that read the database before the commit can re-cache the old plan, for at most `PLAN_CACHE_TTL_S`); a cached plan is never used after its `validUntil` (FR-023.2), so PRO ends at `paid_until` to the second, or at the end of the grace while renewing; a renewing user stays PRO across the renewal charge (grace `RENEWAL_GRACE_MS`). | `entitlement.service.spec.ts` with a fixed Clock; `billing.e2e-spec.ts` |
+| NFR-028 | Security | Payment data stays with Razorpay (v2.0). | 0 card, UPI or bank fields in the database, logs or job payloads; 100% of API-023 and API-025 calls signature-checked; Razorpay secrets only in Secrets Manager. | Unit tests; `scan-logs.ts` with an added card-number pattern `/\b(?:\d[ -]?){13,19}\b/`; `gitleaks`; code review |
+| NFR-029 | Reliability | Missed webhooks are repaired (v2.0). | Any difference between Razorpay and TBL-011 is corrected within 1 h by `subscription-reconcile`; every correction adds to `ro_subscription_reconcile_changes_total`, which raises the P2 alarm "Missed webhooks". | `maintenance.processor.spec.ts` with a scripted `RazorpayClient` test double that returns the statuses and invoices each case needs (`MockRazorpayClient` keeps no state, so it is not used here) |
 
 ### 3.3 Assumptions and out of scope
 
@@ -658,7 +704,7 @@ All performance targets are measured server-side in the AWS region (excluding th
 |---|---|---|---|
 | ASM-001 | The platform issues RS256 JWTs, publishes a JWKS, and sets the cookie `sb_access_token` (httpOnly, Secure, `SameSite=Lax`, `Domain=.surfingbear.com`) with the claims in §1.1. | Standard for SSO across subdomains; drives CR-001 to CR-005. | Platform team |
 | ASM-002 | The platform only allows users aged 18 or over, so this module does not process children's data (DPDP Act section 9). | Job-seeking platform; removes the need for parental consent flows. | Platform team, Legal |
-| ASM-003 | The platform owns billing and the plan. The `plan` claim is always current within one token lifetime (≤ 60 min). | Brief says users are already logged in; drives FR-007 and FR-012. | Platform team |
+| ASM-003 | **Deprecated (v2.0).** ~~The platform owns billing and the plan. The `plan` claim is always current within one token lifetime (≤ 60 min).~~ Replaced by ASM-018. | Round 2 moved Resume Pro billing into this module. | Platform team |
 | ASM-004 | Only English resumes are supported in v1, and AI output and the PDF report are in English. The UI is in English, Hindi and Korean (ASM-016). | Most Indian tech resumes are English; Hindi PDF needs complex text shaping that `pdfmake` does not support, and one PDF language keeps the report layout and its tests simple. | Product |
 | ASM-005 | SurfingBear has commercial terms with Anthropic under which API inputs are not used for model training, and a data processing agreement. Sending redacted text to the US is allowed, because the DPDP Act section 16 restricts transfers only to countries the government notifies, and the US is not notified as of 2026-10-16. | Drives the choice of Claude (§4.5) and the notice (§4.9). | Legal |
 | ASM-006 | The Anthropic organization's rate limits allow at least 200 requests/min and 2 million input tokens/min for `claude-opus-5-5`. | Needed for NFR-006 peak (100 analyses/min × up to 2 calls). | DevOps |
@@ -667,19 +713,25 @@ All performance targets are measured server-side in the AWS region (excluding th
 | ASM-009 | Load: 50,000 monthly active users, on average 3 analyses per user per month (150,000 per month, about 5,000 per day), peak 100 analyses per minute. | Sizes NFR-006 and §1.7 instance types. | Product |
 | ASM-010 | SurfingBear legal confirms that keeping security logs (no resume content) for 365 days satisfies DPDP Rules 2025 rule 6, and that this does not require keeping resume content. | Drives FR-019.7 and NFR-013. | Legal |
 | ASM-011 | The grievance contact is `grievance@surfingbear.com` (configurable with `GRIEVANCE_EMAIL`). | DPDP Act section 8(10). | Legal |
-| ASM-012 | The platform has a pricing page; its URL is `PLATFORM_UPGRADE_URL`. | Used for the upgrade button (FR-012). | Platform team |
+| ASM-012 | **Deprecated (v2.0).** ~~The platform has a pricing page; its URL is `PLATFORM_UPGRADE_URL`.~~ The upgrade link now opens P-06 (FR-012.2). | Round 2 added a Pro page to this module. | Platform team |
 | ASM-013 | Names in the resume are not redacted, because no reliable name detector exists for Indian names and the AI needs the rest of the text unchanged. This is stated in the notice (§4.9). | Contact details and ID numbers are redacted (§4.8.4). | Legal, Product |
-| ASM-014 | In dev and staging the platform offers test users and a token endpoint `POST <AUTH_ISSUER>/oauth/token` (OAuth 2.0 client credentials, form fields `grant_type=client_credentials`, `client_id`, `client_secret`, `sub`, `plan`), returning `{ "access_token": "<jwt>" }` with the §1.1 claims. It is used only by the k6 scripts against staging, with GitHub secrets `RO_TEST_CLIENT_ID` and `RO_TEST_CLIENT_SECRET`. Prod has no test users. | Needed because this module never issues tokens; all other automated tests use the mock platform (CMP-023). | Platform team |
+| ASM-014 | In dev and staging the platform offers test users and a token endpoint `POST <AUTH_ISSUER>/oauth/token` (OAuth 2.0 client credentials, form fields `grant_type=client_credentials`, `client_id`, `client_secret`, `sub`, `plan`), returning `{ "access_token": "<jwt>" }` with the §1.1 claims. It is used only by the k6 scripts against staging, with GitHub secrets `RO_TEST_CLIENT_ID` and `RO_TEST_CLIENT_SECRET`. Prod has no test users. Since v2.0 the `plan` field and claim are ignored by the module (FR-023.1). | Needed because this module never issues tokens; all other automated tests use the mock platform (CMP-023). | Platform team |
 | ASM-015 | The code lives in the GitHub organization `surfingbear`, repository `surfingbear-resume-optimizer`, with the teams named in §2.4. | Needed for the OIDC trust (§4.12.1) and CODEOWNERS. | DevOps |
 | ASM-016 | Korean (`ko`) is offered as a third UI language, because SurfingBear's owner company has a Korean HQ team that reviews and supports the product, and Korean-speaking job seekers in India are a user group. English stays the binding notice language for the DPDP Act; `hi` and `ko` are translations. | Costs only one message file, one notice translation and one label column per table; the AI output and the PDF stay English (ASM-004). | Product |
 | ASM-017 | Requests that reach the grievance officer are forwarded to the module's on-call engineer within 2 working days and carried out with FR-019.9. | Gives DPDP grievance requests a defined path without an admin screen (OOS-011). | Legal |
+| ASM-018 | Resume Pro is sold and billed by this module through SurfingBear's Razorpay account. The platform does not know about it, so the token's `plan` claim is ignored and TBL-011 is the only source of truth for the plan. | The round 2 brief describes Pro as a Resume Optimizer subscription paid through Razorpay. | Platform team, Finance |
+| ASM-019 | Round 2 point 3 ("Pro users get an analysis history") is read together with point 5 ("Free users stay exactly as they are today"): FREE users already had the history list in v1.0, so they keep it, and the new Pro-only part is the comparison of two analyses. | Removing a v1.0 feature from FREE users would break point 5. | Product |
+| ASM-020 | Subscription and payment records must be kept for 8 years (Companies Act 2013, section 128, books of account), also after erasure; DPDP Act section 8(7) allows keeping data that the law requires. | Drives `PAYMENT_RECORD_RETENTION_DAYS`. | Legal, Finance |
+| ASM-021 | ₹299 includes GST. Razorpay e-mails the invoices. SurfingBear's Razorpay account has Subscriptions enabled, with one monthly plan per environment (test mode in dev and staging). | Keeps tax and invoicing outside this module. | Finance |
+| ASM-022 | One paid month is one Razorpay billing cycle (`period: monthly`, `interval: 1`), and "the end of the paid month" is that cycle's `current_end`. | Makes "access until the end of the paid month" exact. | Product |
+| ASM-023 | Resume Pro users run on average at most 8 analyses a month (v2.1). | At the NFR-018 cost of US$0.20 per analysis that is at most US$1.60 of AI cost, about half of the ₹299 price after 18% GST (₹253, about US$2.90). Heavier use shows in the fair-use alarm (FR-023.3) and the per-plan token report (NFR-018). Load sizing (ASM-009, NFR-006) does not change, because Pro users are still limited by CR-021 and `MAX_CONCURRENT_ANALYSES`. | Product and Finance |
 
 **Out of scope** (deliberately not built in this version):
 
 | ID | Not covered |
 |---|---|
 | OOS-001 | Sign-up, login, logout, password reset, session refresh (owned by the platform). |
-| OOS-002 | Payments, plan purchase and billing (owned by the platform). |
+| OOS-002 | **Deprecated (v2.0).** ~~Payments, plan purchase and billing (owned by the platform).~~ Resume Pro billing is now in scope (FR-022 to FR-026); what stays out is in OOS-015 and OOS-016. |
 | OOS-003 | OCR for scanned or image-only resumes (they fail with `RESUME_NO_TEXT`). |
 | OOS-004 | Resumes in languages other than English; Hindi or Korean PDF reports. |
 | OOS-005 | File types other than PDF and DOCX (`.doc`, `.rtf`, `.txt`, `.odt`, images). |
@@ -689,9 +741,11 @@ All performance targets are measured server-side in the AWS region (excluding th
 | OOS-009 | Native mobile apps (the web app is responsive). |
 | OOS-010 | Email, SMS or push notifications. |
 | OOS-011 | Admin dashboards, analytics on user data, and any admin access to user resumes or analyses. |
-| OOS-012 | Comparing two analyses side by side. |
+| OOS-012 | **Deprecated (v2.0).** ~~Comparing two analyses side by side.~~ Now in scope for Resume Pro users (FR-025). |
 | OOS-013 | Correction of data in place (DPDP section 12): the user corrects by deleting and uploading a new resume. |
 | OOS-014 | Erasure started automatically by the platform, for example a webhook when a SurfingBear account is deleted. v1 relies on the user's own erasure (FR-019) and the grievance procedure (FR-019.9, ASM-017). |
+| OOS-015 | Refunds, chargebacks and disputes (handled by Finance in the Razorpay dashboard; `refund.*` and `payment.dispute.*` webhooks are stored as `IGNORED`), partial-month credits, coupons, free trials, annual plans, price changes for existing subscribers, and generating GST invoices. |
+| OOS-016 | Undoing a cancellation before the paid month ends, pausing a subscription, and changing the payment method of a running subscription (the user cancels and subscribes again after `paid_until`). |
 
 ---
 
@@ -717,6 +771,9 @@ flowchart LR
       ADM[CMP-011 Admin]
       AUD[CMP-012 Audit]
       HLT[CMP-013 Health and Metrics]
+      BILL[CMP-024 Billing]
+      WH[CMP-026 Razorpay Webhooks]
+      CMPR[CMP-027 Comparison]
     end
     subgraph WORKER["CMP-014 Worker Service (NestJS)"]
       PARSER[CMP-015 Resume Parser]
@@ -728,9 +785,11 @@ flowchart LR
     RD[(CMP-020 Redis)]
     S3[(CMP-021 S3)]
     OBS[CMP-022 Observability]
+    RZPC[CMP-025 Razorpay Client]
   end
   PLAT[SurfingBear Platform Auth]
   CLAUDE[Anthropic Claude API]
+  RZP[Razorpay]
 
   WEB -->|HTTPS| EDGE
   EDGE -->|/api/*| API
@@ -744,6 +803,11 @@ flowchart LR
   PARSER --> S3
   PROC --> AIC
   AIC -->|HTTPS| CLAUDE
+  BILL --> RZPC
+  MAINT --> RZPC
+  RZPC -->|HTTPS| RZP
+  WEB -->|Checkout| RZP
+  RZP -->|signed webhooks| EDGE
   API --> OBS
   WORKER --> OBS
 ```
@@ -752,14 +816,14 @@ flowchart LR
 
 | ID | Component | Responsibility | Technology |
 |---|---|---|---|
-| CMP-001 | Web App | All user pages (§4.6): consent dialog, upload, role and level form, progress, result, history, privacy page. Calls the API from the browser on the same origin with `credentials: 'include'`. Renders the page shell on the server, data on the client. | Next.js 15 App Router, React 19, TanStack Query 5, next-intl 4, Tailwind CSS 4 |
+| CMP-001 | Web App | All user pages (§4.6): consent dialog, upload, role and level form, progress, result, history, privacy page, and since v2.0 the comparison page and the Resume Pro page with Razorpay Checkout. Calls the API from the browser on the same origin with `credentials: 'include'`. Renders the page shell on the server, data on the client. | Next.js 15 App Router, React 19, TanStack Query 5, next-intl 4, Tailwind CSS 4 |
 | CMP-002 | Edge | TLS termination, path routing (`/api/*` → API, everything else → web), AWS WAF managed rules and IP rate rule (CR-021). | AWS ALB, ACM, AWS WAF |
-| CMP-003 | API Service | HTTP API `/api/v1`. Hosts CMP-004 to CMP-013. Stateless; scales horizontally. Never parses files and never calls the AI. | NestJS 11 on Express, Node.js 22 |
-| CMP-004 | Auth and Access | Global guards in this order: `PlatformJwtGuard` (CR-001 to CR-005), `CsrfGuard` (CR-004), `ThrottlerGuard` (CR-021), `RolesGuard` (CR-008), `ConsentGuard` (FR-002). Builds `request.user`. | `jose` 5, `@nestjs/throttler` 6 + Redis storage |
+| CMP-003 | API Service | HTTP API `/api/v1`. Hosts CMP-004 to CMP-013 and, since v2.0, CMP-024, CMP-026 and CMP-027. Stateless; scales horizontally. Never parses files and never calls the AI. | NestJS 11 on Express, Node.js 22 |
+| CMP-004 | Auth and Access | Global guards in this order: `PlatformJwtGuard` (CR-001 to CR-005), `CsrfGuard` (CR-004), `ThrottlerGuard` (CR-021), `RolesGuard` (CR-008), `ConsentGuard` (FR-002). Builds `request.user`; `PlatformJwtGuard` also sets `request.user.plan` from `EntitlementService.planOf()` (CMP-024, FR-023). | `jose` 5, `@nestjs/throttler` 6 + Redis storage |
 | CMP-005 | Catalog Module | Lists active job roles and the experience levels with labels in the request locale (API-002); caches in Redis. | NestJS module, TypeORM |
 | CMP-006 | Privacy Module | Notice (API-003), consent (API-004), data summary (API-014), erasure (API-015). Owns the consent cache. | NestJS module |
 | CMP-007 | Resume Module | Upload validation and S3 staging, resume list, status and delete (API-005 to API-008). Enqueues `resume-parse`. | NestJS module, Multer (memory storage), `@aws-sdk/client-s3` 3 |
-| CMP-008 | Analysis Module | Create (with the ordered checks of FR-006.2), status and result with plan gating, history, delete (API-009 to API-011, API-013). Enqueues `resume-analysis`. | NestJS module |
+| CMP-008 | Analysis Module | Create (with the ordered checks of FR-006.2), status and result with plan gating, history, delete (API-009 to API-011, API-013) and, since v2.0, comparison through CMP-027 (API-026). Enqueues `resume-analysis`. | NestJS module |
 | CMP-009 | Usage Module | Quota reserve, commit and release on TBL-008 inside the caller's transaction; period month and `resetsAt` calculation. Used by CMP-008, CMP-016, CMP-018. | NestJS provider, Luxon 3 |
 | CMP-010 | Report Module | Builds the PDF in memory on request (API-012, §4.10) and streams it. | `pdfmake` 0.2 (server-side `PdfPrinter`) |
 | CMP-011 | Admin Module | Job role catalog management (API-016 to API-018). | NestJS module |
@@ -769,12 +833,16 @@ flowchart LR
 | CMP-015 | Resume Parser | Downloads the raw file, extracts text in an isolated thread, checks limits, normalizes, redacts, encrypts, stores, deletes the raw file (§4.8.2 to §4.8.4). | `pdfjs-dist` 4 (legacy build), `mammoth` 1, `yauzl` 3, Node `worker_threads` |
 | CMP-016 | Analysis Processor | Builds the prompt, calls CMP-017, validates and post-processes the output, computes the score, saves results and commits quota (§4.8.5). | NestJS provider, `zod` 3 |
 | CMP-017 | AI Client | One interface `AiClient.analyze(input: AiInput): Promise<AiCallResult>` with two implementations, `AnthropicAiClient` (live) and `MockAiClient` (§4.7.6), chosen by `AI_MODE`. Each implementation does the request, the response handling and `AiOutputSchema` validation of §4.7.1–§4.7.2, including the one extra request for invalid output. It returns `{ output, model, inputTokens, outputTokens, attempts }` or throws `AiUnavailableError`, `AiOutputInvalidError` or `AiInternalError`, each carrying the same `{ model, inputTokens, outputTokens, attempts }` collected so far (`model` is `null` if no response arrived), so the failure transaction can store them; CMP-016 maps these to `AI_UNAVAILABLE`, `AI_OUTPUT_INVALID` and `INTERNAL_ERROR`. Post-processing (§4.7.5) is done by CMP-016. | `@anthropic-ai/sdk` (latest 0.x) |
-| CMP-018 | Maintenance Jobs | Daily retention purge and per-minute stale janitor (FR-020). | BullMQ repeatable jobs |
+| CMP-018 | Maintenance Jobs | Daily retention purge and per-minute stale janitor (FR-020); since v2.0 hourly subscription reconciliation (FR-026.6) and the daily Pro heavy-use check (FR-023.3). | BullMQ repeatable jobs |
 | CMP-019 | PostgreSQL | System of record for all tables in §5. | PostgreSQL 16 (Amazon RDS) |
-| CMP-020 | Redis | BullMQ queues, rate-limit counters, consent and catalog caches. Holds no data that cannot be rebuilt. | Redis 7 (Amazon ElastiCache, TLS, auth token) |
+| CMP-020 | Redis | BullMQ queues, rate-limit counters, consent, catalog and (v2.0) plan caches (`ro:plan:<userId>`, FR-023.2). Holds no data that cannot be rebuilt. | Redis 7 (Amazon ElastiCache, TLS, auth token) |
 | CMP-021 | S3 | Short-lived staging of raw uploaded files between API and worker. Private, SSE-KMS, lifecycle 1 day. | Amazon S3 |
 | CMP-022 | Observability | Logs (CloudWatch Logs), metrics (Prometheus scrape by the ADOT collector → CloudWatch Metrics, §4.11), traces (OpenTelemetry → AWS X-Ray), alarms (§4.11). | CloudWatch, ADOT collector sidecar, OpenTelemetry SDK |
-| CMP-023 | Mock Platform (local only) | Stands in for platform auth on a laptop: JWKS, dev login that sets the cookie, a token endpoint for tests, a fake pricing page (§4.12.3). Never deployed. | Node.js 22 `http` + `jose` |
+| CMP-023 | Mock Platform (local only) | Stands in for platform auth on a laptop: JWKS, dev login that sets the cookie, a token endpoint for tests (§4.12.3); its fake pricing page is deprecated since v2.0 (P-06 replaces it). Never deployed. | Node.js 22 `http` + `jose` |
+| CMP-024 | Billing Module (v2.0) | API-021 to API-024: plan and subscription view, checkout, payment verification, cancel. `EntitlementService.planOf()` used by CMP-004 on every authenticated request (FR-023). Writes TBL-011, TBL-012 and audit rows. | NestJS module |
+| CMP-025 | Razorpay Client (v2.0) | Interface `RazorpayClient` with `createSubscription`, `fetchSubscription`, `cancelSubscription(id, atCycleEnd)`, `fetchPayment`, `fetchPaidInvoices(subscriptionId)` and `fetchPlan`; implementations `LiveRazorpayClient` (SDK, `RAZORPAY_TIMEOUT_MS` per call, no automatic retries) and `MockRazorpayClient` (§4.13.4), chosen by `PAYMENT_MODE`. Network errors, timeouts and 5xx become `PaymentProviderUnavailableError` (503 `PAYMENT_PROVIDER_UNAVAILABLE`); 4xx become `INTERNAL_ERROR` with an `error` log, except a rejected cancel, which is checked as in FR-024.6; every error adds 1 to `ro_razorpay_errors_total{operation}`. | `razorpay` npm 2.x |
+| CMP-026 | Razorpay Webhooks (v2.0) | API-025: raw-body signature check, idempotent event storage in TBL-013, status and payment updates in one transaction (FR-026, §4.13.3). Makes no outbound calls. | NestJS module, public route |
+| CMP-027 | Comparison (v2.0) | API-026: builds the comparison of two completed analyses from stored results (FR-025). `analyses/compare.service.ts` in the analyses module. | NestJS provider |
 
 ### 4.3 Main flows
 
@@ -923,16 +991,26 @@ sequenceDiagram
   participant R as Redis
   participant S as S3
   participant W as Worker
+  participant Z as Razorpay
   B->>A: POST /api/v1/privacy/erasure {confirm DELETE}
+  opt open subscription (v2.0, FR-019.10)
+    A->>D: billing lock for the user
+    A->>Z: cancel at cycle end (ACTIVE, renewing, Pro) or now (other open rows)
+    alt Razorpay down
+      A-->>B: 503 PAYMENT_PROVIDER_UNAVAILABLE and stop, nothing deleted
+    else cancelled
+      A->>D: save the cancel and its audit row in a short transaction
+    end
+  end
   A->>D: BEGIN
   A->>D: collect storage_key of user's resumes
-  A->>D: DELETE analyses RETURNING status and period_month (children cascade)
-  A->>D: release reservations of the deleted QUEUED or PROCESSING rows
+  A->>D: DELETE analyses RETURNING status, period_month and plan_at_creation (children cascade)
+  A->>D: release reservations of the deleted QUEUED or PROCESSING rows (reserved_count or pro_reserved_count)
   A->>D: DELETE resumes
-  Note over A,D: monthly_usage rows are kept (FR-019.7)
+  Note over A,D: monthly_usage, subscriptions and payments are kept (FR-019.7)
   A->>D: UPDATE consents ACTIVE to WITHDRAWN
   A->>D: INSERT erasure_requests, audit DATA_ERASED, COMMIT
-  A->>R: DEL ro:consent:NOTICE_VERSION:userId
+  A->>R: DEL ro:consent:NOTICE_VERSION:userId and ro:plan:userId
   A->>S: DeleteObject for each collected key (best effort)
   A-->>B: 200 counts
   Note over W,D: A worker still processing a deleted analysis finds no row when it saves and discards the result
@@ -1000,27 +1078,199 @@ stateDiagram-v2
 
 No other transitions exist. `COMPLETED` and `FAILED` are final: a later write attempt is ignored.
 
+Subscription `status` (TBL-011, v2.0). Pro is granted only by `paid_until` (FR-023.1), never by a status alone.
+
+```mermaid
+stateDiagram-v2
+  [*] --> CREATED: API-022
+  CREATED --> ACTIVE: captured payment (API-023, webhook or reconcile)
+  CREATED --> AUTHENTICATED: subscription.authenticated
+  AUTHENTICATED --> ACTIVE: subscription.activated or charged
+  CREATED --> CANCELLED: abandoned checkout (reconcile), API-022 replaces it, API-024
+  CREATED --> EXPIRED: Razorpay expires an unpaid subscription
+  ACTIVE --> ACTIVE: subscription.charged (paid_until moves forward)
+  ACTIVE --> PENDING: renewal charge failed
+  PENDING --> ACTIVE: retry charged
+  PENDING --> HALTED: retries exhausted
+  HALTED --> ACTIVE: a later charge succeeds (FR-023.7)
+  HALTED --> CANCELLED: reconcile, API-022 replaces it, or API-024
+  ACTIVE --> PAUSED: reconcile finds it paused
+  PAUSED --> ACTIVE: reconcile finds it active
+  PAUSED --> CANCELLED: API-022 replaces it or API-024
+  AUTHENTICATED --> CANCELLED: API-022 replaces it or API-024
+  PENDING --> CANCELLED: API-022 replaces it or API-024
+  ACTIVE --> CANCELLED: cycle end after a cancel (subscription.cancelled), or Pro has ended and API-022, API-024 or erasure cancels it now
+  ACTIVE --> COMPLETED: all billing cycles used
+  CANCELLED --> [*]
+  COMPLETED --> [*]
+  EXPIRED --> [*]
+```
+
+`PAUSED` is copied only by reconciliation (the webhook ignores `subscription.paused`, §4.13.3); the module never pauses a subscription, and a `PAUSED` row gets no renewal grace. Terminal rows never change status again (FR-026.4).
+
+#### 4.3.7 Subscribe to Resume Pro (FR-022, v2.0)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser (P-06)
+  participant A as API (CMP-024)
+  participant D as PostgreSQL
+  participant R as Razorpay
+  B->>A: POST /api/v1/subscription/checkout {termsVersion}
+  A->>D: billing lock for the user (FR-022.3), plan and open subscription
+  alt already PRO
+    A-->>B: 409 ALREADY_PRO
+  else CREATED checkout younger than 30 min
+    A-->>B: 201 the same checkout
+  else new checkout
+    opt an open subscription that grants no Pro
+      A->>R: fetch it, cancel it now unless Razorpay already ended it
+      A->>D: mark it CANCELLED or copy the ended status, audit
+    end
+    A->>R: create subscription (plan, total_count 120, notes userId)
+    alt Razorpay down
+      A-->>B: 503 PAYMENT_PROVIDER_UNAVAILABLE
+    else created
+      A->>D: INSERT subscriptions CREATED, audit SUBSCRIPTION_CHECKOUT
+      A-->>B: 201 razorpaySubscriptionId, razorpayKeyId, amount
+    end
+  end
+  B->>R: Razorpay Checkout (card, UPI or netbanking)
+  alt user closes Checkout
+    Note over B,D: the row stays CREATED, grants nothing and is cancelled by the reconcile job after 30 min
+  else paid
+    R-->>B: payment id, subscription id, signature
+    B->>A: POST /api/v1/subscription/verify
+    A->>A: HMAC check (CR-037)
+    alt bad signature
+      A-->>B: 400 PAYMENT_SIGNATURE_INVALID
+    else valid
+      A->>R: fetch subscription and payment
+      alt Razorpay down
+        A-->>B: 503, then P-06 polls API-021 until the webhook activates Pro
+      else payment captured
+        A->>D: INSERT payment, status ACTIVE, paid_until = GREATEST(paid_until, current_end), audit
+        A-->>B: 200 plan PRO, proUntil
+      else not captured yet, or no current_end yet
+        A-->>B: 200 plan FREE, activationPending true
+      end
+    end
+  end
+```
+
+#### 4.3.8 Renewal and webhooks (FR-023, FR-026, v2.0)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant R as Razorpay
+  participant A as API (CMP-026)
+  participant D as PostgreSQL
+  participant K as Redis
+  R->>R: charge at the end of the billing cycle
+  R->>A: POST /api/v1/webhooks/razorpay (subscription.charged)
+  A->>A: HMAC of the raw body (CR-037)
+  alt bad signature
+    A-->>R: 400 WEBHOOK_SIGNATURE_INVALID
+  else valid
+    A->>D: BEGIN, INSERT payment_events ON CONFLICT DO NOTHING
+    alt event already stored
+      A-->>R: 200, nothing changes
+    else new event
+      A->>D: lock the subscription row, apply the rule of section 4.13.3
+      A->>D: INSERT payment, paid_until = GREATEST(paid_until, current_end), COMMIT
+      A->>K: DEL ro:plan:userId
+      A-->>R: 200
+    end
+  end
+  Note over R,A: on a 5xx or a timeout Razorpay retries the same event
+  opt renewal charge fails
+    R->>A: subscription.pending, later subscription.halted
+    A->>D: status PENDING or HALTED, so the grace stops and Pro ends at paid_until
+  end
+```
+
+#### 4.3.9 Cancel Resume Pro (FR-024, v2.0)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser (P-06)
+  participant A as API (CMP-024)
+  participant D as PostgreSQL
+  participant R as Razorpay
+  B->>A: POST /api/v1/subscription/cancel
+  A->>D: billing lock (FR-022.3), find the open subscription
+  alt none
+    A-->>B: 409 NO_ACTIVE_SUBSCRIPTION
+  else already cancelling
+    A-->>B: 200 the same body
+  else ACTIVE, renewing and Pro
+    A->>R: cancel at cycle end
+    alt Razorpay down
+      A-->>B: 503 PAYMENT_PROVIDER_UNAVAILABLE
+    else cancelled at cycle end
+      A->>D: cancel_at_period_end true, audit SUBSCRIPTION_CANCEL_REQUESTED
+      A-->>B: 200 proUntil = paid_until
+    end
+  else any other open subscription
+    A->>R: cancel now
+    alt Razorpay down
+      A-->>B: 503 PAYMENT_PROVIDER_UNAVAILABLE
+    else cancelled, or Razorpay says it already ended
+      A->>D: status CANCELLED (or the ended status), audit
+      A-->>B: 200 plan as computed after the cancel
+    end
+  end
+  Note over R,D: at the cycle end Razorpay sends subscription.cancelled and the row becomes CANCELLED
+```
+
+#### 4.3.10 Compare two analyses (FR-025, v2.0)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser (P-03, P-05)
+  participant A as API (CMP-027)
+  participant D as PostgreSQL
+  B->>A: GET /api/v1/analyses/compare?baseId&targetId
+  alt plan FREE
+    A-->>B: 403 PRO_REQUIRED, P-05 shows the Pro upsell
+  else plan PRO
+    A->>D: load both analyses with scores and missing skills (owner, not expired)
+    alt same id, unknown or not completed
+      A-->>B: 400, 404 or 409
+    else both completed
+      A->>A: delta per dimension, skill diff only when sameRole
+      A-->>B: 200 comparison
+    end
+  end
+```
+
 ### 4.4 External integrations
 
 | System | Purpose | Protocol / auth | Failure handling |
 |---|---|---|---|
 | SurfingBear Platform Auth | Token verification keys (JWKS). | HTTPS `GET AUTH_JWKS_URL`, public, no auth, 3000 ms timeout, through `JwksProvider` (CR-005). | Last good key set refreshed every 10 min and on unknown `kid` (at most once per 60 s); after a failed refresh the last good set is used for up to 24 h; no usable set: 503 `SERVICE_UNAVAILABLE` (CR-005). Counter `ro_jwks_fetch_errors_total`; alarm if it increases for 5 min. |
-| SurfingBear Platform (pages) | Login redirect and pricing page. | Browser navigation to `PLATFORM_LOGIN_URL`, `PLATFORM_HOME_URL` and `PLATFORM_UPGRADE_URL`. | Not called by servers; no failure handling needed. |
+| SurfingBear Platform (pages) | Login redirect and home page. (The platform pricing page and `PLATFORM_UPGRADE_URL` are deprecated since v2.0; upgrades open P-06.) | Browser navigation to `PLATFORM_LOGIN_URL` and `PLATFORM_HOME_URL`. | Not called by servers; no failure handling needed. |
 | Anthropic Claude API | Scoring, missing skills, suggestions (§4.7). | HTTPS via `@anthropic-ai/sdk`, header `x-api-key` from `ANTHROPIC_API_KEY`. Separate Anthropic workspace and key per environment. | Per request timeout `AI_TIMEOUT_MS`; SDK retries `AI_SDK_MAX_RETRIES` with exponential backoff on 408, 409, 429, 5xx and connection errors (honours `retry-after`). Then `AI_UNAVAILABLE`. Invalid output: `AI_INVALID_OUTPUT_RETRIES` extra request, then `AI_OUTPUT_INVALID`. 401/403: `AI_UNAVAILABLE` plus counter `ro_ai_auth_errors_total` and a paging alarm. 400: `INTERNAL_ERROR` (a bug) and an error log. Refusal: server-side fallback (`fallbacks: "default"`); a final refusal counts as invalid output. |
 | Amazon S3 | Raw file staging. | AWS SDK v3, IAM task role (no static keys in AWS). | API `PutObject` error: 503, nothing saved. Worker `GetObject` error: throw; BullMQ makes 3 attempts in total (retries after 2 s and 4 s), then the resume is `FAILED` with `INTERNAL_ERROR`. `DeleteObject` error: `warn` log; the lifecycle rule removes the object within `RAW_FILE_MAX_HOURS` hours. |
 | AWS Secrets Manager / KMS | Secrets and encryption keys. | ECS injects secrets as env vars at task start; KMS used by RDS, ElastiCache, S3. | Missing secret: task fails to start (CR-018), ECS keeps the old tasks running. |
+| Razorpay (v2.0) | Resume Pro subscriptions, Checkout and payment events. | Server to Razorpay: REST through the `razorpay` SDK with `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` (HTTP Basic), `RAZORPAY_TIMEOUT_MS` per call. Browser: Checkout script with the public key id only. Razorpay to the module: webhooks to API-025 signed with `RAZORPAY_WEBHOOK_SECRET` (CR-037). | API-022, API-023, API-024, and API-015 for a user with an open subscription return 503 `PAYMENT_PROVIDER_UNAVAILABLE` and change nothing. Entitlement keeps working from TBL-011. Razorpay retries webhooks that do not get a 2xx; the hourly reconcile job repairs missed ones (FR-026.6). |
 
 #### 4.4.1 Degraded-operation matrix (NFR-025)
 
 What happens while exactly one dependency is down. "Works" means normal behaviour. Times are bounded by the client settings in CR-015 and CR-005.
 
-| Dependency down | Read APIs (API-001 to API-003, API-006, API-007, API-010, API-011, API-014) | Upload (API-005) | Create analysis (API-009) | Report (API-012) | Worker jobs | Maintenance jobs | Readiness (API-020) |
-|---|---|---|---|---|---|---|---|
-| PostgreSQL | API-003 works; API-002 works while its cache entry lives; all others 503 `SERVICE_UNAVAILABLE` | 503 from the consent check, before anything reaches S3 | 503 | 503 | A job throws and BullMQ retries it (3 attempts). After recovery the stale janitor fails anything left unfinished (`ANALYSIS_TIMEOUT` or `INTERNAL_ERROR`) and releases its reservation | The run fails; the next run catches up | 503, so the ALB stops routing to the task |
-| Redis | Works: consent and catalog are read from PostgreSQL, rate limiting fails open | 503 (enqueue fails; the row and the object are removed) | 503 (the analysis becomes `FAILED` with `INTERNAL_ERROR` and its reservation is released, FR-006.4) | Works | No job runs. Queued work continues when Redis returns; work lost with Redis data is failed by the stale janitor | Not scheduled until Redis returns | 200 with `"status": "degraded"` and `"redis": "down"` |
-| S3 | Works | 503; no row is created | Works (the text is in PostgreSQL) | Works | Parse jobs fail `GetObject`, BullMQ retries them, then the resume is `FAILED` with `INTERNAL_ERROR`. Analysis jobs are not affected | Not affected (objects expire through the lifecycle rule) | 200 (S3 is not checked) |
-| Anthropic API | Works | Works | Works (the analysis is accepted) | Works | Analyses fail with `AI_UNAVAILABLE` and release their reservation; after `AI_CIRCUIT_FAILURES` failures the circuit opens and jobs fail at once (§4.7.7) | Not affected | 200 |
-| Platform JWKS | Works while a key set fetched in the last 24 h exists; after that 503 on every protected endpoint (CR-005) | Same | Same | Same | Not affected | Not affected | 200 |
+| Dependency down | Read APIs (API-001 to API-003, API-006, API-007, API-010, API-011, API-014, API-026) | Upload (API-005) | Create analysis (API-009) | Report (API-012) | Worker jobs | Maintenance jobs | Readiness (API-020) | Billing (API-021 to API-025, v2.0) |
+|---|---|---|---|---|---|---|---|---|
+| PostgreSQL | API-003 works; API-002 works while its cache entry lives; all others 503 `SERVICE_UNAVAILABLE` | 503 from the consent check, before anything reaches S3 | 503 | 503 | A job throws and BullMQ retries it (3 attempts). After recovery the stale janitor fails anything left unfinished (`ANALYSIS_TIMEOUT` or `INTERNAL_ERROR`) and releases its reservation | The run fails; the next run catches up | 503, so the ALB stops routing to the task | 503 `SERVICE_UNAVAILABLE` |
+| Redis | Works: consent and catalog are read from PostgreSQL, rate limiting fails open | 503 (enqueue fails; the row and the object are removed) | 503 (the analysis becomes `FAILED` with `INTERNAL_ERROR` and its reservation is released, FR-006.4) | Works | No job runs. Queued work continues when Redis returns; work lost with Redis data is failed by the stale janitor | Not scheduled until Redis returns | 200 with `"status": "degraded"` and `"redis": "down"` | Works (the plan cache falls back to PostgreSQL) |
+| S3 | Works | 503; no row is created | Works (the text is in PostgreSQL) | Works | Parse jobs fail `GetObject`, BullMQ retries them, then the resume is `FAILED` with `INTERNAL_ERROR`. Analysis jobs are not affected | Not affected (objects expire through the lifecycle rule) | 200 (S3 is not checked) | Works |
+| Anthropic API | Works | Works | Works (the analysis is accepted) | Works | Analyses fail with `AI_UNAVAILABLE` and release their reservation; after `AI_CIRCUIT_FAILURES` failures the circuit opens and jobs fail at once (§4.7.7) | Not affected | 200 | Works |
+| Platform JWKS | Works while a key set fetched in the last 24 h exists; after that 503 on every protected endpoint (CR-005) | Same | Same | Same | Not affected | Not affected | 200 | API-021 to API-024 as the other protected endpoints; API-025 works (no token) |
+| Razorpay (v2.0) | Works | Works | Works | Works | Not affected | `subscription-reconcile` fails and catches up the next hour | 200 | API-021 works from TBL-011; API-022, API-023, API-024 return 503 `PAYMENT_PROVIDER_UNAVAILABLE`; API-025 is not called while Razorpay is down, and Razorpay retries afterwards; API-015 for a user with an open subscription returns 503 and deletes nothing (FR-019.10) |
 
 ### 4.5 Tech stack and reasons
 
@@ -1031,7 +1281,7 @@ What happens while exactly one dependency is down. "Works" means normal behaviou
 | Background jobs | BullMQ 5 on Redis | AI calls take up to 90 s and file parsing is CPU-heavy, so both must leave the request path. BullMQ gives retries with backoff, job IDs for idempotency, stalled-job recovery and repeatable (cron) jobs, using the Redis we already need. |
 | Database | PostgreSQL 16 (RDS) | Relational data with strict rules (one active consent per user, quota rows locked with `SELECT … FOR UPDATE`, CHECK constraints for state machines, cascading deletes for erasure). Partial indexes fit the "only active rows" queries. RDS gives PITR for NFR-009. |
 | ORM and migrations | TypeORM 0.3 with explicit migrations, `synchronize: false` | Team already knows TypeORM; explicit migrations satisfy CR-035 and prevent accidental schema changes on shared databases. |
-| Cache and rate limiting | Redis 7 (ElastiCache) | Shared counters for rate limits across API tasks, short-lived caches for consent and catalog, and BullMQ storage in one managed service. |
+| Cache and rate limiting | Redis 7 (ElastiCache) | Shared counters for rate limits across API tasks, short-lived caches for consent, catalog and (v2.0) plan, and BullMQ storage in one managed service. |
 | File storage | Amazon S3, `ap-south-1`, SSE-KMS, 1-day lifecycle | Decouples the API from the worker for untrusted files. Data stays in India. The raw file is needed only until parsing, so a 1-day lifecycle is the minimum safe retention. |
 | PDF text extraction | `pdfjs-dist` 4 (legacy Node build, ESM-only; imported statically by the ESM parse thread `parse-thread.mts`, §2.5) | Mozilla-maintained, gives page count and a clear `PasswordException` for encrypted files; eval can be disabled (CR-024). |
 | DOCX text extraction | `mammoth` 1 (`extractRawText`) + `yauzl` 3 pre-check | `mammoth` gives clean text without layout noise; `yauzl` reads the ZIP central directory so zip bombs are rejected before decompression. |
@@ -1045,6 +1295,7 @@ What happens while exactly one dependency is down. "Works" means normal behaviou
 | Styling | Tailwind CSS 4 | Fast, consistent responsive layouts down to 360 px (NFR-020). |
 | Hosting | AWS ECS Fargate behind ALB, images in ECR | No servers to patch; separate auto-scaling for API, worker and web; matches SurfingBear's existing AWS footprint (ASM-007). |
 | Observability | pino JSON logs, Prometheus metrics, OpenTelemetry traces, CloudWatch alarms | Structured logs meet CR-009; metrics map one-to-one to NFR targets. |
+| Payments (v2.0) | Razorpay Subscriptions and Checkout, `razorpay` npm 2.x | Required by the round 2 brief. Checkout keeps card, UPI and bank data out of our systems (PCI DSS SAQ A). The Subscriptions API charges every month, retries failed charges and cancels at cycle end, so the module only mirrors Razorpay's state and keeps its own `paid_until`. |
 | CI/CD | GitHub Actions | Repository is on GitHub; environments with required reviewers give the prod approval gate (CR-033). |
 
 ### 4.6 Frontend pages and behaviour (CMP-001)
@@ -1052,21 +1303,21 @@ What happens while exactly one dependency is down. "Works" means normal behaviou
 **Global rules**
 
 1. Routes: `/` redirects to `/<locale>` where locale is the `NEXT_LOCALE` cookie if set, else the locale chosen from `Accept-Language` by the CR-029 rule. All pages live under `/[locale]`.
-2. Header on every page: product name, links "New analysis" (P-01), "History" (P-03), "Privacy" (P-04), and a language switcher `EN | हिन्दी | 한국어` that keeps the current path and sets the `NEXT_LOCALE` cookie.
+2. Header on every page: product name, links "New analysis" (P-01), "History" (P-03), "Privacy" (P-04), a language switcher `EN | हिन्दी | 한국어` that keeps the current path and sets the `NEXT_LOCALE` cookie, and since v2.0 a "Pro" link (P-06) and a "PRO" badge when API-001 `plan` is `PRO`.
 3. API client `lib/api/client.ts`: `fetch('/api/v1' + path, { credentials: 'include', headers: { 'Accept-Language': locale, 'X-Requested-With': 'SurfingBearRO' } })`. JSON bodies are sent with `Content-Type: application/json`. On 401 it redirects (FR-001.4). On 5xx or network error it shows a toast with the localized message and the `requestId`. It never retries POST, PATCH or DELETE.
 4. Errors with a code from §6.3 are shown with the API's `error.message` (already localized).
 5. Dates use CR-030 formatting.
-6. P-01, P-02 and P-03 call API-001 first; if `consent.required` is true they show the blocking `ConsentDialog` (FR-002.8) before anything else. The dialog loads the notice from API-003, shows it, and has a checkbox "I have read and agree", an **Accept** button (enabled only when ticked; calls API-004 with `NOTICE_VERSION` from API-001 `consent.currentVersion` and the current locale, then closes and reloads API-001) and a **Decline** button (navigates to `PLATFORM_HOME_URL` (runtime config)). The dialog cannot be closed in any other way. P-04 never blocks.
+6. P-01, P-02, P-03 and, since v2.0, P-05 and P-06 call API-001 first; if `consent.required` is true they show the blocking `ConsentDialog` (FR-002.8) before anything else. The dialog loads the notice from API-003, shows it, and has a checkbox "I have read and agree", an **Accept** button (enabled only when ticked; calls API-004 with `NOTICE_VERSION` from API-001 `consent.currentVersion` and the current locale, then closes and reloads API-001) and a **Decline** button (navigates to `PLATFORM_HOME_URL` (runtime config)). The dialog cannot be closed in any other way. P-04 never blocks.
 7. Every interactive element is reachable by keyboard and has an accessible name (NFR-019).
 
 **P-01 New analysis** — `/[locale]`
 
 | Order | Element | Behaviour |
 |---|---|---|
-| 1 | Usage banner | From API-001 `usage`: "`remaining` of `limit` analyses left this month. Resets on `resetsAt`". If `remaining = 0`: FREE users see an "Upgrade to Pro" link to `upgradeUrl` from API-001; PRO users see "Limit reached until `resetsAt`". |
+| 1 | Usage banner | From API-001 `usage`: "`remaining` of `limit` analyses left this month. Resets on `resetsAt`". If `remaining = 0`, FREE users see an "Upgrade to Pro" link to `upgradeUrl` (P-06). PRO users (v2.0) see "Unlimited analyses with Resume Pro until `proUntil`" instead of the counter. |
 | 2 | Resume step | Two tabs. **Upload new**: drop zone and file picker with `accept=".pdf,.docx"`. Before calling the API the client checks extension and `size <= limits.maxFileSizeBytes` and, without a request, shows the text of message key `errors.UNSUPPORTED_FILE_TYPE` or `errors.FILE_TOO_LARGE` from `messages/*.json` (the same texts as ERR-014 and ERR-013 in §6.3). Then API-005, then poll API-007 every `RESUME_POLL_INTERVAL_MS` up to `RESUME_POLL_MAX_ATTEMPTS` times. While `PENDING`: "Reading your resume…". `PARSED`: a tick, the file name and "Ready". `FAILED`: the message for `parseErrorCode` and an "Upload another file" button. After 30 polls without a final state: "This is taking longer than usual" with a "Check again" button that restarts polling. **Use a previous resume**: list from API-006 with `?parseStatus=PARSED&page=1&pageSize=50` (first page only, newest first, with file name and upload date); selecting one marks it ready. Each item has a Delete button (confirm dialog, then API-008), so a user at `MAX_STORED_RESUMES` can free a slot. |
 | 3 | Role and level step | Job role `<select>` from API-002 `jobRoles` (localized `name`), experience level radio group from API-002 `experienceLevels` (label and years). Both required. |
-| 4 | Analyze button | Enabled only when a resume is `PARSED`, a role and a level are chosen, and `remaining > 0`. Click: disables the button, calls API-009, and on 202 navigates to P-02 `/[locale]/analyses/<id>`. On an error it shows the message next to the button and re-enables it. |
+| 4 | Analyze button | Enabled only when a resume is `PARSED`, a role and a level are chosen, and `remaining` is `null` (PRO) or greater than 0. Click: disables the button, calls API-009, and on 202 navigates to P-02 `/[locale]/analyses/<id>`. On an error it shows the message next to the button and re-enables it. |
 
 **P-02 Analysis status and result** — `/[locale]/analyses/[analysisId]`
 
@@ -1075,16 +1326,27 @@ What happens while exactly one dependency is down. "Works" means normal behaviou
 | Loading | Skeleton. |
 | 404 | "Analysis not found" with a link to P-03. |
 | `QUEUED` / `PROCESSING` | Progress panel with two steps ("Waiting in queue", "Analysing with AI"; the current step is highlighted) and elapsed time. Polls API-011 every `ANALYSIS_POLL_FAST_MS` until `ANALYSIS_POLL_SLOW_AFTER_MS` after `createdAt`, then every `ANALYSIS_POLL_SLOW_MS`. Polling stops on `COMPLETED` or `FAILED` and when the tab is hidden (resumes when visible). |
-| `FAILED` | The `errorMessage`, the sentence "This attempt did not count towards your monthly limit.", and a "Start a new analysis" button to P-01. |
+| `FAILED` | The `errorMessage`, the sentence "This attempt did not count towards your monthly limit." (FREE; PRO users, who have no limit, see "This attempt was not counted."), and a "Start a new analysis" button to P-01. |
 | `COMPLETED` | In this order: (1) `ScoreGauge` showing `overallScore` / 100 with the band label and colour: `NEEDS_WORK` `#DC2626`, `FAIR` `#F59E0B`, `GOOD` `#16A34A`, `EXCELLENT` `#047857`; (2) `summary`; (3) `DimensionList`: six rows with name, weight %, a 0–100 bar and rationale; (4) `MissingSkills`: chips grouped under Critical, Important, Nice to have; a chip with `source = AI` also shows a small badge with the `source.AI` label (§5.5); (5) `SuggestionCard` per suggestion: section and issue badges, original text (struck through), suggested text, reason and a "Copy" button that copies `suggestedText`; (6) `LockedSuggestions` card if `lockedSuggestionCount > 0`: "`n` more suggestions are available with Pro" and an "Upgrade" button to `upgradeUrl`; (7) the line of message key `analysis.disclaimer`, "AI-generated guidance. Please review before use." (the same text as the PDF footer, translated in `hi` and `ko`); (8) actions: "Download PDF" (fetch API-012, save the blob with the file name from `Content-Disposition`; on error show the message) and "Delete" (confirm dialog, then API-013, then navigate to P-03). Header line: job role name, experience level label (web `level.*` labels, §5.5), resume file name, created date. |
 
 **P-03 History** — `/[locale]/analyses`
 
-A table (cards below 640 px wide) from API-010 with `pageSize = 10`: date, job role, level, score with band colour or the status (`Queued`, `In progress`, `Failed`), resume file name. A row click opens P-02. Page controls "Previous" / "Next" and "Page x of y" use `meta`. Empty state: "No analyses yet" with a button to P-01.
+A table (cards below 640 px wide) from API-010 with `pageSize = 10`: date, job role, level, score with band colour or the status (`Queued`, `In progress`, `Failed`), resume file name. A row click opens P-02. Page controls "Previous" / "Next" and "Page x of y" use `meta`. Empty state: "No analyses yet" with a button to P-01. Since v2.0, PRO users also get a checkbox on each `COMPLETED` row and a "Compare" button that is enabled when exactly two rows are selected and opens P-05 with the older analysis as `baseId`; FREE users see the same list as before plus the line "Compare two analyses with Resume Pro" linking to P-06.
 
 **P-04 Privacy and my data** — `/[locale]/privacy`
 
-In this order: (1) the privacy notice from API-003 in the current locale; (2) consent status from API-001 (`Accepted on <date>` or `Not given`; when not given, a "Give consent" button opens the same `ConsentDialog` as rule 6); (3) "My data" from API-014: counts and lists of resumes and analyses with dates, retention periods, processors, the grievance email as a `mailto:` link; (4) a red "Delete all my data" button. It opens `DeleteDataDialog`, which explains what is deleted and kept (FR-019.7), requires typing `DELETE`, then calls API-015 and shows "All your data has been deleted" and the counts. The next visit to P-01 shows the consent dialog again.
+In this order: (1) the privacy notice from API-003 in the current locale; (2) consent status from API-001 (`Accepted on <date>` or `Not given`; when not given, a "Give consent" button opens the same `ConsentDialog` as rule 6); (3) "My data" from API-014: counts and lists of resumes and analyses with dates, since v2.0 the subscriptions and payments, retention periods, processors, the grievance email as a `mailto:` link; (4) a red "Delete all my data" button. It opens `DeleteDataDialog`, which explains what is deleted and kept (FR-019.7) and, for a Resume Pro user, that the subscription is cancelled and Pro stays until the end of the paid month (FR-019.10); it requires typing `DELETE`, then calls API-015 and shows "Your resumes and analyses have been deleted" and the counts (wording changed in v2.1, because payment records are kept). The next visit to P-01 shows the consent dialog again.
+
+**P-05 Compare (v2.0)** — `/[locale]/analyses/compare?baseId=<uuid>&targetId=<uuid>`
+
+Calls API-026. On 403 `PRO_REQUIRED` it shows `ProUpsell` (benefits and a button to P-06). Otherwise, in this order: (1) two header cards (date, job role, level, overall score with band colour); (2) the overall change as "`+n` points", coloured `#16A34A` when positive, `#DC2626` when negative and `#6B7280` when zero, with "Band changed" when `bandChanged`; (3) a warning banner when `sameRole` or `sameLevel` is false; (4) a table of the six dimensions with name, base score, target score and change in the same colours; (5) when `missingSkills` is not null, three lists "Now covered", "Still missing" and "Newly missing"; (6) a "Swap" button that exchanges `baseId` and `targetId` in the URL.
+
+**P-06 Resume Pro (v2.0)** — `/[locale]/pro`
+
+Calls API-021.
+- **Not PRO:** the price "₹299 / month (GST included)", the benefits (unlimited analyses, all rewrite suggestions, comparison of two analyses), the Pro terms from API-021 `terms` (rendered with `react-markdown`, §4.9.1) with the checkbox "I agree", and a "Subscribe" button enabled when ticked. Subscribe calls API-022 with `termsVersion`. API-022 errors (v2.1): 409 `ALREADY_PRO` refetches API-021 and shows the PRO view; 409 `PRO_TERMS_VERSION_MISMATCH` refetches API-021, unticks the checkbox and shows the message above the terms; 403 `CONSENT_REQUIRED` opens the `ConsentDialog` (rule 6); 429 and 503 show the message next to the button and re-enable it. With `checkoutMode = "razorpay"` the page loads `https://checkout.razorpay.com/v1/checkout.js` with the CSP nonce and opens `new window.Razorpay({ key: razorpayKeyId, subscription_id: razorpaySubscriptionId, name, description, handler, modal: { ondismiss } })`. `handler` sends the three response fields to API-023: on 200 with `plan = PRO` it shows "Welcome to Resume Pro" and refetches API-001 and API-021; on 200 with `activationPending` or on 503 it shows "Payment received, activating Resume Pro…" and polls API-021 every `PRO_ACTIVATION_POLL_MS` for up to `PRO_ACTIVATION_POLL_MAX_MS`, then shows "This is taking longer than usual; Pro will appear within an hour"; on 400 it shows the error message. `ondismiss` does nothing. With `checkoutMode = "mock"` (§4.13.4) a "Simulate successful payment" button calls API-023 with `razorpayPaymentId = "pay_mock_" + 14 random letters and digits`, the returned `razorpaySubscriptionId` and `razorpaySignature = "mock_ok"`.
+- **Not PRO, with an open subscription** (v2.1; API-021 `subscription.status` is `AUTHENTICATED`, `PENDING`, `HALTED` or `PAUSED`, for example after a failed renewal): also the line "A previous subscription is still open" and a "Cancel it" button that calls API-024 and then refetches API-021.
+- **PRO:** "Resume Pro active until `proUntil`", or "Renews on `currentPeriodEnd`" when it is not cancelling; the payments list from API-021; and a "Cancel subscription" button with a confirm dialog saying that Pro stays active until `proUntil`. On 200 it shows "Cancelled. Resume Pro stays active until `proUntil`." When `cancelAtPeriodEnd` is true, the button is hidden and that sentence is shown.
 
 ### 4.7 AI integration contract (CMP-016, CMP-017)
 
@@ -1312,7 +1574,7 @@ Each worker task keeps one in-memory circuit around its AI client (live or mock)
 
 #### 4.8.1 Queues
 
-All queues use the Redis connection from `REDIS_URL` with `maxRetriesPerRequest: null` and the BullMQ key prefix `ro:bull`. Job payloads contain only IDs, the request ID and the W3C `traceparent` string (§4.11). The `maintenance` queue has one BullMQ Worker for both of its job types, so they share one lock duration. Each maintenance run, and each run of `cli/erase-user.ts`, generates a UUID v4 `requestId` that it uses in its logs and audit rows (NFR-017). The worker process registers the two repeatable jobs in `WorkerModule.onApplicationBootstrap` with `queue.upsertJobScheduler('retention-purge', { pattern: '0 2 * * *', tz: 'Asia/Kolkata' }, { name: 'retention-purge' })` and `queue.upsertJobScheduler('stale-janitor', { every: 60000 }, { name: 'stale-janitor' })`. Upserting is idempotent, so every worker task may do it; the API never registers them.
+All queues use the Redis connection from `REDIS_URL` with `maxRetriesPerRequest: null` and the BullMQ key prefix `ro:bull`. Job payloads contain only IDs, the request ID and the W3C `traceparent` string (§4.11). The `maintenance` queue has one BullMQ Worker for all of its job types (two, four since v2.0), so they share one lock duration. Each maintenance run, and each run of `cli/erase-user.ts`, generates a UUID v4 `requestId` that it uses in its logs and audit rows (NFR-017). The worker process registers the repeatable jobs in `WorkerModule.onApplicationBootstrap` with `queue.upsertJobScheduler('retention-purge', { pattern: '0 2 * * *', tz: 'Asia/Kolkata' }, { name: 'retention-purge' })` and `queue.upsertJobScheduler('stale-janitor', { every: 60000 }, { name: 'stale-janitor' })`. Since v2.0 it also registers `queue.upsertJobScheduler('subscription-reconcile', { pattern: '15 * * * *', tz: 'Asia/Kolkata' }, { name: 'subscription-reconcile' })` and `queue.upsertJobScheduler('pro-usage-check', { pattern: '0 4 * * *', tz: 'Asia/Kolkata' }, { name: 'pro-usage-check' })`. `pro-usage-check` counts, per user, the analyses with `plan_at_creation = PRO` completed in the last 24 h and sets `ro_pro_heavy_users` to the number of users above `PRO_FAIR_USE_DAILY_ALERT`. Upserting is idempotent, so every worker task may do it; the API never registers them.
 
 | Queue | Job name | `jobId` | Payload | Attempts / backoff | Concurrency per task | Lock duration | Retention of finished jobs |
 |---|---|---|---|---|---|---|---|
@@ -1320,6 +1582,8 @@ All queues use the Redis connection from `REDIS_URL` with `maxRetriesPerRequest:
 | `resume-analysis` | `analyze` | `analysisId` | `{ analysisId, requestId, traceparent }` | 3 / exponential, 5000 ms | `WORKER_ANALYSIS_CONCURRENCY` | 300000 ms | same |
 | `maintenance` | `retention-purge` | repeat key | `{}` | 1 | 1 | 600000 ms | same |
 | `maintenance` | `stale-janitor` | repeat key | `{}` | 1 | 1 | 600000 ms (shared Worker) | same |
+| `maintenance` | `subscription-reconcile` (v2.0) | repeat key | `{}` | 1 | 1 | 600000 ms (shared Worker) | same |
+| `maintenance` | `pro-usage-check` (v2.0) | repeat key | `{}` | 1 | 1 | 600000 ms (shared Worker) | same |
 
 Attempts apply only to **unexpected** exceptions (database, Redis or S3 errors, bugs). Expected outcomes (bad file, AI failure) set the final status and complete the job normally. These deterministic internal problems also fail at once with `INTERNAL_ERROR`, without a retry, because retrying cannot help: a decryption failure (§5.6), a PII-check finding (§4.8.4), a missing or non-`PARSED` resume (§4.8.5 step 2), and `BadRequestError` from the AI. When the last attempt of a `parse` or `analyze` job fails, the `failed` event handler sets the resume or analysis to `FAILED` with `INTERNAL_ERROR` using the guarded updates below, and for a resume also deletes the raw S3 object (best effort) and sets `storage_key` to NULL. The stale janitor does the same for resumes it fails. On `SIGTERM` the worker calls `worker.close()` and waits up to 110 s; jobs still running after a forced stop are picked up again by BullMQ stalled-job recovery and processed from the start (all steps are idempotent).
 
@@ -1390,7 +1654,7 @@ Names, addresses and dates of birth are not redacted (ASM-013). Before calling t
 7. **Save failure** in one transaction: same lock and status check (`status IN ('QUEUED','PROCESSING')`), then `UPDATE analyses SET status='FAILED', error_code=$code, ai_model, input_tokens, output_tokens, ai_attempts, failed_at=now(), updated_at=now()` and `UPDATE monthly_usage SET reserved_count = reserved_count - 1`.
 8. Observe `ro_analysis_duration_seconds` (from `queued_at`), `ro_analyses_total{status, error_code}`, `ro_ai_tokens_total{type}`.
 
-The stale janitor (FR-020.3) uses the same failure transaction for every row returned by `SELECT id FROM analyses WHERE status IN ('QUEUED','PROCESSING') AND queued_at < $now - ANALYSIS_STALE_AFTER_MS`, with code `ANALYSIS_TIMEOUT`, and then sets the gauge `ro_stuck_analyses` (NFR-008). Because every final write checks the current status under a row lock, a result can never be saved twice, and the quota reservation is released exactly once.
+The stale janitor (FR-020.3) uses the same failure transaction for every row returned by `SELECT id FROM analyses WHERE status IN ('QUEUED','PROCESSING') AND queued_at < $now - ANALYSIS_STALE_AFTER_MS`, with code `ANALYSIS_TIMEOUT`, and then sets the gauge `ro_stuck_analyses` (NFR-008). Because every final write checks the current status under a row lock, a result can never be saved twice, and the quota reservation is released exactly once. For an analysis with `plan_at_creation = PRO` (v2.0), every statement on `monthly_usage` in this section, in FR-006, in the janitor and in erasure (FR-019.5) uses `pro_reserved_count` and `pro_consumed_count` instead of `reserved_count` and `consumed_count` (FR-007.10).
 
 ### 4.9 Privacy notice (FR-002)
 
@@ -1446,6 +1710,49 @@ API-003 returns the text below for `NOTICE_VERSION = RO-NOTICE-2026-10`. `{GRIEV
 
 The English text is the legally binding version for the DPDP Act; `hi` and `ko` are translations of it.
 
+#### 4.9.1 Resume Pro terms and payment notice (v2.0)
+
+API-021 returns this text as `terms` (with `{GRIEVANCE_EMAIL}` replaced) for `PRO_TERMS_VERSION = RO-PRO-TERMS-2026-10`. It is accepted at checkout (FR-022.1) and stored per subscription (TBL-011 `terms_version`); changing it requires a new `PRO_TERMS_VERSION`. The general notice of §4.9 and `NOTICE_VERSION` are **not** changed, so FREE users do not have to consent again (round 2 point 5). Payment records exist only for Pro buyers and are disclosed in these terms, which every buyer accepts, so the general notice's "what we keep" list did not need to change.
+
+**English (`en`):**
+
+```markdown
+## Resume Pro: terms and payment notice
+
+- **Price:** ₹299 per month, GST included, charged by Razorpay every month from the day you subscribe until you cancel.
+- **What you get:** unlimited analyses (fair-use limits: 10 new analyses per hour and 2 at a time), all rewrite suggestions, and comparison of two analyses.
+- **Cancel any time** on this page. You will not be charged again, and Pro stays active until the end of the month you have paid for. Part months are not refunded.
+- **If a renewal payment fails**, Razorpay tries again; Pro stops at the end of the paid month until a payment succeeds.
+- **Payment data:** you pay in Razorpay's checkout. We never see or store your card, UPI or bank details, or the email address and phone number you give Razorpay. We keep your subscription and payment records (Razorpay IDs, amounts and dates) for 8 years because Indian law requires it, even if you delete your other data. Razorpay (India) processes your payment under its own privacy policy.
+- Questions or complaints: {GRIEVANCE_EMAIL}.
+```
+
+**Hindi (`hi`):**
+
+```markdown
+## Resume Pro: शर्तें और भुगतान सूचना
+
+- **कीमत:** ₹299 प्रति माह, GST सहित। सदस्यता लेने के दिन से रद्द करने तक Razorpay हर महीने यह राशि लेता है।
+- **आपको क्या मिलता है:** असीमित विश्लेषण (उचित उपयोग सीमा: प्रति घंटे 10 नए विश्लेषण और एक समय में 2), सभी सुधार सुझाव, और दो विश्लेषणों की तुलना।
+- **कभी भी रद्द करें** इसी पेज पर। आपसे दोबारा शुल्क नहीं लिया जाएगा, और जिस महीने का भुगतान हो चुका है उसके अंत तक Pro चालू रहेगा। अधूरे महीने का पैसा वापस नहीं होता।
+- **यदि नवीनीकरण का भुगतान विफल हो जाए**, तो Razorpay फिर से कोशिश करता है; भुगतान सफल होने तक भुगतान किए गए महीने के अंत में Pro बंद हो जाता है।
+- **भुगतान डेटा:** आप Razorpay के चेकआउट में भुगतान करते हैं। हम आपके कार्ड, UPI या बैंक का विवरण, या Razorpay को दिया गया ईमेल पता और फ़ोन नंबर कभी नहीं देखते और न ही रखते हैं। भारतीय कानून के अनुसार हम आपकी सदस्यता और भुगतान के रिकॉर्ड (Razorpay आईडी, राशि और तारीखें) 8 वर्ष तक रखते हैं, भले ही आप अपना बाकी डेटा हटा दें। Razorpay (भारत) अपनी गोपनीयता नीति के तहत आपका भुगतान प्रोसेस करता है।
+- प्रश्न या शिकायत: {GRIEVANCE_EMAIL}।
+```
+
+**Korean (`ko`):**
+
+```markdown
+## Resume Pro: 이용 약관 및 결제 안내
+
+- **가격:** 월 ₹299(GST 포함)이며, 구독한 날부터 해지할 때까지 Razorpay가 매월 결제합니다.
+- **혜택:** 무제한 분석(공정 사용 한도: 시간당 새 분석 10건, 동시 2건), 모든 개선 문장 제안, 두 분석 비교.
+- **언제든지 이 페이지에서 해지**할 수 있습니다. 이후 추가 결제는 없으며, 결제한 달의 마지막 날까지 Pro가 유지됩니다. 남은 기간에 대한 부분 환불은 없습니다.
+- **갱신 결제가 실패하면** Razorpay가 다시 시도하며, 결제가 성공할 때까지 결제한 달이 끝나면 Pro가 중지됩니다.
+- **결제 정보:** 결제는 Razorpay 결제 화면에서 이루어집니다. 당사는 카드, UPI, 은행 정보와 Razorpay에 입력한 이메일 주소 및 전화번호를 보거나 저장하지 않습니다. 인도 법률에 따라 구독 및 결제 기록(Razorpay ID, 금액, 날짜)은 다른 데이터를 삭제하더라도 8년간 보관합니다. Razorpay(인도)는 자체 개인정보 처리방침에 따라 결제를 처리합니다.
+- 문의 및 불만: {GRIEVANCE_EMAIL}
+```
+
 ### 4.10 PDF report layout (CMP-010, FR-013)
 
 Built with `pdfmake` `PdfPrinter` using the Roboto fonts in `apps/api/assets/fonts` (normal, bold = Medium, italics, bolditalics = MediumItalic). Page A4 portrait, margins `[40, 50, 40, 50]`, base font size 10, line height 1.3. All dates in IST, format `d MMM yyyy, h:mm a 'IST'` (Luxon), for example `16 Oct 2026, 5:45 PM IST`.
@@ -1459,7 +1766,7 @@ Built with `pdfmake` `PdfPrinter` using the Roboto fonts in `apps/api/assets/fon
 | 5 | Dimensions | Heading "Score by dimension". Table with header fill `#F3F4F6` and columns Dimension · Weight (`30%`) · Score (`70 / 100`) · Rationale; widths `['22%', '10%', '12%', '*']`. |
 | 6 | Missing skills | Heading "Missing skills". Table # · Skill · Importance · Why it matters; widths `['6%', '24%', '16%', '*']`. If there are none: "No important skills are missing for this role." |
 | 7 | Suggestions | Heading "Suggested rewrites". One block per visible suggestion: "`<priority>`. `<Section>` · `<Issue type>`" (bold), "Original:" + text (italics), "Suggested:" + text, "Why:" + reason; 8 pt space between blocks. If there are none: "No rewrites suggested." |
-| 8 | Locked box | Only when `lockedSuggestionCount > 0`: bordered box "`<n>` more suggestions are available with SurfingBear Pro: `<upgradeUrl>`". |
+| 8 | Locked box | Only when `lockedSuggestionCount > 0`: bordered box "`<n>` more suggestions are available with Resume Pro: `<upgradeUrl>`". |
 | 9 | Footer (every page) | Left: "AI-generated guidance. Please review before use." Right: "Page `<x>` of `<y>`". 8 pt grey. |
 
 Enum labels in the PDF (English): sections `Summary`, `Experience`, `Projects`, `Education`, `Skills`, `Other`; issue types `No metric`, `Weak verb`, `Vague`, `Too long`, `Grammar`, `Passive voice`, `Irrelevant`; importance labels from §5.5.
@@ -1477,15 +1784,23 @@ Enum labels in the PDF (English): sections `Summary`, `Experience`, `Projects`, 
 | `ro_analysis_duration_seconds` | histogram (10, 30, 45, 60, 90, 120, 180, 300, 600) | `status` | CMP-016 |
 | `ro_analyses_total` | counter | `status`, `error_code` (`none` when completed) | CMP-016, CMP-018 |
 | `ro_ai_request_duration_seconds` | histogram (5, 10, 20, 30, 45, 60, 90) | `outcome` (`ok`, `invalid`, `error`) | CMP-017 |
-| `ro_ai_tokens_total` | counter | `type` (`input`, `output`) | CMP-017 |
+| `ro_ai_tokens_total` | counter | `type` (`input`, `output`), `plan` (`FREE`, `PRO`, from `plan_at_creation`, v2.1) | CMP-017 |
 | `ro_ai_auth_errors_total` | counter | — | CMP-017 |
 | `ro_ai_circuit_open` | gauge | — | CMP-017 (§4.7.7) |
 | `ro_queue_waiting_jobs` | gauge, refreshed every 15 s | `queue` | CMP-014 |
 | `ro_quota_exceeded_total` | counter | `plan` | CMP-008 |
 | `ro_jwks_fetch_errors_total` | counter | — | CMP-004 |
 | `ro_retention_deleted_rows_total` | counter | `table` | CMP-018 |
-| `ro_retention_overdue_rows` | gauge, set by `retention-purge` after its delete loop to `COUNT(*)` of rows still past retention | `table` (`consents`, `resumes`, `analyses`, `monthly_usage`, `erasure_requests`, `audit_events`) | CMP-018 |
+| `ro_retention_overdue_rows` | gauge, set by `retention-purge` after its delete loop to `COUNT(*)` of rows still past retention | `table` (`consents`, `resumes`, `analyses`, `monthly_usage`, `erasure_requests`, `audit_events`, and since v2.0 `subscriptions`, `payment_events`) | CMP-018 |
 | `ro_stuck_analyses` | gauge, set by `stale-janitor` after each run (NFR-008) | — | CMP-018 |
+| `ro_webhook_events_total` (v2.0) | counter | `event` (the event type; `unknown` for `REJECTED`, because a rejected body is not parsed), `result` (`APPLIED`, `IGNORED`, `STALE`, `DUPLICATE`, `REJECTED`) | CMP-026 |
+| `ro_subscription_reconcile_changes_total` (v2.0) | counter of corrections a webhook should have delivered (FR-026.6) | — | CMP-018 |
+| `ro_subscription_expiry_cancels_total` (v2.1) | counter of abandoned and `HALTED` rows cancelled by the reconcile job; no alarm | — | CMP-018 |
+| `ro_pro_subscriptions_active` (v2.0) | gauge, set by `subscription-reconcile` to the number of users who are PRO | — | CMP-018 |
+| `ro_pro_heavy_users` (v2.0) | gauge, set by `pro-usage-check` | — | CMP-018 |
+| `ro_razorpay_plan_mismatch` (v2.0) | gauge, 0 or 1, set at worker start | — | CMP-025 |
+| `ro_payment_amount_mismatch_total` (v2.0) | counter | — | CMP-024, CMP-026 |
+| `ro_razorpay_errors_total` (v2.0) | counter | `operation` | CMP-025 |
 
 **Pipeline:** each `ro-api` and `ro-worker` task runs the ADOT collector as a sidecar (the same one used for traces). Its `prometheus` receiver scrapes `http://localhost:9464/metrics` every 15 s, and its `awsemf` exporter publishes to the CloudWatch namespace `SB/RO/<env>` with dimension `Service` plus the labels listed above. Histograms are exported as value/count distributions, so CloudWatch can compute p50, p95 and p99. Auto-scaling (§4.12.1) and alarms use these CloudWatch metrics. Availability is measured by a CloudWatch Synthetics canary `sb-ro-<env>-ready` (runtime `syn-nodejs-puppeteer`) that calls API-020 every minute.
 
@@ -1502,6 +1817,12 @@ Enum labels in the PDF (English): sections `Summary`, `Experience`, `Projects`, 
 | Stuck analyses | `ro_stuck_analyses` > 0 (NFR-008) | P2 |
 | JWKS errors | `ro_jwks_fetch_errors_total` increases for 5 min | P2 |
 | PII in logs | `ro_pii_log_matches` (NFR-016 staging metric filters) > 0 | P1 |
+| Webhook signature failures (v2.0) | `ro_webhook_events_total{result="REJECTED"}` increases by more than 5 in 15 min | P2 |
+| Missed webhooks (v2.0) | `ro_subscription_reconcile_changes_total` increases | P2 |
+| Razorpay plan mismatch (v2.0) | `ro_razorpay_plan_mismatch` = 1 | P1 |
+| Payment amount mismatch (v2.0) | `ro_payment_amount_mismatch_total` increases | P1 |
+| Razorpay errors (v2.0) | `ro_razorpay_errors_total` increases by more than 5 in 10 min | P2 |
+| Pro heavy use (v2.0) | `ro_pro_heavy_users` > 0 | P2 |
 
 **Tracing**: OpenTelemetry Node SDK with auto-instrumentation for `http`, `express`, `pg`, `ioredis`; the W3C `traceparent` of the request is copied into BullMQ job data so a request and its job share one trace. Head sampling: `ParentBasedSampler` with `TraceIdRatioBasedSampler(0.1)` (10%). Exported over OTLP to the ADOT collector sidecar, then to AWS X-Ray. Span attributes follow CR-011 (no personal data).
 
@@ -1511,7 +1832,7 @@ Enum labels in the PDF (English): sections `Summary`, `Experience`, `Projects`, 
 
 | Resource | Settings |
 |---|---|
-| VPC | 3 AZs, public subnets (ALB) and private subnets (ECS, RDS, ElastiCache); NAT gateway for outbound calls to Anthropic and the platform JWKS. |
+| VPC | 3 AZs, public subnets (ALB) and private subnets (ECS, RDS, ElastiCache); NAT gateway for outbound calls to Anthropic, the platform JWKS and (v2.0) Razorpay. |
 | ALB | HTTPS listener (ACM certificate for the env domain), HTTP → HTTPS redirect. Rule 1: path `/api/*` → target group `ro-api` (port 4000). Default → `ro-web` (port 3000). Idle timeout 60 s. |
 | WAF | AWS Managed Rules Common Rule Set and Known Bad Inputs; rate-based rule 1000 requests per 5 min per IP. |
 | ECS service `ro-api` | Fargate 0.5 vCPU / 1 GB; desired 2; auto-scaling 2–6 on CPU 60%. |
@@ -1520,7 +1841,7 @@ Enum labels in the PDF (English): sections `Summary`, `Experience`, `Projects`, 
 | RDS | PostgreSQL 16, sizes per §1.7, storage encrypted, TLS required (`rds.force_ssl = 1`), automated backups 7 days. Storage: 100 GB gp3 with storage auto-scaling up to 300 GB. Estimate at steady state (ASM-009): about 0.9 million analyses kept 180 days, each with up to 10 suggestions, 15 missing skills and 6 scores, about 25 GB; about 150,000 resumes kept 30 days at up to 25 KB of encrypted text, about 4 GB. |
 | ElastiCache | Redis 7, sizes per §1.7, in-transit and at-rest encryption, auth token. |
 | S3 | Bucket `sb-ro-resumes-<env>`: Block Public Access on; default encryption SSE-KMS with key `alias/sb-ro-<env>` and S3 Bucket Key enabled (the application sends no SSE headers); versioning off; lifecycle rule "expire objects with prefix `uploads/` after 1 day"; bucket policy denies non-TLS requests. IAM: `ro-api` task role may `s3:PutObject` and `s3:DeleteObject` on `uploads/*` and `kms:GenerateDataKey` on the key; `ro-worker` may `s3:GetObject` and `s3:DeleteObject` on `uploads/*` and `kms:Decrypt` on the key. Locally (LocalStack) the bucket has no encryption configuration. |
-| Secrets Manager | `sb/ro/<env>/app` with keys `ANTHROPIC_API_KEY`, `DATABASE_URL`, `REDIS_URL`, `DATA_ENCRYPTION_KEYS`, `IP_HASH_SALT`. Terraform generates the RDS password and the Redis auth token with `random_password` and writes the complete `DATABASE_URL` and `REDIS_URL` into the secret; the other keys are set by hand once per environment. |
+| Secrets Manager | `sb/ro/<env>/app` with keys `ANTHROPIC_API_KEY`, `DATABASE_URL`, `REDIS_URL`, `DATA_ENCRYPTION_KEYS`, `IP_HASH_SALT`, and since v2.0 `RAZORPAY_KEY_SECRET` and `RAZORPAY_WEBHOOK_SECRET` (`RAZORPAY_KEY_ID`, `RAZORPAY_PLAN_ID` and `PAYMENT_MODE=live` are plain task environment variables). Terraform generates the RDS password and the Redis auth token with `random_password` and writes the complete `DATABASE_URL` and `REDIS_URL` into the secret; the other keys are set by hand once per environment. |
 | ECS cluster and tasks | Cluster `sb-ro-<env>`. Task families `ro-api`, `ro-worker`, `ro-web` (services) and `ro-migrate` (one-off task: `sb-ro-api` image, command `node dist/database/migrate.js`, same task role, environment variables and secrets as `ro-api`, so `erase-user.js` (FR-019.9) can also reach Redis and S3). `deploy.yml` registers new task-definition revisions with the new image tag; Terraform ignores those changes (`lifecycle { ignore_changes = [task_definition] }` on the services). |
 | DNS and TLS | Route 53 record for the env domain (§1.7) pointing to the ALB; ACM certificate validated by DNS. |
 | CI access | IAM role `gha-sb-ro-deploy-<env>` per environment, trusted through the GitHub OIDC provider for the subject `repo:surfingbear/surfingbear-resume-optimizer:environment:<GitHub environment>` (mapping in §4.12.6); permissions: ECR push, `ecs:RegisterTaskDefinition`, `ecs:UpdateService`, `ecs:RunTask`, `ecs:Describe*`, and `iam:PassRole` for the task roles. |
@@ -1547,9 +1868,9 @@ On start it generates an RSA-2048 key pair in memory (`kid: "dev-1"`; no key fil
 | Route | Behaviour |
 |---|---|
 | `GET /.well-known/jwks.json` | The public key as JWKS. |
-| `GET /dev/login` | When `sub` is absent (including the FR-001.4 redirect, which sends only `returnTo`): an HTML form with fields `sub` (default `dev-user-1`), `plan` (`free`/`pro`, default `free`), `admin` (checkbox, default off) and a hidden `returnTo` prefilled from the query; the form submits with GET to the same URL. When `sub` is present (`plan` defaults to `free`, `admin` to `false`): signs an RS256 JWT (`iss: http://localhost:4100`, `aud: ["resume-optimizer"]`, `exp`: 8 h, `plan`, `roles: ["user"]` plus `"ro_admin"` when `admin=true`), sets cookie `sb_access_token` (`Path=/; HttpOnly; SameSite=Lax`, no `Domain`, so it is sent to every `localhost` port), and redirects with 302 to `returnTo` (default `http://localhost:3000/en`). |
+| `GET /dev/login` | When `sub` is absent (including the FR-001.4 redirect, which sends only `returnTo`): an HTML form with fields `sub` (default `dev-user-1`), `plan` (`free`/`pro`, default `free`), `admin` (checkbox, default off) and a hidden `returnTo` prefilled from the query; the form submits with GET to the same URL. When `sub` is present (`plan` defaults to `free`, `admin` to `false`): signs an RS256 JWT (`iss: http://localhost:4100`, `aud: ["resume-optimizer"]`, `exp`: 8 h, `plan`, `roles: ["user"]` plus `"ro_admin"` when `admin=true`), sets cookie `sb_access_token` (`Path=/; HttpOnly; SameSite=Lax`, no `Domain`, so it is sent to every `localhost` port), and redirects with 302 to `returnTo` (default `http://localhost:3000/en`). Since v2.0 the `plan` claim is ignored by the module (FR-023.1); tests make a user PRO through the mock checkout (§4.13.4). |
 | `GET /dev/token?sub=&plan=&admin=` | `{ "token": "<jwt>" }` for API tests that use the Bearer header. Same claims and defaults as `/dev/login` (`sub` default `dev-user-1`). |
-| `GET /pricing` | Static page "Mock pricing page". |
+| `GET /pricing` | **Deprecated (v2.0).** Static page "Mock pricing page"; nothing links to it any more (P-06 replaced the platform pricing page). |
 | `GET /` | Static page "Mock platform home". |
 
 The mock platform is written in TypeScript (`tools/mock-platform/src/server.ts`) as CommonJS (no `"type": "module"`), runs with `tsx`, and exports `startMockPlatform(port)` so tests can start it in-process. `server.ts` starts listening on port 4100 only when `require.main === module`. `apps/api/test/global-setup.ts` imports it by relative path (`../../../tools/mock-platform/src/server`).
@@ -1574,7 +1895,7 @@ Runs on every pull request and every push to `main`. Jobs (all required by branc
 | 4 | `unit` | 1 | `npm test` (API Jest with the coverage threshold of NFR-021) and `npm run test:web` (Vitest). |
 | 5 | `api-e2e` | 4 | Service containers `postgres:16-alpine`, `redis:7-alpine`, `localstack/localstack:3` (`SERVICES=s3`). Env from `.env.example`. Jest `globalSetup` (`apps/api/test/global-setup.ts`) starts the mock platform in-process on port 4100, creates the bucket `sb-ro-resumes-local` with the AWS SDK, runs migrations and the seed. Tests that need the worker start `WorkerModule` in the same process with `AI_MODE=mock` and `AI_MOCK_DELAY_MS=0`. All log lines go to `apps/api/test/output/logs.ndjson`, and `scan-logs.ts` runs after the suite (NFR-016). |
 | 6 | `migrations` | 1 | On an empty `postgres:16-alpine`: `migration:run`, then `migration:revert` until no migration is left, then `migration:run` again (CR-035). |
-| 7 | `browser-e2e` | 4 | `docker compose up -d`, migrate and seed, start the API, the worker (`AI_MODE=mock`) and the web app (`next build && next start`), then Playwright (`npm run test:browser`) on Chromium, Firefox, WebKit and a 360 × 800 viewport (NFR-020). Tests log in through `http://localhost:4100/dev/login?sub=<test user>&plan=<plan>`. Then Lighthouse CI (`@lhci/cli`, `lighthouserc.json` asserts accessibility ≥ 0.9 on P-01 to P-04, NFR-019). |
+| 7 | `browser-e2e` | 4 | `docker compose up -d`, migrate and seed, start the API, the worker (`AI_MODE=mock`) and the web app (`next build && next start`), then Playwright (`npm run test:browser`) on Chromium, Firefox, WebKit and a 360 × 800 viewport (NFR-020). Tests log in through `http://localhost:4100/dev/login?sub=<test user>`; PRO tests then subscribe on P-06 with "Simulate successful payment" (`PAYMENT_MODE=mock`, §4.13.4). Then Lighthouse CI (`@lhci/cli`, `lighthouserc.json` asserts accessibility ≥ 0.9 on P-01 to P-06, NFR-019). |
 | 8 | `build` | 3 | `npm run build`; `docker build` of `sb-ro-api` and `sb-ro-web` (not pushed). |
 | 9 | `secrets-scan` | — | `gitleaks detect` (CR-017). |
 | 10 | `deps-audit` | 1 | `npm audit --omit=dev --audit-level=high` (CR-026). |
@@ -1599,6 +1920,53 @@ Steps for one environment, in order:
 6. Staging only (release checks; any failure blocks prod): `testssl.sh` on the staging URL (NFR-010), OWASP ZAP baseline scan (NFR-012), and k6 `perf/read-apis.js`, `perf/upload.js`, `perf/report.js` with tokens from ASM-014 (NFR-001, NFR-002, NFR-005). `perf/peak.js` (NFR-006) is run by hand before each minor or major release, as NFR-006 describes.
 7. Prod only, before step 1: `apps/web/scripts/check-messages.ts` must pass (NFR-024).
 
+### 4.13 Resume Pro billing (Razorpay, v2.0)
+
+#### 4.13.1 Razorpay setup and calls
+
+Done once per environment by Finance with DevOps, in the Razorpay dashboard (test mode in dev and staging, live mode in prod):
+
+1. **Plan:** `period: monthly`, `interval: 1`, `item: { name: "SurfingBear Resume Pro", amount: 29900, currency: "INR" }` (`PRO_PRICE_PAISE`). Its id goes into `RAZORPAY_PLAN_ID`; the worker checks it at start (FR-026.8).
+2. **Webhook:** URL `<APP_ORIGIN>/api/v1/webhooks/razorpay`, secret `RAZORPAY_WEBHOOK_SECRET`, events `subscription.authenticated`, `subscription.activated`, `subscription.charged`, `subscription.pending`, `subscription.halted`, `subscription.cancelled`, `subscription.completed`.
+3. **API keys:** `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` of the matching mode.
+
+SDK calls used (all with `RAZORPAY_TIMEOUT_MS`): `subscriptions.create`, `subscriptions.fetch`, `subscriptions.cancel(id, cancelAtCycleEnd)`, `payments.fetch`, `invoices.all({ subscription_id, count: 100, skip })` (paged until a page has fewer than 100 items; only invoices with `status = paid` are used, for reconciliation) and `plans.fetch`. Razorpay times are Unix seconds and are stored as `timestamptz`.
+
+#### 4.13.2 Subscription status
+
+The TBL-011 `status` is Razorpay's status in upper case (`created` → `CREATED`, …, `expired` → `EXPIRED`). **Open** statuses: `CREATED`, `AUTHENTICATED`, `ACTIVE`, `PENDING`, `HALTED`, `PAUSED`; at most one open subscription per user (`ux_subscriptions__user_id_open`). **Terminal** statuses: `CANCELLED`, `COMPLETED`, `EXPIRED`; entering one sets `ended_at` (the event time, or `$now` in reconciliation) and `expires_at = ended_at + PAYMENT_RECORD_RETENTION_DAYS`. From a Razorpay subscription entity the module copies `status`, `current_start` → `current_period_start` and `current_end` → `current_period_end`. Pro comes only from `paid_until` (FR-023.1).
+
+#### 4.13.3 Webhook and reconciliation rules
+
+API-025 reads the raw body, checks the signature, then parses the JSON (FR-026.1). A duplicate `x-razorpay-event-id` is not stored again and is counted as `result="DUPLICATE"`. Each new event runs in one transaction with the TBL-011 row locked `FOR UPDATE`. A stale event (FR-026.4: older than `last_event_at`, or for a terminal row) is stored with result `STALE` and changes no status or period field; only a stale `subscription.charged` still runs the payment part of its row below. A non-stale event applies its row below and sets `last_event_at = GREATEST(last_event_at, created_at)`. After COMMIT, `ro:plan:<userId>` is deleted.
+
+| Event | Effect on TBL-011 | Other effects |
+|---|---|---|
+| `subscription.authenticated` | status `AUTHENTICATED`, period fields | — |
+| `subscription.activated` | status `ACTIVE`, period fields | none; Pro needs a captured payment |
+| `subscription.charged` | status `ACTIVE`, period fields, `paid_until = GREATEST(paid_until, current_end)` | TBL-012 row from `payload.payment.entity` (`id`, `amount`, `currency`, `created_at`) with `ON CONFLICT (razorpay_payment_id) DO NOTHING`; when the insert adds a row: audit `SUBSCRIPTION_ACTIVATED` if it is the subscription's first TBL-012 row (whoever inserts it: API-023, webhook or reconcile), otherwise `SUBSCRIPTION_RENEWED`; no audit when the insert is skipped; amount check of FR-026.8 |
+| `subscription.pending` | status `PENDING` | — |
+| `subscription.halted` | status `HALTED` | the reconcile job cancels it at Razorpay (FR-026.6) |
+| `subscription.cancelled` | status `CANCELLED`, `ended_at`, `expires_at` | audit `SUBSCRIPTION_ENDED` |
+| `subscription.completed` | status `COMPLETED`, `ended_at`, `expires_at` | audit `SUBSCRIPTION_ENDED` |
+| any other event (`refund.*`, `payment.*`, `subscription.paused`, `subscription.resumed`, …) | none (a `PAUSED` status is copied only by reconciliation, §4.3.6) | TBL-013 result `IGNORED` |
+
+**Reconciliation** (`subscription-reconcile`, FR-026.6), for each open subscription: (1) fetch the subscription and apply its status and period fields as a non-stale event would (terminal rows are not open, so they are never fetched), with `last_event_at = $now`; (2) when the status is `ACTIVE`, `PENDING`, `HALTED`, `CANCELLED` or `COMPLETED`, fetch the invoices (§4.13.1) and, for every invoice with `status = paid` whose `payment_id` is not stored yet, insert a TBL-012 row with `razorpay_payment_id = payment_id`, `amount_paise = amount_paid`, `currency`, `paid_at = paid_at`, `period_start = billing_start`, `period_end = billing_end` and `source = RECONCILE` (audit as for `subscription.charged`), then set `paid_until = GREATEST(paid_until, max(billing_end))`; (3) cancel at Razorpay, immediately, rows that are `HALTED` and rows that are `CREATED` and older than `CHECKOUT_EXPIRY_MS`, and mark them `CANCELLED` (audit `SUBSCRIPTION_CANCELLED`, actor `SYSTEM`); (4) set `ro_pro_subscriptions_active`. Steps (1) and (2) count in `ro_subscription_reconcile_changes_total`, step (3) in `ro_subscription_expiry_cancels_total` (FR-026.6). It processes `RECONCILE_BATCH_SIZE` subscriptions at a time with `RECONCILE_BATCH_GAP_MS` between batches.
+
+#### 4.13.4 Mock payments (`PAYMENT_MODE=mock`)
+
+`MockRazorpayClient` keeps no state, so the API and the worker agree without sharing memory:
+
+| Call | Mock result |
+|---|---|
+| `createSubscription` | `{ id: "sub_mock_" + 14 random letters and digits, status: "created" }` |
+| `fetchSubscription(id)` | `{ id, status: "active", current_start: $now, current_end: $now + 30 days, paid_count: 1 }` |
+| `fetchPayment(id)` | `{ id, status: "captured", amount: PRO_PRICE_PAISE, currency: "INR", created_at: $now }` |
+| `cancelSubscription` | `{ status: "cancelled" }` |
+| `fetchPaidInvoices`, `fetchPlan` | `[]`; a plan that matches FR-026.8 |
+
+In mock mode API-023 accepts only `razorpaySignature = "mock_ok"` instead of the HMAC check, API-022 returns `checkoutMode = "mock"`, and the reconcile job, without calling the client, only cancels `CREATED` rows older than `CHECKOUT_EXPIRY_MS` and ends `ACTIVE` rows with `cancel_at_period_end = true` and `paid_until <= $now` (status `CANCELLED`, as Razorpay's `subscription.cancelled` would). API-025 still checks the real HMAC with `RAZORPAY_WEBHOOK_SECRET`, so tests sign their fixture events. `PAYMENT_MODE=mock` is rejected when `APP_ENV=prod`.
+
 ---
 
 ## 5. ERD and database design
@@ -1615,6 +1983,8 @@ erDiagram
   PLATFORM_USER ||--o{ monthly_usage : "user_id, no FK"
   PLATFORM_USER ||--o{ erasure_requests : "user_id, no FK"
   PLATFORM_USER |o--o{ audit_events : "actor_user_id, no FK"
+  PLATFORM_USER ||--o{ subscriptions : "user_id, no FK (v2.0)"
+  subscriptions ||--o{ subscription_payments : "has 0..n"
   job_roles ||--o{ analyses : "is target of"
   resumes |o--o{ analyses : "is analysed in"
   analyses ||--o{ analysis_dimension_scores : "has 6 when completed"
@@ -1679,6 +2049,24 @@ erDiagram
   audit_events {
     bigint id PK
     varchar action
+  }
+  subscriptions {
+    uuid id PK
+    varchar user_id
+    varchar razorpay_subscription_id UK
+    varchar status
+    timestamptz paid_until
+  }
+  subscription_payments {
+    uuid id PK
+    uuid subscription_id FK
+    varchar razorpay_payment_id UK
+    integer amount_paise
+  }
+  payment_events {
+    uuid id PK
+    varchar razorpay_event_id UK
+    varchar result
   }
 ```
 
@@ -1755,7 +2143,7 @@ Purpose: one analysis request, its status, its summary result and its cost data.
 | overall_score | smallint | YES | | NULL | `ck_analyses__score`: `overall_score IS NULL OR overall_score BETWEEN 0 AND 100` |
 | score_band | varchar(10) | YES | | NULL | `ck_analyses__band`: `score_band IS NULL OR score_band IN ('NEEDS_WORK','FAIR','GOOD','EXCELLENT')` |
 | summary | varchar(600) | YES | | NULL | |
-| plan_at_creation | varchar(4) | NO | | | `ck_analyses__plan`: `plan_at_creation IN ('FREE','PRO')`. For reporting only; gating uses the current plan |
+| plan_at_creation | varchar(4) | NO | | | `ck_analyses__plan`: `plan_at_creation IN ('FREE','PRO')`. Chooses the usage counters (FREE or PRO, FR-007.10) and is counted by `pro-usage-check` (FR-023.3); suggestion gating and comparison use the current plan (FR-023) |
 | period_month | char(7) | NO | | | `ck_analyses__period`: `period_month ~ '^[0-9]{4}-(0[1-9]\|1[0-2])$'`. IST month at creation |
 | ai_model | varchar(64) | YES | | NULL | `response.model` of the last AI response, or `mock` |
 | prompt_version | varchar(16) | NO | | | `PROMPT_VERSION` at creation |
@@ -1813,7 +2201,7 @@ Purpose: rewrite suggestions of a completed analysis.
 | reason | varchar(300) | NO | | | |
 
 #### TBL-008 `monthly_usage`
-Purpose: quota counter per user and period month. Its row lock serializes analysis creation per user (FR-006.3).
+Purpose: quota counter per user and period month. Its row lock serializes analysis creation per user (FR-006.3). Since v2.0, `consumed_count` and `reserved_count` count FREE-plan analyses only, and PRO-plan analyses use the `pro_*` columns (FR-007.10).
 
 | Column | Type | Null | Key | Default | Constraint / note |
 |---|---|---|---|---|---|
@@ -1821,6 +2209,8 @@ Purpose: quota counter per user and period month. Its row lock serializes analys
 | period_month | char(7) | NO | PK (part 2) | | `ck_monthly_usage__period`: same regex as `analyses.period_month` |
 | consumed_count | smallint | NO | | `0` | `ck_monthly_usage__consumed`: `consumed_count >= 0` |
 | reserved_count | smallint | NO | | `0` | `ck_monthly_usage__reserved`: `reserved_count >= 0` |
+| pro_consumed_count | smallint | NO | | `0` | v2.0. Completed analyses created on the PRO plan. `ck_monthly_usage__pro_consumed`: `pro_consumed_count >= 0` |
+| pro_reserved_count | smallint | NO | | `0` | v2.0. Running analyses created on the PRO plan. `ck_monthly_usage__pro_reserved`: `pro_reserved_count >= 0` |
 | created_at | timestamptz | NO | | `now()` | |
 | updated_at | timestamptz | NO | | `now()` | |
 
@@ -1850,7 +2240,7 @@ Purpose: append-only security and compliance log (CR-010). Never updated; delete
 | actor_type | varchar(6) | NO | | | `ck_audit_events__actor_type`: `actor_type IN ('USER','ADMIN','SYSTEM')` |
 | actor_user_id | varchar(64) | YES | | NULL | `ck_audit_events__actor`: `(actor_type = 'SYSTEM') = (actor_user_id IS NULL)` |
 | action | varchar(32) | NO | | | `ck_audit_events__action`: one of the actions below |
-| entity_type | varchar(10) | YES | | NULL | `ck_audit_events__entity_type`: `entity_type IS NULL OR entity_type IN ('RESUME','ANALYSIS','CONSENT','JOB_ROLE','ERASURE')` |
+| entity_type | varchar(12) | YES | | NULL | `ck_audit_events__entity_type`: `entity_type IS NULL OR entity_type IN ('RESUME','ANALYSIS','CONSENT','JOB_ROLE','ERASURE','SUBSCRIPTION')`. Widened from `varchar(10)` in v2.0 (an expand-only change) |
 | entity_id | uuid | YES | | NULL | |
 | request_id | uuid | YES | | NULL | The request ID of CR-012, or the per-run UUID of a maintenance job or CLI run (§4.8.1) |
 | metadata | jsonb | NO | | `'{}'::jsonb` | Only the keys listed below. Never personal data |
@@ -1864,10 +2254,72 @@ Purpose: append-only security and compliance log (CR-010). Never updated; delete
 | `ANALYSIS_DELETED` | USER | ANALYSIS | — |
 | `REPORT_DOWNLOADED` | USER | ANALYSIS | `plan` |
 | `DATA_SUMMARY_VIEWED` | USER | — | — |
-| `DATA_ERASED` | USER (API-015) or SYSTEM (FR-019.9) | ERASURE | `resumesDeleted`, `analysesDeleted`, `consentsWithdrawn`, `source` (`USER` or `GRIEVANCE`) |
+| `DATA_ERASED` | USER (API-015) or SYSTEM (FR-019.9) | ERASURE | `resumesDeleted`, `analysesDeleted`, `consentsWithdrawn`, `source` (`USER` or `GRIEVANCE`), and since v2.0 `subscriptionCancelled` (boolean) |
 | `JOB_ROLE_CREATED` | ADMIN | JOB_ROLE | `code` |
 | `JOB_ROLE_UPDATED` | ADMIN | JOB_ROLE | `changedFields` (array of field names) |
-| `RETENTION_PURGE` | SYSTEM | — | exactly these keys, each the number of deleted rows: `consents`, `resumes`, `analyses`, `monthlyUsage`, `erasureRequests`, `auditEvents` |
+| `SUBSCRIPTION_CHECKOUT` (v2.0) | USER | SUBSCRIPTION | `razorpaySubscriptionId` |
+| `SUBSCRIPTION_ACTIVATED` (v2.0) | USER (API-023) or SYSTEM (webhook, reconcile) | SUBSCRIPTION | `paidUntil` |
+| `SUBSCRIPTION_RENEWED` (v2.0) | SYSTEM (webhook, reconcile) | SUBSCRIPTION | `paidUntil` |
+| `SUBSCRIPTION_CANCEL_REQUESTED` (v2.0) | USER (API-024, API-015) or SYSTEM (grievance erasure, FR-019.9) | SUBSCRIPTION | `proUntil` |
+| `SUBSCRIPTION_CANCELLED` (v2.1) | USER (API-022, API-024, API-015) or SYSTEM (reconcile, FR-019.9) | SUBSCRIPTION | `previousStatus` |
+| `SUBSCRIPTION_ENDED` (v2.0) | SYSTEM (webhook, reconcile; also API-022 and API-024 when Razorpay has already ended it) | SUBSCRIPTION | `status` |
+| `RETENTION_PURGE` | SYSTEM | — | exactly these keys, each the number of deleted rows: `consents`, `resumes`, `analyses`, `monthlyUsage`, `erasureRequests`, `auditEvents`, and since v2.0 `subscriptions`, `paymentEvents` |
+
+#### TBL-011 `subscriptions` (v2.0)
+Purpose: one Resume Pro subscription at Razorpay and the time it has paid for. The only source of the plan (FR-023, ASM-018).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | Returned as `subscription.id` |
+| user_id | varchar(64) | NO | | | Platform `sub` |
+| razorpay_subscription_id | varchar(40) | NO | UK `ux_subscriptions__razorpay_subscription_id` | | `sub_…` from Razorpay |
+| razorpay_plan_id | varchar(40) | NO | | | `RAZORPAY_PLAN_ID` at creation |
+| terms_version | varchar(32) | NO | | | `PRO_TERMS_VERSION` accepted at checkout (FR-022.1) |
+| status | varchar(13) | NO | | `'CREATED'` | `ck_subscriptions__status`: `status IN ('CREATED','AUTHENTICATED','ACTIVE','PENDING','HALTED','PAUSED','CANCELLED','COMPLETED','EXPIRED')` (§4.13.2) |
+| cancel_at_period_end | boolean | NO | | `false` | |
+| cancel_requested_at | timestamptz | YES | | NULL | `ck_subscriptions__cancel`: `cancel_at_period_end = (cancel_requested_at IS NOT NULL)` |
+| current_period_start | timestamptz | YES | | NULL | From Razorpay `current_start` |
+| current_period_end | timestamptz | YES | | NULL | From Razorpay `current_end` |
+| paid_until | timestamptz | YES | | NULL | End of the last charged cycle; set only for a captured payment and never decreased (FR-023.6) |
+| last_event_at | timestamptz | YES | | NULL | `created_at` of the last webhook that changed the status (FR-026.4) |
+| ended_at | timestamptz | YES | | NULL | `ck_subscriptions__ended`: `(status IN ('CANCELLED','COMPLETED','EXPIRED')) = (ended_at IS NOT NULL)` |
+| expires_at | timestamptz | YES | | NULL | `ended_at + PAYMENT_RECORD_RETENTION_DAYS`. `ck_subscriptions__expires`: `(ended_at IS NULL) = (expires_at IS NULL)` |
+| created_at | timestamptz | NO | | `now()` | Written from the Clock (§2.2 rule 6) |
+| updated_at | timestamptz | NO | | `now()` | |
+
+#### TBL-012 `subscription_payments` (v2.0)
+Purpose: every captured Razorpay payment of a subscription, kept as a financial record (ASM-020). Failed payments are not stored.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| subscription_id | uuid | NO | FK `fk_subscription_payments__subscription_id` → `subscriptions(id)` ON DELETE CASCADE | | |
+| user_id | varchar(64) | NO | | | Copy of the subscription's user, for API-014 and API-021 |
+| razorpay_payment_id | varchar(40) | NO | UK `ux_subscription_payments__razorpay_payment_id` | | `pay_…`; makes payment inserts idempotent |
+| amount_paise | integer | NO | | | As charged. `ck_subscription_payments__amount`: `amount_paise > 0` |
+| currency | char(3) | NO | | `'INR'` | As charged. `ck_subscription_payments__currency`: `currency ~ '^[A-Z]{3}$'` |
+| period_start | timestamptz | YES | | NULL | Billing cycle start, when known |
+| period_end | timestamptz | YES | | NULL | Billing cycle end, when known |
+| paid_at | timestamptz | NO | | | Razorpay payment `created_at` |
+| source | varchar(9) | NO | | | `ck_subscription_payments__source`: `source IN ('VERIFY','WEBHOOK','RECONCILE')` |
+| created_at | timestamptz | NO | | `now()` | |
+
+#### TBL-013 `payment_events` (v2.0)
+Purpose: one row per Razorpay webhook event, to process each event exactly once (FR-026.2). The webhook body is never stored.
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| razorpay_event_id | varchar(64) | NO | UK `ux_payment_events__razorpay_event_id` | | `x-razorpay-event-id` header |
+| event_type | varchar(40) | NO | | | For example `subscription.charged` |
+| razorpay_subscription_id | varchar(40) | YES | | NULL | From the payload, when present |
+| razorpay_payment_id | varchar(40) | YES | | NULL | From the payload, when present |
+| event_created_at | timestamptz | NO | | | Payload `created_at` |
+| received_at | timestamptz | NO | | `now()` | |
+| result | varchar(7) | NO | | | `ck_payment_events__result`: `result IN ('APPLIED','IGNORED','STALE')` |
+| expires_at | timestamptz | NO | | | `received_at + PAYMENT_EVENT_RETENTION_DAYS` |
+
+Events with a bad signature are not stored (FR-026.1); they are only counted in `ro_webhook_events_total{result="REJECTED"}`.
 
 ### 5.3 Indexes
 
@@ -1893,6 +2345,13 @@ Primary keys and the unique keys above are not repeated here.
 | erasure_requests | `ix_erasure_requests__expires_at` | `(expires_at)` | FR-020 purge. |
 | audit_events | `ix_audit_events__occurred_at` | `(occurred_at)` | FR-020 purge and time-range investigations. |
 | audit_events | `ix_audit_events__actor_user_id_occurred_at` | `(actor_user_id, occurred_at DESC)` | Security investigation of one user's actions. |
+| subscriptions | `ux_subscriptions__user_id_open` (unique, partial `WHERE status IN ('CREATED','AUTHENTICATED','ACTIVE','PENDING','HALTED','PAUSED')`) | `(user_id)` | At most one open subscription per user (FR-022.3); finds it for API-022, API-024 and erasure. |
+| subscriptions | `ix_subscriptions__user_id_paid_until` | `(user_id, paid_until DESC)` | `planOf()` on every plan-cache miss (FR-023.1). |
+| subscriptions | `ix_subscriptions__open_created_at` (partial, same condition as above) | `(created_at)` | Hourly reconciliation over open subscriptions (FR-026.6). |
+| subscriptions | `ix_subscriptions__expires_at` | `(expires_at)` | FR-020 purge. |
+| subscription_payments | `ix_subscription_payments__user_id_paid_at` | `(user_id, paid_at DESC)` | Payment lists of API-021 and API-014. |
+| subscription_payments | `ix_subscription_payments__subscription_id` | `(subscription_id)` | FK cascade and the first-payment check of §4.13.3. |
+| payment_events | `ix_payment_events__expires_at` | `(expires_at)` | FR-020 purge. |
 
 ### 5.4 Relationships and delete rules
 
@@ -1906,8 +2365,11 @@ Primary keys and the unique keys above are not repeated here.
 | consents, resumes, analyses, monthly_usage, erasure_requests (`user_id`) | platform user | many to one, no FK | Handled by the application, see below. |
 | analyses (`user_id`, `period_month`) | monthly_usage (`user_id`, `period_month`) | many to one, no FK | No FK, because usage rows are kept after erasure while analyses are deleted, and old usage rows are purged while analyses remain. |
 | audit_events.actor_user_id | platform user | many to zero-or-one, no FK | Never deleted with the user; purged after `AUDIT_RETENTION_DAYS`. |
+| subscription_payments.subscription_id | subscriptions.id | many to one | CASCADE, which happens only in the FR-020 purge after `PAYMENT_RECORD_RETENTION_DAYS` |
+| subscriptions (`user_id`) | platform user | many to one, no FK | Kept after erasure (FR-019.10, ASM-020) |
+| payment_events | subscriptions | no FK (matched by `razorpay_subscription_id`) | Purged on its own after `PAYMENT_EVENT_RETENTION_DAYS` |
 
-**When a user erases their data (FR-019)**, in one transaction: `SELECT storage_key FROM resumes WHERE user_id = $1 AND storage_key IS NOT NULL` (kept in memory for the S3 clean-up) → `DELETE FROM analyses WHERE user_id = $1 RETURNING status, period_month` (children cascade) → for each `period_month` among the returned `QUEUED`/`PROCESSING` rows, `UPDATE monthly_usage SET reserved_count = reserved_count - <count> WHERE user_id = $1 AND period_month = <month>` (FR-019.5) → `DELETE FROM resumes WHERE user_id = $1` → `UPDATE consents SET status = 'WITHDRAWN', ended_at = $now WHERE user_id = $1 AND status = 'ACTIVE'` → `INSERT INTO erasure_requests` → `INSERT INTO audit_events`. Analyses are deleted before resumes so the SET NULL update is not needed. `monthly_usage` rows are not deleted (FR-019.7).
+**When a user erases their data (FR-019)**, in one transaction: `SELECT storage_key FROM resumes WHERE user_id = $1 AND storage_key IS NOT NULL` (kept in memory for the S3 clean-up) → `DELETE FROM analyses WHERE user_id = $1 RETURNING status, period_month, plan_at_creation` (children cascade) → for each `period_month` among the returned `QUEUED`/`PROCESSING` rows, `UPDATE monthly_usage SET reserved_count = reserved_count - <FREE count>, pro_reserved_count = pro_reserved_count - <PRO count> WHERE user_id = $1 AND period_month = <month>` (FR-019.5) → `DELETE FROM resumes WHERE user_id = $1` → `UPDATE consents SET status = 'WITHDRAWN', ended_at = $now WHERE user_id = $1 AND status = 'ACTIVE'` → `INSERT INTO erasure_requests` → `INSERT INTO audit_events`. Analyses are deleted before resumes so the SET NULL update is not needed. `monthly_usage` rows are not deleted (FR-019.7). Since v2.0, an open subscription is cancelled at Razorpay before this transaction starts (FR-019.10), and TBL-011, TBL-012 and TBL-013 rows are not deleted by erasure.
 
 **Lock order:** every transaction that locks both an `analyses` row and a `monthly_usage` row locks the `analyses` row first (worker save, stale janitor, erasure), so they cannot deadlock. API-009 locks the `monthly_usage` row and then the resume row (`FOR SHARE`) and only inserts a new analysis; API-008 locks only the resume row (`FOR UPDATE`).
 
@@ -2000,7 +2462,7 @@ Every place where personal data lives, with its retention and what erasure (FR-0
 
 | Data | Where | What it reveals | Retention | On erasure (FR-019) | Protection |
 |---|---|---|---|---|---|
-| Platform user ID (`sub`) | `user_id` in TBL-002, TBL-003, TBL-004, TBL-008, TBL-009; `actor_user_id` in TBL-010; logs | Pseudonymous identifier | With the row that holds it | Kept only in TBL-002, TBL-008, TBL-009, TBL-010 and logs (FR-019.7) | RDS encryption |
+| Platform user ID (`sub`) | `user_id` in TBL-002, TBL-003, TBL-004, TBL-008, TBL-009, TBL-011, TBL-012; `actor_user_id` in TBL-010; logs | Pseudonymous identifier | With the row that holds it | Kept only in TBL-002 and TBL-008 to TBL-012 and in logs (FR-019.7, FR-019.10) | RDS encryption |
 | Raw resume file | S3 `uploads/` | Full resume including contact details | Deleted after parsing; at most `RAW_FILE_MAX_HOURS` | Deleted (best effort, then the lifecycle rule) | SSE-KMS, private bucket |
 | File name | `resumes.original_filename`, `analyses.resume_filename` | Often the person's name | `RESUME_RETENTION_DAYS` / `ANALYSIS_RETENTION_DAYS` | Deleted | RDS encryption; never logged (CR-011) |
 | Redacted resume text | `resumes.text_enc` | Resume content without contact details or ID numbers | `RESUME_RETENTION_DAYS` | Deleted | AES-256-GCM (§5.6) and RDS encryption |
@@ -2012,6 +2474,10 @@ Every place where personal data lives, with its retention and what erasure (FR-0
 | Audit events | TBL-010 | The person's actions (IDs only) | `AUDIT_RETENTION_DAYS` | Kept (security logs, DPDP Rules 2025 rule 6) | RDS encryption |
 | Application logs | CloudWatch Logs | `userId` only (CR-011) | 365 days in prod, 30 days elsewhere (CR-013) | Kept | CloudWatch encryption |
 | AI request content | Anthropic (processor) | Redacted resume text | Under Anthropic's commercial terms (ASM-005) | Not reachable from this module; stated in the notice (§4.9) | TLS; redaction before sending (NFR-015) |
+| Subscription records (v2.0) | TBL-011 | That the person bought Resume Pro, when, and until when | `PAYMENT_RECORD_RETENTION_DAYS` after the subscription ends | Kept, because the law requires it (ASM-020); an open subscription is cancelled first (FR-019.10) | RDS encryption |
+| Payment records (v2.0) | TBL-012 | Razorpay payment IDs, amounts and dates | With their subscription | Kept (ASM-020) | RDS encryption |
+| Webhook event records (v2.0) | TBL-013 | Razorpay IDs and event times only | `PAYMENT_EVENT_RETENTION_DAYS` | Kept until purged | RDS encryption |
+| Payment details (v2.0) | Razorpay (processor) | Card, UPI or bank details, payer email and phone | Under Razorpay's terms | Never received or stored by this module; stated in the Pro terms (§4.9.1) | PCI DSS at Razorpay; CR-037 |
 
 ---
 
@@ -2020,8 +2486,8 @@ Every place where personal data lives, with its retention and what erasure (FR-0
 ### 6.1 Common rules
 
 - **Base path:** `/api/v1` on the same origin as the web app (prod: `https://resume.surfingbear.com/api/v1`). The major version is in the path; breaking changes require `/api/v2`.
-- **Auth:** platform JWT in the `sb_access_token` cookie, or `Authorization: Bearer <jwt>` (CR-001 to CR-003). Every endpoint is protected except API-019 and API-020.
-- **CSRF:** `POST`, `PATCH`, `PUT` and `DELETE` require `X-Requested-With: SurfingBearRO` and `Origin: <APP_ORIGIN>` (CR-004).
+- **Auth:** platform JWT in the `sb_access_token` cookie, or `Authorization: Bearer <jwt>` (CR-001 to CR-003). Every endpoint is protected except API-019, API-020 and API-025 (the Razorpay webhook, checked by its signature, CR-037).
+- **CSRF:** `POST`, `PATCH`, `PUT` and `DELETE` require `X-Requested-With: SurfingBearRO` and `Origin: <APP_ORIGIN>` (CR-004), except API-025.
 - **Expired rows:** every read of resumes and analyses filters `expires_at > $now`; an expired row behaves exactly like a deleted one (404) until FR-020 removes it (FR-014.3). `$now` is the Clock time (§2.2 rule 6).
 - **Consent:** endpoints marked "Consent: required" return 403 `CONSENT_REQUIRED` when the user has no active consent for `NOTICE_VERSION` (FR-002.2).
 - **Content types:** requests `application/json` (except API-005: `multipart/form-data`); responses `application/json; charset=utf-8` (except API-012: `application/pdf`).
@@ -2039,12 +2505,12 @@ Every place where personal data lives, with its retention and what erasure (FR-0
 |---|---|---|
 | 401 | `AUTH_REQUIRED` | every protected endpoint |
 | 401 | `AUTH_TOKEN_INVALID` | every protected endpoint |
-| 403 | `CSRF_CHECK_FAILED` | every `POST`, `PUT`, `PATCH`, `DELETE` |
+| 403 | `CSRF_CHECK_FAILED` | every `POST`, `PUT`, `PATCH`, `DELETE` except API-025 |
 | 403 | `CONSENT_REQUIRED` | endpoints marked "Consent: required" |
 | 400 | `VALIDATION_FAILED` | every endpoint with path params, query params or a body |
 | 413 | `PAYLOAD_TOO_LARGE` | every JSON body endpoint (body > `JSON_BODY_LIMIT`) |
 | 404 | `NOT_FOUND` | unknown routes, and resource IDs that do not exist or belong to another user |
-| 429 | `RATE_LIMITED` | every endpoint except API-019 and API-020 |
+| 429 | `RATE_LIMITED` | every endpoint except API-019, API-020 and API-025 |
 | 500 | `INTERNAL_ERROR` | every endpoint |
 | 503 | `SERVICE_UNAVAILABLE` | every endpoint that uses PostgreSQL, Redis, S3 or the JWKS |
 
@@ -2095,14 +2561,14 @@ Every place where personal data lives, with its retention and what erasure (FR-0
 | `suggestions` | array of `{ priority, section, issueType, originalText, suggestedText, reason }` | Visible suggestions only, in `priority` order (FR-012) |
 | `totalSuggestionCount` | integer | All stored suggestions |
 | `lockedSuggestionCount` | integer | `0` for PRO |
-| `upgradeUrl` | string \| null | `PLATFORM_UPGRADE_URL` for FREE, `null` for PRO |
+| `upgradeUrl` | string \| null | `<APP_ORIGIN>/<locale>/pro` (P-06) for FREE, `null` for PRO (FR-012.2, changed in v2.0) |
 
 ### 6.2 Endpoints
 
 #### API-001 `GET /api/v1/me`
 - **Purpose:** the caller's plan, consent state, usage and limits, for the web app to decide what to show.
 - **Auth / role:** any user. **Consent:** not required. **Rate limit:** default.
-- **Implements:** FR-001, FR-002, FR-007
+- **Implements:** FR-001, FR-002, FR-007, FR-023
 
 **Request:** no parameters.
 
@@ -2113,6 +2579,8 @@ Every place where personal data lives, with its retention and what erasure (FR-0
   "data": {
     "userId": "usr_01J9Z3K7Q2W8E5R1T6Y4U0I9OP",
     "plan": "FREE",
+    "proUntil": null,
+    "cancelAtPeriodEnd": false,
     "isAdmin": false,
     "consent": {
       "required": false,
@@ -2134,12 +2602,12 @@ Every place where personal data lives, with its retention and what erasure (FR-0
       "freeVisibleSuggestions": 3,
       "maxConcurrentAnalyses": 2
     },
-    "upgradeUrl": "https://surfingbear.com/pricing?ref=resume-optimizer"
+    "upgradeUrl": "https://resume.surfingbear.com/en/pro"
   }
 }
 ```
 
-Rules: `consent.acceptedVersion` and `acceptedAt` come from the user's `ACTIVE` consent (null if none); `required = (acceptedVersion !== currentVersion)`. `usage` reads the TBL-008 row of the current period month (all counts 0 if there is none; the row is not created by this call). `upgradeUrl` is null for PRO.
+Rules: `consent.acceptedVersion` and `acceptedAt` come from the user's `ACTIVE` consent (null if none); `required = (acceptedVersion !== currentVersion)`. `usage` reads the TBL-008 row of the current period month (all counts 0 if there is none; the row is not created by this call). Since v2.0: `plan`, `proUntil` and `cancelAtPeriodEnd` come from the entitlement (FR-023); for PRO, `usage.limit` and `usage.remaining` are `null` and `used` / `inProgress` are the PRO counters (FR-007.7); `upgradeUrl` is `<APP_ORIGIN>/<locale>/pro` for FREE and null for PRO. For a PRO user the same response has `"plan": "PRO"`, `"proUntil": "2026-11-27T04:20:11.000Z"`, `"upgradeUrl": null` and `"usage": { "periodMonth": "2026-10", "limit": null, "used": 12, "inProgress": 1, "remaining": null, "resetsAt": "2026-10-31T18:30:00.000Z" }`.
 
 **Errors:** common errors only.
 
@@ -2386,7 +2854,7 @@ Sort: `created_at DESC, id DESC`. Filter: `user_id = caller AND expires_at > $no
 #### API-009 `POST /api/v1/analyses`
 - **Purpose:** start an analysis.
 - **Auth / role:** any user. **Consent:** required. **Rate limit:** 10 per hour per user.
-- **Implements:** FR-006, FR-007, FR-015 (reuse of a stored resume), FR-021 (inactive roles rejected)
+- **Implements:** FR-006, FR-007, FR-015 (reuse of a stored resume), FR-021 (inactive roles rejected), FR-023 (no limit for PRO)
 
 **Request**
 
@@ -2438,7 +2906,7 @@ Sort: `created_at DESC, id DESC`. Filter: `user_id = caller AND expires_at > $no
 | 422 | `JOB_ROLE_UNAVAILABLE` | Job role exists but `is_active = false` |
 | 409 | `DUPLICATE_ANALYSIS` | Same resume + role + level is already `QUEUED`/`PROCESSING`; `details: [{ "field": "analysisId", "issue": "<existing id>" }]` |
 | 409 | `CONCURRENT_ANALYSIS_LIMIT` | The user already has `MAX_CONCURRENT_ANALYSES` analyses `QUEUED`/`PROCESSING` |
-| 403 | `QUOTA_EXCEEDED` | `consumed + reserved >= limit`; `error.meta = { limit, used, inProgress, resetsAt }` (§1.4) |
+| 403 | `QUOTA_EXCEEDED` | FREE users only (since v2.0): `consumed + reserved >= FREE_MONTHLY_ANALYSES`; `error.meta = { limit, used, inProgress, resetsAt }` (§1.4) |
 | 503 | `SERVICE_UNAVAILABLE` | Enqueue failed (FR-006.4) |
 
 #### API-010 `GET /api/v1/analyses`
@@ -2477,7 +2945,7 @@ Item fields: `id` (uuid), `status`, `errorCode` (nullable), `jobRole` (`{ id, co
 #### API-011 `GET /api/v1/analyses/{analysisId}`
 - **Purpose:** status of one analysis and, when completed, its result with plan gating.
 - **Auth / role:** owner. **Consent:** required. **Rate limit:** default (polling every 3 s uses 20 of the 120 per minute).
-- **Implements:** FR-008 to FR-012
+- **Implements:** FR-008 to FR-012, FR-023 (plan for gating)
 
 **Request**
 
@@ -2526,7 +2994,7 @@ Item fields: `id` (uuid), `status`, `errorCode` (nullable), `jobRole` (`{ id, co
       ],
       "totalSuggestionCount": 7,
       "lockedSuggestionCount": 4,
-      "upgradeUrl": "https://surfingbear.com/pricing?ref=resume-optimizer"
+      "upgradeUrl": "https://resume.surfingbear.com/en/pro"
     }
   }
 }
@@ -2563,7 +3031,7 @@ Example: failed.
 #### API-012 `GET /api/v1/analyses/{analysisId}/report`
 - **Purpose:** download the analysis as a PDF (§4.10).
 - **Auth / role:** owner. **Consent:** required. **Rate limit:** 30 per hour per user.
-- **Implements:** FR-013
+- **Implements:** FR-013, FR-023 (plan for gating)
 
 **Request**
 
@@ -2599,7 +3067,7 @@ Example: failed.
 #### API-014 `GET /api/v1/privacy/my-data`
 - **Purpose:** summary of the caller's personal data and its processing (DPDP Act section 11).
 - **Auth / role:** any user. **Consent:** not required. **Rate limit:** default.
-- **Implements:** FR-018
+- **Implements:** FR-018, FR-022 (billing records)
 
 **Request:** no parameters.
 
@@ -2630,21 +3098,34 @@ Example: failed.
     },
     "usage": {
       "items": [
-        { "periodMonth": "2026-10", "used": 1, "inProgress": 0 }
+        { "periodMonth": "2026-10", "used": 1, "inProgress": 0, "proUsed": 0, "proInProgress": 0 }
       ],
       "truncated": false
     },
-    "retention": { "rawFileMaxHours": 48, "resumeDays": 30, "analysisDays": 180, "recordDays": 365 },
+    "subscriptions": {
+      "items": [
+        { "status": "ACTIVE", "createdAt": "2026-10-27T04:19:30.000Z", "paidUntil": "2026-11-27T04:20:11.000Z", "cancelAtPeriodEnd": false }
+      ],
+      "truncated": false
+    },
+    "payments": {
+      "items": [
+        { "paidAt": "2026-10-27T04:20:11.000Z", "amountPaise": 29900, "currency": "INR" }
+      ],
+      "truncated": false
+    },
+    "retention": { "rawFileMaxHours": 48, "resumeDays": 30, "analysisDays": 180, "recordDays": 365, "paymentRecordDays": 2922, "paymentEventDays": 90 },
     "processors": [
       { "name": "Anthropic PBC", "purpose": "AI analysis of redacted resume text", "location": "United States" },
-      { "name": "Amazon Web Services", "purpose": "Hosting, database and file storage", "location": "India (ap-south-1)" }
+      { "name": "Amazon Web Services", "purpose": "Hosting, database and file storage", "location": "India (ap-south-1)" },
+      { "name": "Razorpay", "purpose": "Resume Pro payments (only if you subscribe)", "location": "India" }
     ],
     "grievanceEmail": "grievance@surfingbear.com"
   }
 }
 ```
 
-Each `items` list holds at most 1000 rows, newest first; `truncated` is true when more exist. Field meanings: `consents.items[]` = `{ noticeVersion, locale, status, acceptedAt, endedAt (nullable) }`; `resumes.items[]` = `{ id, filename, fileType, sizeBytes, parseStatus, createdAt, expiresAt }`; `analyses.items[]` = `{ id, status, jobRoleCode, experienceLevel, overallScore (nullable), createdAt, expiresAt }`; `usage.items[]` = `{ periodMonth, used, inProgress }`; `retention` = `{ rawFileMaxHours: RAW_FILE_MAX_HOURS, resumeDays: RESUME_RETENTION_DAYS, analysisDays: ANALYSIS_RETENTION_DAYS, recordDays: AUDIT_RETENTION_DAYS }` (consents, erasure records and audit events); `processors` is the fixed list shown; `grievanceEmail` = `GRIEVANCE_EMAIL`.
+Each `items` list holds at most 1000 rows, newest first; `truncated` is true when more exist. Field meanings: `consents.items[]` = `{ noticeVersion, locale, status, acceptedAt, endedAt (nullable) }`; `resumes.items[]` = `{ id, filename, fileType, sizeBytes, parseStatus, createdAt, expiresAt }`; `analyses.items[]` = `{ id, status, jobRoleCode, experienceLevel, overallScore (nullable), createdAt, expiresAt }`; `usage.items[]` = `{ periodMonth, used, inProgress, proUsed, proInProgress }` (`used` and `inProgress` are the FREE counters, `proUsed` and `proInProgress` the PRO counters of FR-007.10, v2.1); `retention` = `{ rawFileMaxHours: RAW_FILE_MAX_HOURS, resumeDays: RESUME_RETENTION_DAYS, analysisDays: ANALYSIS_RETENTION_DAYS, recordDays: AUDIT_RETENTION_DAYS }` (consents, erasure records and audit events); `processors` is the fixed list shown; `grievanceEmail` = `GRIEVANCE_EMAIL`. Since v2.0 also `subscriptions.items[]` = `{ status, createdAt, paidUntil (nullable), cancelAtPeriodEnd }`, `payments.items[]` = `{ paidAt, amountPaise, currency }`, `retention.paymentRecordDays` = `PAYMENT_RECORD_RETENTION_DAYS` and `retention.paymentEventDays` = `PAYMENT_EVENT_RETENTION_DAYS`; Razorpay is always listed in `processors`.
 
 **Errors:** common errors only.
 
@@ -2672,6 +3153,7 @@ Each `items` list holds at most 1000 rows, newest first; `truncated` is true whe
     "resumesDeleted": 2,
     "analysesDeleted": 3,
     "consentsWithdrawn": 1,
+    "subscriptionCancelled": false,
     "completedAt": "2026-10-16T12:20:00.000Z"
   }
 }
@@ -2679,7 +3161,14 @@ Each `items` list holds at most 1000 rows, newest first; `truncated` is true whe
 
 A user with no data gets 200 with all counts 0 (a TBL-009 row is still written).
 
-**Errors:** common errors only (`VALIDATION_FAILED` when `confirm` is not `DELETE`).
+`subscriptionCancelled` (v2.0) is true when erasure cancelled an open subscription (FR-019.10).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | `confirm` is not `DELETE` |
+| 503 | `PAYMENT_PROVIDER_UNAVAILABLE` | The user has an open subscription and Razorpay cannot be reached; nothing is deleted (FR-019.10, v2.0) |
 
 #### API-016 `GET /api/v1/admin/job-roles`
 - **Purpose:** all job roles, including inactive ones.
@@ -2787,6 +3276,250 @@ Checks, each with a 1000 ms timeout: PostgreSQL `SELECT 1`, which decides readin
 |---|---|---|
 | 503 | `SERVICE_UNAVAILABLE` | The PostgreSQL check fails; `details` lists every failed check, e.g. `[{ "field": "database", "issue": "down" }]` |
 
+#### API-021 `GET /api/v1/subscription` (v2.0)
+- **Purpose:** the caller's plan, subscription, payments and the Pro terms, for P-06.
+- **Auth / role:** any user. **Consent:** not required. **Rate limit:** default.
+- **Implements:** FR-022, FR-023, FR-024
+
+**Request:** no parameters. `terms` follows `Accept-Language`.
+
+**Response 200**
+
+```json
+{
+  "data": {
+    "plan": "PRO",
+    "proUntil": "2026-11-27T04:20:11.000Z",
+    "cancelAtPeriodEnd": false,
+    "amountPaise": 29900,
+    "currency": "INR",
+    "checkoutMode": "razorpay",
+    "termsVersion": "RO-PRO-TERMS-2026-10",
+    "terms": "## Resume Pro: terms and payment notice\n\n- **Price:** ₹299 per month, GST included, ...",
+    "subscription": {
+      "id": "5b1e2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "status": "ACTIVE",
+      "currentPeriodEnd": "2026-11-27T04:20:11.000Z",
+      "cancelAtPeriodEnd": false,
+      "createdAt": "2026-10-27T04:19:30.000Z"
+    },
+    "payments": [
+      { "paidAt": "2026-10-27T04:20:11.000Z", "amountPaise": 29900, "currency": "INR", "periodEnd": "2026-11-27T04:20:11.000Z" }
+    ]
+  }
+}
+```
+
+| Field | Type | Nullable | Notes |
+|---|---|---|---|
+| `plan` | `"FREE"` \| `"PRO"` | no | FR-023.1 |
+| `proUntil` | string (date-time) | yes | `paid_until` of the row that grants Pro |
+| `cancelAtPeriodEnd` | boolean | no | |
+| `amountPaise`, `currency` | integer, string | no | `PRO_PRICE_PAISE`, `"INR"` (renamed from `priceAmountPaise` in v2.1, to match API-022 and API-014) |
+| `checkoutMode` | `"razorpay"` \| `"mock"` | no | From `PAYMENT_MODE` |
+| `termsVersion`, `terms` | string | no | `PRO_TERMS_VERSION` and the §4.9.1 text in the request locale |
+| `subscription` | object | yes | The open subscription, else the newest one, else `null` |
+| `subscription.id` | string (uuid) | no | TBL-011 `id` |
+| `subscription.status` | string | no | §4.13.2 |
+| `subscription.currentPeriodEnd` | string (date-time) | yes | `null` until Razorpay sets the first cycle |
+| `subscription.cancelAtPeriodEnd` | boolean | no | |
+| `subscription.createdAt` | string (date-time) | no | |
+| `payments` | array | no | The user's last `PAYMENTS_LIST_SIZE` TBL-012 rows, newest first |
+| `payments[].paidAt` | string (date-time) | no | |
+| `payments[].amountPaise`, `payments[].currency` | integer, string | no | As charged |
+| `payments[].periodEnd` | string (date-time) | yes | `null` when the cycle end is unknown |
+
+**Errors:** common errors only.
+
+#### API-022 `POST /api/v1/subscription/checkout` (v2.0)
+- **Purpose:** start a Resume Pro purchase and return what Razorpay Checkout needs.
+- **Auth / role:** any user who is not PRO. **Consent:** required. **Rate limit:** 5 per hour per user.
+- **Implements:** FR-022
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `termsVersion` | body | string | yes | 1–32 chars; must equal `PRO_TERMS_VERSION` (else 409) |
+
+**Response 201** (also when an unpaid checkout younger than `CHECKOUT_EXPIRY_MS` is returned again)
+
+```json
+{
+  "data": {
+    "subscriptionId": "5b1e2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "razorpaySubscriptionId": "sub_N8x2kQ9wZr1aBc",
+    "razorpayKeyId": "rzp_live_AbCdEf1234567",
+    "amountPaise": 29900,
+    "currency": "INR",
+    "name": "SurfingBear Resume Pro",
+    "description": "₹299 per month",
+    "checkoutMode": "razorpay"
+  }
+}
+```
+
+**Errors** (after the common guard errors, in this order)
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | Body invalid |
+| 409 | `PRO_TERMS_VERSION_MISMATCH` | `termsVersion` is not `PRO_TERMS_VERSION`; `details: [{ "field": "termsVersion", "issue": "current is RO-PRO-TERMS-2026-10" }]` |
+| 409 | `ALREADY_PRO` | The caller is PRO; `error.meta = { proUntil }` |
+| 503 | `PAYMENT_PROVIDER_UNAVAILABLE` | Razorpay cannot be reached; no row is kept |
+
+#### API-023 `POST /api/v1/subscription/verify` (v2.0)
+- **Purpose:** confirm a Checkout payment and grant Pro.
+- **Auth / role:** any user. **Consent:** not required (the payment already happened). **Rate limit:** 10 per hour per user.
+- **Implements:** FR-022
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `razorpayPaymentId` | body | string | yes | `^pay_[A-Za-z0-9_]{1,36}$` |
+| `razorpaySubscriptionId` | body | string | yes | `^sub_[A-Za-z0-9_]{1,36}$`; must be a TBL-011 row of the caller |
+| `razorpaySignature` | body | string | yes | 64 lowercase hex characters, or `mock_ok` when `PAYMENT_MODE=mock` |
+
+**Response 200**
+
+```json
+{ "data": { "plan": "PRO", "proUntil": "2026-11-27T04:20:11.000Z", "cancelAtPeriodEnd": false, "activationPending": false } }
+```
+
+When the payment is not captured yet, or Razorpay has not set the cycle end (`current_end`) yet, nothing changes and the response is `plan: "FREE"`, `proUntil: null`, `activationPending: true` (FR-022.6).
+
+**Errors** (in this order)
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | Body invalid |
+| 404 | `NOT_FOUND` | No subscription of the caller with this `razorpaySubscriptionId` |
+| 400 | `PAYMENT_SIGNATURE_INVALID` | The signature does not match (CR-037) |
+| 503 | `PAYMENT_PROVIDER_UNAVAILABLE` | Razorpay cannot be reached to fetch the subscription or payment (FR-022.7) |
+
+#### API-024 `POST /api/v1/subscription/cancel` (v2.0)
+- **Purpose:** cancel Resume Pro; access continues until the end of the paid month.
+- **Auth / role:** any user. **Consent:** not required. **Rate limit:** 5 per hour per user.
+- **Implements:** FR-024
+
+**Request:** no body (an empty JSON object is accepted).
+
+**Response 200**
+
+```json
+{ "data": { "plan": "PRO", "proUntil": "2026-11-27T04:20:11.000Z", "cancelAtPeriodEnd": true, "subscriptionStatus": "ACTIVE" } }
+```
+
+For any other open subscription (FR-024.4): `plan` as computed after the cancel, `cancelAtPeriodEnd: false`, `subscriptionStatus: "CANCELLED"` (or the ended status Razorpay reported, FR-024.6).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 409 | `NO_ACTIVE_SUBSCRIPTION` | The caller has no open subscription |
+| 503 | `PAYMENT_PROVIDER_UNAVAILABLE` | Razorpay cannot be reached; nothing changes |
+
+#### API-025 `POST /api/v1/webhooks/razorpay` (v2.0)
+- **Purpose:** receive Razorpay subscription events.
+- **Auth / role:** public; authenticated by `X-Razorpay-Signature` (CR-037). No CSRF check, no consent, no user rate limit.
+- **Implements:** FR-023, FR-024, FR-026
+
+**Request:** headers `X-Razorpay-Signature` and `x-razorpay-event-id` (both required); body is Razorpay's event JSON, at most `JSON_BODY_LIMIT`. Fields read: `event`, `created_at`, `payload.subscription.entity` (`id`, `status`, `current_start`, `current_end`) and `payload.payment.entity` (`id`, `amount`, `currency`, `created_at`); everything else is discarded (FR-026.7).
+
+```json
+{
+  "entity": "event",
+  "event": "subscription.charged",
+  "created_at": 1793074813,
+  "payload": {
+    "subscription": { "entity": { "id": "sub_N8x2kQ9wZr1aBc", "status": "active", "current_start": 1793074811, "current_end": 1795753211 } },
+    "payment": { "entity": { "id": "pay_N8x3aB4cD5eF6g", "amount": 29900, "currency": "INR", "created_at": 1793074811 } }
+  }
+}
+```
+
+**Response 200:** `{ "data": { "received": true } }` for applied, duplicate, ignored and stale events (FR-026.2 to FR-026.4).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | `WEBHOOK_SIGNATURE_INVALID` | Missing or wrong signature; nothing is stored |
+| 400 | `VALIDATION_FAILED` | Missing `x-razorpay-event-id`, or the body is not JSON |
+| 500 | `INTERNAL_ERROR` | Processing failed; the transaction is rolled back and Razorpay retries (FR-026.2) |
+| 503 | `SERVICE_UNAVAILABLE` | PostgreSQL is down; Razorpay retries |
+
+#### API-026 `GET /api/v1/analyses/compare` (v2.0)
+- **Purpose:** compare two of the caller's completed analyses.
+- **Auth / role:** PRO. **Consent:** required. **Rate limit:** default.
+- **Implements:** FR-014, FR-025
+
+The route is registered before `GET /api/v1/analyses/{analysisId}` so that `compare` is not read as an ID.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| `baseId` | query | string | yes | UUID v4 |
+| `targetId` | query | string | yes | UUID v4, different from `baseId` |
+
+**Response 200** (the target is the API-011 example; scores of the base: 60, 40, 70, 85, 55, 70 → 62)
+
+```json
+{
+  "data": {
+    "base": {
+      "id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "createdAt": "2026-09-20T10:00:00.000Z",
+      "jobRole": { "id": "0b6f3f7e-3a51-4f64-9d0c-2f4c3a8e9b11", "code": "BACKEND_ENGINEER", "name": "Backend Software Engineer" },
+      "experienceLevel": "MID",
+      "overallScore": 62,
+      "scoreBand": "FAIR"
+    },
+    "target": {
+      "id": "9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a",
+      "createdAt": "2026-10-16T12:01:00.000Z",
+      "jobRole": { "id": "0b6f3f7e-3a51-4f64-9d0c-2f4c3a8e9b11", "code": "BACKEND_ENGINEER", "name": "Backend Software Engineer" },
+      "experienceLevel": "MID",
+      "overallScore": 70,
+      "scoreBand": "GOOD"
+    },
+    "sameRole": true,
+    "sameLevel": true,
+    "overallDelta": 8,
+    "bandChanged": true,
+    "dimensions": [
+      { "code": "KEYWORD_MATCH", "name": "Keyword match", "baseScore": 60, "targetScore": 70, "delta": 10 },
+      { "code": "EXPERIENCE_IMPACT", "name": "Experience impact", "baseScore": 40, "targetScore": 50, "delta": 10 },
+      { "code": "ATS_READABILITY", "name": "ATS readability", "baseScore": 70, "targetScore": 80, "delta": 10 },
+      { "code": "SECTION_COMPLETENESS", "name": "Section completeness", "baseScore": 85, "targetScore": 90, "delta": 5 },
+      { "code": "LEVEL_ALIGNMENT", "name": "Level alignment", "baseScore": 55, "targetScore": 60, "delta": 5 },
+      { "code": "LANGUAGE_QUALITY", "name": "Language quality", "baseScore": 70, "targetScore": 75, "delta": 5 }
+    ],
+    "missingSkills": { "resolved": ["Unit testing"], "stillMissing": ["Docker", "Message queues", "Observability"], "newlyMissing": [] }
+  }
+}
+```
+
+| Field | Type | Nullable | Notes |
+|---|---|---|---|
+| `base`, `target` | object | no | `id`, `createdAt`, `jobRole` (`id`, `code`, `name` in the request locale), `experienceLevel`, `overallScore` (integer 0–100), `scoreBand` |
+| `sameRole`, `sameLevel` | boolean | no | FR-025.4 |
+| `overallDelta` | integer | no | `target.overallScore − base.overallScore`, −100 to 100 |
+| `bandChanged` | boolean | no | |
+| `dimensions` | array of 6 | no | `code`, `name` (request locale), `baseScore`, `targetScore` (integers 0–100) and `delta` (integer), in §4.7.3 order |
+| `missingSkills` | object | yes | `resolved`, `stillMissing`, `newlyMissing`: arrays of skill names (FR-025.5); `null` when `sameRole` is false |
+
+**Errors** (after the common guard errors, in this order)
+
+| HTTP | Error code | When |
+|---|---|---|
+| 403 | `PRO_REQUIRED` | The caller is FREE |
+| 400 | `VALIDATION_FAILED` | Missing or invalid IDs, or `targetId` equals `baseId` (`issue: "sameAsBase"`) |
+| 404 | `NOT_FOUND` | An analysis does not exist for the caller or has expired |
+| 409 | `ANALYSIS_NOT_COMPLETED` | An analysis is not `COMPLETED` |
+
 ### 6.3 Error code list
 
 "`details` / `meta`" gives the exact content of those fields in the error body (§1.4). "Surface" says where the code appears: **HTTP** = an error response; **parse** = `Resume.parseErrorCode`; **analysis** = `Analysis.errorCode`. Messages with numbers must be updated together with the constant they mention.
@@ -2828,6 +3561,13 @@ Checks, each with a 1000 ms timeout: PostgreSQL `SELECT 1`, which decides readin
 | ERR-033 | `CONSENT_VERSION_MISMATCH` | 409 | HTTP | `[{ field: "noticeVersion", issue: "current is <NOTICE_VERSION>" }]` | The privacy notice has been updated. Please read the latest version and accept again. | गोपनीयता सूचना अपडेट हो गई है। कृपया नवीनतम संस्करण पढ़कर फिर से स्वीकार करें। | 개인정보 처리 안내가 변경되었습니다. 최신 내용을 읽고 다시 동의해 주세요. | API-004 with an old notice version (FR-002.4). |
 | ERR-034 | `JOB_ROLE_CODE_EXISTS` | 409 | HTTP | `[{ field: "code", issue: "already exists" }]` | A job role with this code already exists. | इस कोड वाली जॉब भूमिका पहले से मौजूद है। | 이 코드를 사용하는 직무가 이미 있습니다. | API-017 with a used code (FR-021.2). |
 | ERR-035 | `RESUME_LIMIT_REACHED` | 409 | HTTP | `[]`; `meta: { limit }` | You have reached the limit of 15 stored resumes. Delete a resume to upload a new one. | आप 15 सहेजे गए रिज़्यूमे की सीमा तक पहुँच गए हैं। नया अपलोड करने के लिए कोई एक रिज़्यूमे हटाएँ। | 저장할 수 있는 이력서는 최대 15개입니다. 새 이력서를 업로드하려면 기존 이력서를 삭제해 주세요. | API-005 when the user already has `MAX_STORED_RESUMES` non-expired resumes (FR-004.9). |
+| ERR-036 | `PRO_REQUIRED` | 403 | HTTP | `[]` | Comparing analyses is part of Resume Pro. | विश्लेषणों की तुलना Resume Pro का हिस्सा है। | 분석 비교는 Resume Pro 기능입니다. | API-026 called by a FREE user (FR-025.1, v2.0). |
+| ERR-037 | `ALREADY_PRO` | 409 | HTTP | `[]`; `meta: { proUntil }` | You already have Resume Pro. | आपके पास पहले से Resume Pro है। | 이미 Resume Pro를 이용 중입니다. | API-022 by a PRO user (FR-022.2, FR-024.8, v2.0). |
+| ERR-038 | `NO_ACTIVE_SUBSCRIPTION` | 409 | HTTP | `[]` | You do not have a Resume Pro subscription to cancel. | आपके पास रद्द करने के लिए कोई Resume Pro सदस्यता नहीं है। | 해지할 Resume Pro 구독이 없습니다. | API-024 without an open subscription (FR-024.5, v2.0). |
+| ERR-039 | `PAYMENT_SIGNATURE_INVALID` | 400 | HTTP | `[]` | We could not verify this payment. If money was taken, it will be confirmed automatically within an hour. | हम इस भुगतान की पुष्टि नहीं कर सके। यदि राशि कट गई है, तो एक घंटे के भीतर इसकी अपने-आप पुष्टि हो जाएगी। | 결제를 확인할 수 없습니다. 금액이 결제되었다면 1시간 안에 자동으로 확인됩니다. | API-023 with a wrong signature (FR-022.5, v2.0). |
+| ERR-040 | `WEBHOOK_SIGNATURE_INVALID` | 400 | HTTP | `[]` | Invalid webhook signature. | वेबहुक हस्ताक्षर अमान्य है। | 웹훅 서명이 올바르지 않습니다. | API-025 with a missing or wrong signature (FR-026.1, v2.0). |
+| ERR-041 | `PAYMENT_PROVIDER_UNAVAILABLE` | 503 | HTTP | `[]` | The payment service is not responding right now. Please try again in a few minutes. | भुगतान सेवा अभी जवाब नहीं दे रही है। कृपया कुछ मिनट बाद फिर से प्रयास करें। | 현재 결제 서비스가 응답하지 않습니다. 몇 분 후 다시 시도해 주세요. | Razorpay unreachable in API-022, API-023, API-024 or API-015 (FR-019.10, FR-022.7, FR-024.6, v2.0). |
+| ERR-042 | `PRO_TERMS_VERSION_MISMATCH` | 409 | HTTP | `[{ field: "termsVersion", issue: "current is <PRO_TERMS_VERSION>" }]` | The Resume Pro terms have been updated. Please read the latest terms and accept them again. | Resume Pro की शर्तें अपडेट हो गई हैं। कृपया नवीनतम शर्तें पढ़कर फिर से स्वीकार करें। | Resume Pro 이용 약관이 변경되었습니다. 최신 약관을 읽고 다시 동의해 주세요. | API-022 with an old `termsVersion` (FR-022.1, v2.1). Separate from ERR-033, which keeps its meaning (CR-016). |
 
 ---
 
@@ -2835,32 +3575,37 @@ Checks, each with a 1000 ms timeout: PostgreSQL `SELECT 1`, which decides readin
 
 ### 7.1 Requirements to design
 
-Every FR and NFR appears here. `—` means the item genuinely has no element of that kind; the reason is given in brackets. For every FR except the cross-cutting FR-001, each API listed here names that FR in its "Implements" line in §6.2, and the reverse is also true. NFRs are not repeated in "Implements" lines. Test file names refer to `apps/api/test/` (e2e), `apps/api/src/**` (unit, `*.spec.ts`), `apps/web/tests/e2e/` (Playwright) and `perf/` (k6).
+Every FR and NFR appears here. `—` means the item genuinely has no element of that kind; the reason is given in brackets. For every FR except the cross-cutting FR-001, each API listed here names that FR in its "Implements" line in §6.2, and the reverse is also true. NFRs are not repeated in "Implements" lines, except by API-019 and API-020, which implement no FR. Test file names refer to `apps/api/test/` (e2e), `apps/api/src/**` (unit, `*.spec.ts`), `apps/web/tests/e2e/` (Playwright) and `perf/` (k6).
 
 | Requirement | Component(s) | Table(s) | API(s) | Verified by |
 |---|---|---|---|---|
-| FR-001 | CMP-004, CMP-001, CMP-023 | — (identity comes from the token; no user table, §5) | API-001 to API-018 (all protected) | FR-001.1–6; `auth.e2e-spec.ts`; `platform-jwt.guard.spec.ts` |
+| FR-001 | CMP-004, CMP-024, CMP-001, CMP-023 | TBL-011 (plan since v2.0; identity still comes from the token) | API-001 to API-018, API-021 to API-024, API-026 (all protected) | FR-001.1–6; `auth.e2e-spec.ts`; `platform-jwt.guard.spec.ts` |
 | FR-002 | CMP-006, CMP-004, CMP-020, CMP-001 | TBL-002, TBL-010 | API-001, API-003, API-004 | FR-002.1–8; `privacy.e2e-spec.ts`; Playwright `consent.spec.ts` |
 | FR-003 | CMP-005, CMP-020 | TBL-001 | API-002 | FR-003.1–5; `catalog.e2e-spec.ts`; seed idempotency test |
 | FR-004 | CMP-007, CMP-021, CMP-020, CMP-012 | TBL-003, TBL-010 | API-005 | FR-004.1–9; `resumes.e2e-spec.ts` with fixtures (valid PDF, valid DOCX, `.doc`, renamed `.png`, 0 bytes, 5 MiB, 5 MiB + 1 byte) |
 | FR-005 | CMP-015, CMP-021, CMP-018 | TBL-003 | API-007 | FR-005.1–10; `resume-parse.processor.spec.ts`, `pii-redactor.spec.ts`, `text-normalizer.spec.ts` |
 | FR-006 | CMP-008, CMP-009, CMP-020, CMP-012 | TBL-001, TBL-003, TBL-004, TBL-008, TBL-010 | API-009 | FR-006.1–5; `analyses.e2e-spec.ts` including 5 parallel requests with 1 quota slot left (exactly 1 succeeds) |
-| FR-007 | CMP-009, CMP-008, CMP-016, CMP-018 | TBL-008, TBL-004 | API-001, API-009 | FR-007.1–9; `usage.service.spec.ts`, `period.spec.ts` (31 Oct 23:59 IST and 1 Nov 00:00 IST cases) |
+| FR-007 | CMP-009, CMP-008, CMP-016, CMP-018, CMP-024 | TBL-008, TBL-004, TBL-011 | API-001, API-009 | FR-007.1–10; `usage.service.spec.ts`, `period.spec.ts` (31 Oct 23:59 IST and 1 Nov 00:00 IST cases) |
 | FR-008 | CMP-016, CMP-017 | TBL-004, TBL-005 | API-011 | FR-008.1–6; `scoring.spec.ts`, `ai-output.schema.spec.ts`, `anthropic-ai.client.spec.ts` (request body snapshot) |
 | FR-009 | CMP-016, CMP-017 | TBL-001, TBL-006 | API-011 | FR-009.1–5; `post-process.spec.ts` |
 | FR-010 | CMP-016, CMP-017 | TBL-007 | API-011 | FR-010.1–5; `post-process.spec.ts` |
 | FR-011 | CMP-014, CMP-016, CMP-017, CMP-018, CMP-001 | TBL-004, TBL-008 | API-011 | FR-011.1–9; `resume-analysis.processor.spec.ts` with each mock fixture (§4.7.6); `maintenance.processor.spec.ts` |
-| FR-012 | CMP-008, CMP-001 | TBL-004, TBL-005, TBL-006, TBL-007 | API-011 | FR-012.1–6; `analyses.e2e-spec.ts` (FREE body contains no locked text; same analysis read as PRO shows all) |
-| FR-013 | CMP-010, CMP-012 | TBL-004, TBL-005, TBL-006, TBL-007, TBL-010 | API-012 | FR-013.1–8; `reports.e2e-spec.ts` (extracts the PDF text with `pdfjs-dist` and checks blocks and gating) |
-| FR-014 | CMP-008, CMP-001 | TBL-004 | API-010 | FR-014.1–4; `analyses.e2e-spec.ts`; Playwright `history.spec.ts` |
+| FR-012 | CMP-008, CMP-024, CMP-001 | TBL-004, TBL-005, TBL-006, TBL-007, TBL-011 | API-011 | FR-012.1–6; `analyses.e2e-spec.ts` (FREE body contains no locked text; same analysis read as PRO shows all) |
+| FR-013 | CMP-010, CMP-012, CMP-024 | TBL-004, TBL-005, TBL-006, TBL-007, TBL-010, TBL-011 | API-012 | FR-013.1–8; `reports.e2e-spec.ts` (extracts the PDF text with `pdfjs-dist` and checks blocks and gating) |
+| FR-014 | CMP-008, CMP-027, CMP-001 | TBL-004 | API-010, API-026 | FR-014.1–5; `analyses.e2e-spec.ts`; Playwright `history.spec.ts` |
 | FR-015 | CMP-007, CMP-001 | TBL-003 | API-006, API-007, API-009 | FR-015.1–4; `resumes.e2e-spec.ts` |
 | FR-016 | CMP-007, CMP-021, CMP-012 | TBL-003, TBL-004, TBL-010 | API-008 | FR-016.1–5; `resumes.e2e-spec.ts` |
 | FR-017 | CMP-008, CMP-012 | TBL-004, TBL-005, TBL-006, TBL-007, TBL-010 | API-013 | FR-017.1–4; `analyses.e2e-spec.ts` |
-| FR-018 | CMP-006, CMP-012, CMP-001 | TBL-002, TBL-003, TBL-004, TBL-008, TBL-010 | API-014, API-003 | FR-018.1–5; `privacy.e2e-spec.ts` |
-| FR-019 | CMP-006, CMP-021, CMP-020, CMP-012, CMP-016, CMP-001 | TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-008 (kept), TBL-009, TBL-010 | API-015 | FR-019.1–9; `privacy.e2e-spec.ts` (erase during a `PROCESSING` analysis); Playwright `erase.spec.ts` |
-| FR-020 | CMP-018, CMP-021 | TBL-002, TBL-003, TBL-004, TBL-008, TBL-009, TBL-010 | — (scheduled jobs, no endpoint) | FR-020.1–5; `maintenance.processor.spec.ts` with a fake clock |
+| FR-018 | CMP-006, CMP-012, CMP-001 | TBL-002, TBL-003, TBL-004, TBL-008, TBL-010, TBL-011, TBL-012 | API-014, API-003 | FR-018.1–5; `privacy.e2e-spec.ts` |
+| FR-019 | CMP-006, CMP-021, CMP-020, CMP-012, CMP-016, CMP-024, CMP-025, CMP-001 | TBL-002, TBL-003, TBL-004, TBL-005, TBL-006, TBL-007, TBL-008 (kept), TBL-009, TBL-010, TBL-011 and TBL-012 (kept, v2.0) | API-015 | FR-019.1–10; `privacy.e2e-spec.ts` (erase during a `PROCESSING` analysis); Playwright `erase.spec.ts` |
+| FR-020 | CMP-018, CMP-021 | TBL-002, TBL-003, TBL-004, TBL-008, TBL-009, TBL-010, TBL-011, TBL-012, TBL-013 | — (scheduled jobs, no endpoint) | FR-020.1–5; `maintenance.processor.spec.ts` with a fake clock |
 | FR-021 | CMP-011, CMP-005, CMP-008, CMP-012 | TBL-001, TBL-010 | API-016, API-017, API-018, API-002, API-009 | FR-021.1–6; `admin.e2e-spec.ts` |
-| NFR-001 | CMP-003, CMP-019, CMP-020 | TBL-001, TBL-002, TBL-003, TBL-004 (indexes in §5.3) | API-001, API-002, API-003, API-006, API-007, API-010, API-011, API-014 | `perf/read-apis.js` |
+| FR-022 | CMP-001, CMP-012, CMP-024, CMP-025 | TBL-010, TBL-011, TBL-012 | API-014, API-021, API-022, API-023 | FR-022.1–10; `billing.e2e-spec.ts` (mock payments and signed fixtures); Playwright `pro.spec.ts` |
+| FR-023 | CMP-004, CMP-008, CMP-018, CMP-020, CMP-024, CMP-026 | TBL-004, TBL-008, TBL-011 | API-001, API-009, API-011, API-012, API-021, API-025 | FR-023.1–9; `entitlement.service.spec.ts` with a fixed Clock; `billing.e2e-spec.ts` |
+| FR-024 | CMP-001, CMP-012, CMP-020, CMP-024, CMP-025, CMP-026 | TBL-010, TBL-011 | API-021, API-024, API-025 | FR-024.1–8; `billing.e2e-spec.ts`; Playwright `pro.spec.ts` |
+| FR-025 | CMP-001, CMP-027 | TBL-004, TBL-005, TBL-006 | API-026 | FR-025.1–7; `compare.e2e-spec.ts`; Playwright `compare.spec.ts` |
+| FR-026 | CMP-018, CMP-025, CMP-026 | TBL-011, TBL-012, TBL-013 | API-025 | FR-026.1–8; `billing.e2e-spec.ts`; `maintenance.processor.spec.ts` |
+| NFR-001 | CMP-003, CMP-019, CMP-020 | TBL-001, TBL-002, TBL-003, TBL-004, TBL-011, TBL-012 (indexes in §5.3) | API-001, API-002, API-003, API-006, API-007, API-010, API-011, API-014, API-021, API-026 | `perf/read-apis.js` |
 | NFR-002 | CMP-007, CMP-021 | TBL-003 | API-005 | `perf/upload.js` |
 | NFR-003 | CMP-015 | TBL-003 | API-007 | `ro_parse_duration_seconds` p95 |
 | NFR-004 | CMP-014, CMP-016, CMP-017 | TBL-004 | API-011 | `ro_analysis_duration_seconds` p50 and p95 |
@@ -2868,14 +3613,14 @@ Every FR and NFR appears here. `—` means the item genuinely has no element of 
 | NFR-006 | CMP-002, CMP-003, CMP-014, CMP-020 | TBL-004, TBL-008 (row lock is per user, so no global contention) | API-009 | `perf/peak.js` |
 | NFR-007 | CMP-002, CMP-003, CMP-013 | — (availability is measured on the service, not stored) | API-019, API-020 | CloudWatch canary report |
 | NFR-008 | CMP-018 | TBL-004 | API-011 | `ro_stuck_analyses` gauge and alarm |
-| NFR-009 | CMP-019, CMP-020 | TBL-001 to TBL-010 (RDS PITR covers all) | — (infrastructure capability, no endpoint) | Quarterly restore drill |
-| NFR-010 | CMP-002, CMP-019, CMP-020, CMP-021 | — (transport property) | API-001 to API-020 | `testssl.sh` report |
+| NFR-009 | CMP-019, CMP-020 | TBL-001 to TBL-013 (RDS PITR covers all) | — (infrastructure capability, no endpoint) | Quarterly restore drill |
+| NFR-010 | CMP-002, CMP-019, CMP-020, CMP-021 | — (transport property) | API-001 to API-026 | `testssl.sh` report |
 | NFR-011 | CMP-015, CMP-016, CMP-019, CMP-021 | TBL-003 (`text_enc`) | — (storage property, no endpoint) | `text-cipher.service.spec.ts`; infra review |
-| NFR-012 | CMP-001, CMP-003, CMP-014 | — (code and dependency property) | API-001 to API-020 | `deps-audit` CI job; ZAP baseline report |
-| NFR-013 | CMP-015, CMP-018, CMP-021 | TBL-002, TBL-003, TBL-004, TBL-008, TBL-009, TBL-010 | — (scheduled jobs) | FR-020 tests; `ro_retention_overdue_rows` = 0 |
+| NFR-012 | CMP-001, CMP-003, CMP-014 | — (code and dependency property) | API-001 to API-026 | `deps-audit` CI job; ZAP baseline report |
+| NFR-013 | CMP-015, CMP-018, CMP-021 | TBL-002, TBL-003, TBL-004, TBL-008, TBL-009, TBL-010, TBL-011, TBL-012, TBL-013 | — (scheduled jobs) | FR-020 tests; `ro_retention_overdue_rows` = 0 |
 | NFR-014 | CMP-006, CMP-021 | TBL-002 to TBL-007, TBL-009 | API-015 | `privacy.e2e-spec.ts`; S3 inventory |
 | NFR-015 | CMP-015, CMP-017 | TBL-003 | — (internal AI call, no endpoint) | `pii-redactor.spec.ts`; `anthropic-ai.client.spec.ts` |
-| NFR-016 | CMP-022, CMP-003, CMP-014 | — (logs are not in the database) | API-001 to API-020 | `scan-logs.ts` in CI; `ro_pii_log_matches` filters and alarm in staging |
+| NFR-016 | CMP-022, CMP-003, CMP-014 | — (logs are not in the database) | API-001 to API-026 | `scan-logs.ts` in CI; `ro_pii_log_matches` filters and alarm in staging |
 | NFR-017 | CMP-022, CMP-013 | — (telemetry is not in the database) | API-019, API-020 | Release checklist; alarm test |
 | NFR-018 | CMP-017, CMP-022 | TBL-004 (`input_tokens`, `output_tokens`) | — (cost is measured from telemetry) | `ro_ai_tokens_total` monthly report |
 | NFR-019 | CMP-001 | — (UI property) | — (UI property) | Lighthouse CI; keyboard test |
@@ -2884,7 +3629,11 @@ Every FR and NFR appears here. `—` means the item genuinely has no element of 
 | NFR-022 | CMP-016, CMP-017 | TBL-004, TBL-005 | — (offline evaluation) | `ai-golden.ts` report |
 | NFR-023 | CMP-022, CMP-012 | TBL-010 | — (process requirement) | Annual tabletop record |
 | NFR-024 | CMP-001, CMP-003 | TBL-001 (`name_hi`, `name_ko`) | API-002, API-003, API-011 | `no-literal-string` lint; key-coverage script |
-| NFR-025 | CMP-003, CMP-004, CMP-013, CMP-014, CMP-017 | TBL-004, TBL-008 (reservations released in every failure path) | API-001 to API-020 | `outage.e2e-spec.ts`, one case per §4.4.1 row |
+| NFR-025 | CMP-003, CMP-004, CMP-013, CMP-014, CMP-017, CMP-025 | TBL-004, TBL-008 (reservations released in every failure path) | API-001 to API-026 | `outage.e2e-spec.ts`, one case per §4.4.1 row |
+| NFR-026 | CMP-026 | TBL-011, TBL-012, TBL-013 | API-025 | `billing.e2e-spec.ts` (duplicate and reversed events) |
+| NFR-027 | CMP-004, CMP-020, CMP-024 | TBL-011 | API-001, API-021, API-023 | `entitlement.service.spec.ts`; `billing.e2e-spec.ts` |
+| NFR-028 | CMP-001, CMP-024, CMP-025, CMP-026 | TBL-011, TBL-012 (no card fields exist) | API-022, API-023, API-025 | Unit tests; `scan-logs.ts`; `gitleaks`; code review |
+| NFR-029 | CMP-018, CMP-025 | TBL-011, TBL-012 | — (scheduled job, no endpoint) | `maintenance.processor.spec.ts` with a scripted `RazorpayClient` double |
 
 ### 7.2 Tables to requirements
 
@@ -2895,13 +3644,16 @@ Generated from §7.1; every table is used by at least one requirement.
 | TBL-001 `job_roles` | FR-003, FR-006, FR-009, FR-021, NFR-001, NFR-009, NFR-024 |
 | TBL-002 `consents` | FR-002, FR-018, FR-019, FR-020, NFR-001, NFR-009, NFR-013, NFR-014 |
 | TBL-003 `resumes` | FR-004, FR-005, FR-006, FR-015, FR-016, FR-018, FR-019, FR-020, NFR-001, NFR-002, NFR-003, NFR-009, NFR-011, NFR-013, NFR-014, NFR-015 |
-| TBL-004 `analyses` | FR-006, FR-007, FR-008, FR-011, FR-012, FR-013, FR-014, FR-016, FR-017, FR-018, FR-019, FR-020, NFR-001, NFR-004, NFR-005, NFR-006, NFR-008, NFR-009, NFR-013, NFR-014, NFR-018, NFR-022, NFR-025 |
-| TBL-005 `analysis_dimension_scores` | FR-008, FR-012, FR-013, FR-017, FR-019, NFR-005, NFR-009, NFR-014, NFR-022 |
-| TBL-006 `analysis_missing_skills` | FR-009, FR-012, FR-013, FR-017, FR-019, NFR-005, NFR-009, NFR-014 |
+| TBL-004 `analyses` | FR-006, FR-007, FR-008, FR-011, FR-012, FR-013, FR-014, FR-016, FR-017, FR-018, FR-019, FR-020, FR-023, FR-025, NFR-001, NFR-004, NFR-005, NFR-006, NFR-008, NFR-009, NFR-013, NFR-014, NFR-018, NFR-022, NFR-025 |
+| TBL-005 `analysis_dimension_scores` | FR-008, FR-012, FR-013, FR-017, FR-019, FR-025, NFR-005, NFR-009, NFR-014, NFR-022 |
+| TBL-006 `analysis_missing_skills` | FR-009, FR-012, FR-013, FR-017, FR-019, FR-025, NFR-005, NFR-009, NFR-014 |
 | TBL-007 `analysis_suggestions` | FR-010, FR-012, FR-013, FR-017, FR-019, NFR-005, NFR-009, NFR-014 |
-| TBL-008 `monthly_usage` | FR-006, FR-007, FR-011, FR-018, FR-019, FR-020, NFR-006, NFR-009, NFR-013, NFR-025 |
+| TBL-008 `monthly_usage` | FR-006, FR-007, FR-011, FR-018, FR-019, FR-020, FR-023, NFR-006, NFR-009, NFR-013, NFR-025 |
 | TBL-009 `erasure_requests` | FR-019, FR-020, NFR-009, NFR-013, NFR-014 |
-| TBL-010 `audit_events` | FR-002, FR-004, FR-006, FR-013, FR-016, FR-017, FR-018, FR-019, FR-020, FR-021, NFR-009, NFR-013, NFR-023 |
+| TBL-010 `audit_events` | FR-002, FR-004, FR-006, FR-013, FR-016, FR-017, FR-018, FR-019, FR-020, FR-021, FR-022, FR-024, NFR-009, NFR-013, NFR-023 |
+| TBL-011 `subscriptions` | FR-001, FR-007, FR-012, FR-013, FR-018, FR-019, FR-020, FR-022, FR-023, FR-024, FR-026, NFR-001, NFR-009, NFR-013, NFR-026, NFR-027, NFR-028, NFR-029 |
+| TBL-012 `subscription_payments` | FR-018, FR-019, FR-020, FR-022, FR-026, NFR-001, NFR-009, NFR-013, NFR-026, NFR-028, NFR-029 |
+| TBL-013 `payment_events` | FR-020, FR-026, NFR-009, NFR-013, NFR-026 |
 
 ### 7.3 Common requirements to components
 
@@ -2909,13 +3661,13 @@ Where each company-wide rule is implemented. How each one is checked is in its r
 
 | Rule | Implemented in |
 |---|---|
-| CR-001 | CMP-004, CMP-013 |
+| CR-001 | CMP-004, CMP-013, CMP-026 |
 | CR-002 | CMP-004 |
 | CR-003 | CMP-004, CMP-001 |
-| CR-004 | CMP-004, CMP-001 |
+| CR-004 | CMP-004, CMP-001, CMP-026 |
 | CR-005 | CMP-004 |
-| CR-006 | CMP-004 |
-| CR-007 | CMP-006, CMP-007, CMP-008, CMP-009, CMP-010 |
+| CR-006 | CMP-004, CMP-024 |
+| CR-007 | CMP-006, CMP-007, CMP-008, CMP-009, CMP-010, CMP-018, CMP-024, CMP-026, CMP-027 |
 | CR-008 | CMP-004, CMP-011 |
 | CR-009 | CMP-001, CMP-003, CMP-014, CMP-022 |
 | CR-010 | CMP-012 |
@@ -2945,6 +3697,21 @@ Where each company-wide rule is implemented. How each one is checked is in its r
 | CR-034 | Deploy pipeline (§4.12.6) |
 | CR-035 | CMP-019, CI job `migrations` (§4.12.5) |
 | CR-036 | CMP-002, deploy pipeline (§4.12.6) |
+| CR-037 | CMP-001, CMP-024, CMP-025, CMP-026 |
+
+
+### 7.4 Round 2 brief to specification (v2.0)
+
+Where each point of the round 2 change is specified. Every section was checked against this map; what did not need a change was left unchanged on purpose (for example the general privacy notice and `NOTICE_VERSION`, so FREE users need no new consent; payment records are disclosed in the Pro terms instead, §4.9.1). v2.1 closed the gaps that two review passes of v2.0 found (§8.2).
+
+| Round 2 point | Requirements | Components | Tables | APIs and pages |
+|---|---|---|---|---|
+| 1. Resume Pro, ₹299 a month, paid through Razorpay | FR-022, FR-026, NFR-026, NFR-028, NFR-029, CR-037, ASM-018, ASM-021 | CMP-024, CMP-025, CMP-026, CMP-018 | TBL-011, TBL-012, TBL-013 | API-021, API-022, API-023, API-025; P-06; §4.9.1, §4.13 |
+| 2. Pro: unlimited analyses and all rewrite suggestions | FR-023, FR-007 (changed), FR-012 (changed), NFR-027 | CMP-024, CMP-004, CMP-008 | TBL-008 (PRO counters), TBL-011 | API-001, API-009, API-011, API-012; P-01, P-02 |
+| 3. Pro: analysis history and comparison of two analyses | FR-025, FR-014 (changed), ASM-019, OOS-012 (deprecated) | CMP-027, CMP-008 | TBL-004 to TBL-006 (read only) | API-010, API-026; P-03, P-05 |
+| 4. Cancel any time, access until the end of the paid month | FR-024, ASM-022 | CMP-024, CMP-025, CMP-026 | TBL-011 | API-024, API-025; P-06 |
+| 5. Free users stay exactly as they are | FR-023 (intro), FR-007.10, ASM-019; `NOTICE_VERSION` unchanged | — | TBL-008 FREE counters unchanged | Unchanged FREE behaviour of API-001, API-009, API-010, API-011 |
+| Effects on existing rules | CR-001, CR-004, CR-006, CR-007, CR-011, CR-017, CR-018, CR-021, CR-022, CR-035, FR-001, FR-002, FR-018, FR-019, FR-020, NFR-001, NFR-013, NFR-018, NFR-019, NFR-025, ASM-014, ASM-023; deprecated ASM-003, ASM-012, OOS-002, OOS-012, `PRO_MONTHLY_ANALYSES`, `PLATFORM_UPGRADE_URL` | CMP-001, CMP-003, CMP-018, CMP-020, CMP-023 | TBL-004 (`plan_at_creation` now chooses the counters), TBL-010 | API-014, API-015; P-02, P-04; §4.4, §4.4.1, §4.11, §4.12, §5.8 |
 
 ---
 
@@ -2973,3 +3740,6 @@ Where each company-wide rule is implemented. How each one is checked is in its r
 | v0.9 | 2026-10-19 | Neeraj Gurjar | (1) Limit of `MAX_STORED_RESUMES` per user with ERR-035. (2) Script check at parse time rejects resumes mostly in non-Latin script before any AI call (FR-005.10, ERR-027 now also a parse code). (3) Exact `details`/`meta` content for every error code. (4) Named test fixtures built at test time. (5) Grievance-officer erasure path (FR-019.9, ASM-017, OOS-014). (6) Database size estimate, UI disclaimer on P-02, and a "Confirm with" owner for every assumption. | Close remaining edge cases and make tests and error bodies exact. | Changed: FR-004, FR-005, FR-019, NFR-015, API-005, ERR-027, TBL-003, TBL-010, P-01, P-02, §1.4, §2.2, §2.5, §3.3, §4.3.6, §4.8.2, §4.12.1, §6.3. Added: ERR-035, ASM-017, OOS-014, `MAX_STORED_RESUMES`, `MIN_LATIN_LETTER_RATIO`. |
 | v0.10 | 2026-10-19 | Neeraj Gurjar | Fourth simulated build test (on v0.9). Exact rules added for: the outage-test harness (TCP proxy, app needs PostgreSQL at boot), fixture generation before unit and e2e tests, the erase CLI start-up and exit codes, the criterion-coverage script and `docs/manual-checks.md`, the circuit's half-open outcome, `details[].field` paths, the upload error order, text without letters, per-run request IDs for maintenance jobs, first-time deploy, and the golden set. Contradictions removed: S3 client timeouts versus the 5 s bound, upload under a PostgreSQL outage, criterion ranges in §7.1, Clock time in retention queries, and the upload diagram (limit and language paths). | The v0.6–v0.9 additions opened new places to guess; this closes them. | Changed: CR-015, CR-018, FR-005, FR-014, FR-019, FR-020, NFR-022, NFR-025, API-005, TBL-003, TBL-010, §1.4, §2.5, §4.3.1, §4.4.1, §4.7.7, §4.8.1, §4.8.2, §4.12.1, §7.1. |
 | v0.11 | 2026-10-19 | Neeraj Gurjar | Fifth simulated build test (on v0.10, about 6 guesses). The migration task now gets a new revision with the new image on every deploy; the log scan skips ID fields and strips UUIDs and repeat job IDs; log serializers never include headers or IPs; `details[].issue` values for non-class-validator errors; JWKS refresh in the background with Clock-based windows; FR-019.8 checked by an automated timing test; golden-set file format and pipeline; the notice names both usage months; Dockerfiles copy every workspace `package.json`. | Remove the last build-test guesses and contradictions. | Changed: CR-005, CR-011, NFR-016, NFR-022, §1.4, §2.5, §4.7.6, §4.9, §4.12.4, §4.12.6. |
+| v1.0 | 2026-10-27 | Neeraj Gurjar | Records that v0.11 (commit `5b73fe5`, 2026-10-19) is the round 1 submission. No content change. | §8.1 rule 2 asks for v1.0 at the round 1 submission; this row was missing. | — |
+| v2.0 | 2026-10-27 | Neeraj Gurjar | **Round 2: Resume Pro.** A ₹299 monthly subscription sold in this module through Razorpay (checkout, payment verification, signed webhooks, hourly reconciliation, cancel at cycle end). The plan now comes from the module's own entitlement (`paid_until`, 24 h renewal grace) instead of the token claim. PRO has no monthly limit, sees all suggestions and can compare two analyses; PRO analyses have their own usage counters, so FREE users are unaffected. Erasure cancels an open subscription and keeps payment records for 8 years. New Pro terms are accepted at checkout, so the general notice and FREE users' consent are unchanged. Major version because API-001 (`usage.limit` can be null) and the plan source changed (§8.1 rule 2). | Round 2 requirement change (2026-10-22): paid plan with unlimited analyses, all suggestions, history and comparison, cancel any time, free users unchanged. | Added: FR-022 to FR-026, NFR-026 to NFR-029, CR-037, ASM-018 to ASM-022, OOS-015, OOS-016, CMP-024 to CMP-027, TBL-011 to TBL-013, API-021 to API-026, ERR-036 to ERR-041, P-05, P-06, §4.3.7 to §4.3.10, §4.9.1, §4.13, §7.4, constants `PRO_PRICE_PAISE`, `PRO_TERMS_VERSION`, `RAZORPAY_TOTAL_COUNT`, `CHECKOUT_EXPIRY_MS`, `RENEWAL_GRACE_MS`, `PLAN_CACHE_TTL_S`, `PAYMENT_RECORD_RETENTION_DAYS`, `PAYMENT_EVENT_RETENTION_DAYS`, `PRO_FAIR_USE_DAILY_ALERT`. Changed: CR-001, CR-004, CR-006, CR-007, CR-011, CR-017, CR-021, CR-022, FR-001, FR-002, FR-007, FR-012, FR-014, FR-018, FR-019, FR-020, NFR-013, NFR-025, CMP-001, CMP-004, CMP-018, TBL-008, TBL-010, API-001, API-009, API-011, API-012, API-014, API-015, P-01, P-03, §1.7, §2.2, §4.1, §4.3.6, §4.4, §4.4.1, §4.5, §4.6, §4.8, §4.11, §4.12.1, §5.8, §6.1, §7.1 to §7.3. Deprecated: ASM-003, ASM-012, `PRO_MONTHLY_ANALYSES`, `PLATFORM_UPGRADE_URL`. |
+| v2.1 | 2026-10-27 | Neeraj Gurjar | **Round 2 review fixes.** A simulated build test and a rubric review of v2.0 found about 11 places to guess and some stale text. (1) Webhook rules made exact: what a stale event may still change, terminal rows never change again, `last_event_at` for every writer, the order raw body → signature → JSON, `DUPLICATE` and `unknown` metric labels. (2) The plan cache stores `validUntil`, so PRO never outlives `paid_until` through the cache. (3) One billing lock with Razorpay calls outside transactions and guarded updates, used by API-022, API-024 and erasure. (4) A user who cancelled can subscribe again after `paid_until` (API-022 ends or cancels the old row first). (5) Erasure releases the PRO reservation counters and is safe to retry. (6) New `SUBSCRIPTION_CANCELLED` audit action; `SUBSCRIPTION_ACTIVATED` written once. (7) Reconcile invoice mapping and paging; expiry cancels counted apart from missed webhooks. (8) New ERR-042 for the Pro terms instead of reusing ERR-033. (9) Stale v1 text removed: OOS-002, OOS-012, the platform pricing page, `upgradeUrl` in §6.1, the PDF label, test logins with `plan`, the PRO Analyze button. (10) New constants for numbers that were written inline, field tables for API-021 and API-026, ASM-023 on Pro AI cost, and traceability ranges and links. | Make round 2 buildable without guesses and remove the contradictions the reviews found. | Added: ASM-023, ERR-042, audit action `SUBSCRIPTION_CANCELLED`, metric `ro_subscription_expiry_cancels_total`, constants `RAZORPAY_TIMEOUT_MS`, `PRO_ACTIVATION_POLL_MS`, `PRO_ACTIVATION_POLL_MAX_MS`, `PAYMENTS_LIST_SIZE`, `RECONCILE_BATCH_SIZE`, `RECONCILE_BATCH_GAP_MS`. Changed: CR-007, CR-018, CR-035, FR-007, FR-014, FR-019, FR-022, FR-023, FR-024, FR-025, FR-026, NFR-001, NFR-018, NFR-019, NFR-025, NFR-027, NFR-029, ASM-014, CMP-003, CMP-008, CMP-020, CMP-023, CMP-025, TBL-004, TBL-010, API-001, API-014, API-021, API-022, API-023, API-024, API-025, API-026, P-01, P-02, P-04, P-06, §0.5, §0.7, §1.2, §1.7, §4.3.4, §4.3.6, §4.3.7, §4.3.9, §4.4, §4.4.1, §4.5, §4.8.1, §4.8.5, §4.9.1, §4.10, §4.11, §4.12.1, §4.12.3, §4.12.5, §4.13, §5.4, §6.1, §7.1 to §7.4. Deprecated: OOS-002, OOS-012, mock platform `GET /pricing`. |
