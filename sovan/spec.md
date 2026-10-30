@@ -15,14 +15,14 @@ Rules every Divii / Hanriver project must follow. Each rule has an ID and must b
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-001 | Authentication | This module does not manage sign-up or login. It receives a signed JWT issued by the main SurfingBear platform. The JWT is passed as a Bearer token in the `Authorization` header. The module validates the token signature using the platform's RS256 public key (fetched from `PLATFORM_JWKS_URL` at startup and cached for `JWKS_CACHE_TTL`, K-32). A valid token contains `sub` (user UUID), `email`, `name`, and `roles[]`. An invalid or expired token returns `401`. | Automated test: send request with expired / tampered / missing token → 401. Code review: no login or registration endpoint exists. |
+| CR-001 | Authentication | This module does not manage sign-up or login. It receives a signed JWT issued by the main SurfingBear platform. The JWT is passed as a Bearer token in the `Authorization` header. The module validates the token signature using the platform's RS256 public key (fetched from `PLATFORM_JWKS_URL` at startup and cached for `JWKS_CACHE_TTL`, K-32). A valid token contains `sub` (user UUID), `email`, `name`, and `roles[]`. On an unknown `kid` the JWKS is refetched once (at most once per minute); if the `kid` is still unknown the request gets `401`. An invalid or expired token returns `401`. | Automated test: send request with expired / tampered / missing token → 401. Code review: no login or registration endpoint exists. |
 | CR-002 | Token handling | Access tokens have a 15-minute TTL. The module does not refresh tokens; the platform handles refresh. Every authenticated endpoint reads the user from the token; no endpoint accepts a user ID in the request body as a substitute for the token. | Code review + integration test. |
 | CR-003 | Roles and permissions | Two roles exist: `user` (default) and `admin`. The role is read from `roles[]` in the JWT. See permission matrix below. | Role-based guard on every endpoint; automated tests for each forbidden combination. |
 | CR-004 | Logging | Logs are structured JSON, one object per line. Required fields: `timestamp` (ISO-8601 UTC), `level` (debug / info / warn / error), `requestId` (UUID, set via `X-Request-Id` header or auto-generated), `userId` (from JWT, or `anonymous`), `method`, `path`, `statusCode`, `durationMs`, `message`. Personal data (email, phone, resume content, file bytes) is **never** logged. File names are logged only as a hash (`SHA-256(filename)`). | Code review + log sample review + grep for PII patterns in CI. |
 | CR-005 | Error handling | Every API error response uses exactly this shape: `{ "statusCode": <number>, "error": "<ERR_CODE>", "message": "<human-readable>", "requestId": "<uuid>" }`. Internal errors (5xx) never leak stack traces or internal paths; they return `"message": "Internal server error"`. 4xx errors return a specific message. | Automated test: trigger each error code and assert shape. |
 | CR-006 | Security — secrets | All secrets (`DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `PLATFORM_JWKS_URL`, `WEBHOOK_SECRET`) are stored in environment variables, never in code or config files committed to git. `.env` is in `.gitignore`. | CI check: no secrets in code. |
-| CR-007 | Security — CORS | CORS allows only origins listed in `ALLOWED_ORIGINS` env var (comma-separated). Credentials: `true`. Allowed methods: `GET, POST, PUT, PATCH, DELETE, OPTIONS`. Allowed headers: `Authorization, Content-Type, X-Request-Id`. Max-age: `86400`. | Automated test: request from unlisted origin → no CORS headers. |
-| CR-008 | Security — input validation | Every request body, query parameter and path parameter is validated with `class-validator` decorators before the handler runs. Validation pipe is global with `whitelist: true` (strips unknown fields) and `forbidNonWhitelisted: true` (rejects unknown fields with 400). File uploads are validated for MIME type and size before being read. | Code review: every DTO has decorators. CI: test with extra / missing fields. |
+| CR-007 | Security — CORS | CORS is enforced **in the API** (NestJS `enableCors`), not at the ALB (CMP-009 forwards `OPTIONS` untouched). Allowed origins: only those listed in `ALLOWED_ORIGINS` env var (comma-separated). Credentials: `true`. Allowed methods: `GET, POST, PUT, PATCH, DELETE, OPTIONS`. Allowed headers: `Authorization, Content-Type, X-Request-Id`. Max-age: `86400`. | Automated test: request from unlisted origin → no CORS headers. |
+| CR-008 | Security — input validation | Every request body, query parameter and path parameter is validated with `class-validator` decorators before the handler runs. Validation pipe is global with `whitelist: true` (strips unknown fields) and `forbidNonWhitelisted: true` (rejects unknown fields with 400). File uploads are validated for MIME type and size before being read. **Exception:** API-018 (Razorpay webhook) is excluded from the global pipe and reads the raw body (`rawBody: true` at bootstrap) so the signature can be verified; its payload is validated per event type inside the handler (§5.6). Pipe failures map to error codes per §6.1. | Code review: every DTO has decorators. CI: test with extra / missing fields. |
 | CR-009 | Security — rate limiting | Global rate limit: `RATE_LIMIT_USER` (K-23) per user (keyed by `userId` from JWT). Unauthenticated requests: `RATE_LIMIT_ANON` (K-24) per IP. Analysis endpoints (`POST /analyses`, `POST /analyses/:id/retry`): `RATE_LIMIT_ANALYSIS` (K-25) per user, because each job costs money. Limits enforced via `@nestjs/throttler` backed by Redis. Exceeded → `429 Too Many Requests`. | Load test in staging. |
 | CR-010 | Security — data at rest | All resume files in S3 are encrypted with AES-256 (SSE-S3). The PostgreSQL database uses volume-level encryption (AWS RDS encryption). Redis is configured with `requirepass` and TLS in staging/prod. | Infrastructure review + AWS config audit. |
 | CR-011 | Security — data in transit | All traffic uses HTTPS (TLS 1.2+). Internal service-to-service calls (API ↔ S3, API ↔ OpenAI, API ↔ Redis) use TLS. HTTP requests are redirected to HTTPS via the load balancer. | SSL Labs scan ≥ A rating. |
@@ -36,15 +36,15 @@ Rules every Divii / Hanriver project must follow. Each rule has an ID and must b
 | Action | `user` | `admin` |
 |---|---|---|
 | Upload resume | ✅ | ✅ |
-| Start analysis | ✅ (within tier limits) | ✅ (unlimited) |
+| Start analysis | ✅ (within tier limits) | ✅ (unlimited — `admin` bypasses the credit reservation, §5.5) |
 | View own analyses | ✅ | ✅ |
-| View all users' analyses | ❌ | ✅ |
+| View all users' analyses | ❌ | ✅ (API-006 `userId` filter, API-007/008/011 any id) |
 | Download own analysis PDF | ✅ | ✅ |
 | Delete own resume | ✅ | ✅ |
 | Delete any resume | ❌ | ✅ |
-| Manage subscriptions (own) | ✅ | ✅ |
-| View subscription metrics | ❌ | ✅ |
-| View system health | ❌ | ✅ |
+| Manage subscriptions (own) | ✅ | ✅ (own only — admins have no access to other users' subscriptions) |
+| View subscription metrics — **Deprecated (v1.3)**: no endpoint in this module; admins use the Razorpay dashboard. Row kept for traceability, not renumbered. | — | — |
+| View system health (`/api/v1/health`, API-019) | ✅ (unauthenticated; used by the ALB and uptime monitors) | ✅ |
 
 ---
 
@@ -76,8 +76,8 @@ src/
 ├── common/
 │   ├── decorators/                  # @CurrentUser, @Roles
 │   ├── filters/                     # GlobalExceptionFilter
-│   ├── guards/                      # JwtAuthGuard, RolesGuard, ThrottlerGuard
-│   ├── interceptors/                # LoggingInterceptor, TransformInterceptor
+│   ├── guards/                      # JwtAuthGuard, RolesGuard, ThrottlerGuard, ProGuard (§5.5)
+│   ├── interceptors/                # LoggingInterceptor, RequestIdInterceptor (sets X-Request-Id; responses are never wrapped, §6.1)
 │   ├── pipes/                       # ParseUuidPipe
 │   ├── dto/                         # PaginationQueryDto, PaginatedResponseDto
 │   └── constants.ts                 # every K-xx constant from §3.4, exported under its table name
@@ -109,7 +109,12 @@ src/
 │   │   ├── analysis.entity.ts
 │   │   ├── dimension-score.entity.ts
 │   │   └── rewrite-suggestion.entity.ts
+│   ├── analysis.processor.ts           # BullMQ @Processor('analysis') — Worker only (CMP-010)
 │   └── analyses.repository.ts
+├── job-roles/
+│   ├── job-roles.module.ts
+│   ├── job-roles.controller.ts         # API-012, API-013
+│   └── job-roles.service.ts
 ├── ai/
 │   ├── ai.module.ts
 │   ├── ai.service.ts                # OpenAI GPT-4o integration
@@ -133,12 +138,16 @@ src/
 │   ├── entities/
 │   │   ├── subscription.entity.ts
 │   │   └── payment.entity.ts
+│   ├── entitlement.service.ts          # getTier(userId) — §5.5
 │   └── razorpay/
 │       ├── razorpay.service.ts
-│       └── razorpay-webhook.controller.ts
-├── scheduler/
+│       ├── razorpay-webhook.controller.ts  # API-018
+│       └── webhook-event.entity.ts         # TBL-008
+├── scheduler/                       # Worker only (CMP-008)
 │   ├── scheduler.module.ts
-│   └── retention.service.ts         # Cron: delete expired resumes
+│   ├── retention.service.ts         # daily: expires_at + resume deletion (NFR-006)
+│   ├── subscription-sweep.service.ts # daily: expired checkouts, grace, period end (§5.6)
+│   └── stalled-jobs.service.ts      # every minute: processing rows past JOB_STALL_TIMEOUT (CMP-010)
 └── health/
     ├── health.module.ts
     └── health.controller.ts
@@ -185,14 +194,14 @@ Frontend (Next.js) is a separate repository and out of scope for this backend sp
 | FR-004 | AI resume analysis | **Analysis is asynchronous (decision D-01, §4.6).** `POST /analyses` validates the request, reserves the user's credit, creates the analysis row with status `pending`, enqueues a job on the `analysis` queue (CMP-010) and returns `202 Accepted` immediately. The Analysis Worker picks up the job, sets status `processing`, extracts the resume text, sends text + job role + experience level to OpenAI GPT-4o and stores the structured result (overall score 0–100, per-dimension scores, missing skills, rewrite suggestions). The client polls `GET /analyses/:id` until status is `completed` or `failed`. | Must | 1. `POST /analyses` responds `202` with `status: "pending"` within `ENQUEUE_P95` (K-13); the job reaches `completed` or `failed` within `ANALYSIS_P95` (K-12) of enqueue. The client polls `GET /analyses/:id` every `POLL_INTERVAL` (K-15) and stops on a terminal status. 2. The overall score is an integer 0–100. 3. The seven dimensions of the dimension catalogue (§3.4, K-40) are scored; each dimension score is an integer from 0 to that dimension's weight. 4. `overall_score` is computed by the Worker as the plain sum of the seven dimension scores (weights total 100, so the sum is already 0–100); the AI's own overall figure, if any, is ignored. 5. If the AI call fails (timeout, rate limit, server error) after the job's retry policy (`AI_ATTEMPTS` / `AI_BACKOFF`, K-10 / K-11, see CMP-010), the analysis status is set to `failed`, `error_code` is set (`ERR_AI_SERVICE_UNAVAILABLE` or `ERR_TEXT_EXTRACTION_FAILED`) and the reserved credit is released; the user can retry without consuming another credit. 6. The resume text is extracted inside the worker using `pdf-parse` (PDF) or `mammoth` (DOCX) before sending to the AI. 7. Exactly one worker processes a given job at a time (BullMQ lock); a job is never processed twice concurrently. |
 | FR-005 | Missing skills list | The analysis result includes a list of skills that are expected for the target role and experience level but are missing from the resume. Each skill has a name and a brief explanation of why it matters for the role. | Must | 1. At least 0 and at most `MAX_MISSING_SKILLS` (K-06) missing skills are returned. 2. Each skill has `name` (string, 1–100 chars) and `reason` (string, 1–300 chars). 3. Skills are ordered by relevance (most important first, as ranked by the AI). |
 | FR-006 | Rewrite suggestions | The analysis result includes rewrite suggestions for weak lines in the resume. Each suggestion has the original line, the suggested rewrite, the dimension it improves, and the expected score impact. | Must | 1. Each suggestion has `originalText`, `suggestedText`, `dimension` (one of the 7 dimension keys), `impact` (`low` / `medium` / `high`). 2. Free users see only the first `FREE_VISIBLE_SUGGESTIONS` (K-04) suggestions by `sort_order` (TBL-004). Pro users see all, at most `MAX_SUGGESTIONS` (K-05). 3. The response includes `totalSuggestions` count even for free users, so they know how many they are missing. |
-| FR-007 | Free tier usage limits | Free users can run at most `FREE_MONTHLY_LIMIT` (K-03) analyses per calendar month (UTC). The count resets on the 1st of each month at 00:00 UTC. If the limit is reached, `POST /analyses` returns `ERR_MONTHLY_LIMIT_REACHED` (403). | Must | 1. After `FREE_MONTHLY_LIMIT` analyses in a month, the next attempt returns 403 with `ERR_MONTHLY_LIMIT_REACHED`. 2. Because analysis is asynchronous, the credit is **reserved at enqueue** (`INCR usage:{userId}:{YYYY-MM}` in Redis, atomic) so two concurrent requests cannot both pass the check; it is **released** (`DECR`) by the worker when the job ends in `failed`. Pending and processing analyses therefore count; failed ones do not. 3. `GET /analyses/usage` returns `{ "used": <n>, "limit": 3, "resetsAt": "<ISO-8601>" }`. 4. Pro users (tier derived per §5.5) skip the check entirely. 5. The Redis key expires `USAGE_KEY_TTL` (K-19) after the month starts; if Redis is unavailable the API falls back to `SELECT count(*) FROM analyses WHERE user_id = ? AND status <> 'failed' AND created_at >= <month start>`. |
+| FR-007 | Free tier usage limits | Free users can run at most `FREE_MONTHLY_LIMIT` (K-03) analyses per calendar month (UTC). The count resets on the 1st of each month at 00:00 UTC. If the limit is reached, `POST /analyses` returns `ERR_MONTHLY_LIMIT_REACHED` (403). | Must | 1. After `FREE_MONTHLY_LIMIT` analyses in a month, the next attempt returns 403 with `ERR_MONTHLY_LIMIT_REACHED`. 2. Because analysis is asynchronous, the credit is **reserved at enqueue** (`INCR usage:{userId}:{YYYY-MM}` in Redis, atomic) so two concurrent requests cannot both pass the check; it is **released** (`DECR`) by the worker when the job ends in `failed`. Pending and processing analyses therefore count; failed ones do not. 3. `GET /analyses/usage` returns `{ "used": <n>, "limit": 3, "resetsAt": "<ISO-8601>" }`. 4. Pro users (tier derived per §5.5) and callers with the `admin` role skip the check entirely. 5. The Redis key expires `USAGE_KEY_TTL` (K-19) after the month starts; if Redis is unavailable the API falls back to `SELECT count(*) FROM analyses WHERE user_id = ? AND status <> 'failed' AND created_at >= <month start>`. |
 | FR-008 | Download analysis as PDF | A user can download any of their own completed analyses as a PDF. The PDF contains: overall score, dimension scores as a radar chart, missing skills, rewrite suggestions (all for Pro, the first `FREE_VISIBLE_SUGGESTIONS` for free, K-04), and a timestamp. | Must | 1. `GET /analyses/:id/pdf` returns `Content-Type: application/pdf`. 2. The PDF file size is below `PDF_MAX_SIZE` (K-26). 3. If the analysis status is not `completed`, the endpoint returns `ERR_ANALYSIS_NOT_READY` (400). 4. The PDF includes the SurfingBear logo, the user's name, and the analysis date. |
 | FR-009 | View analysis history | A user can view a list of their past analyses, paginated, sorted by creation date descending. Each list item shows: overall score, job role, experience level, status, and created date. | Should | 1. `GET /analyses` returns a paginated list. 2. Page size: default `PAGE_DEFAULT` (K-21), max `PAGE_MAX` (K-22). 3. Filterable by `status` (pending, processing, completed, failed) and `jobRoleId`. 4. Each item includes `id`, `resumeId`, `jobRole`, `experienceLevel`, `overallScore`, `status`, `createdAt`. |
 | FR-010 | Delete resume and associated data | A user can delete their own resume. Deleting a resume also deletes the S3 file and all associated analyses, dimension scores, and rewrite suggestions. This supports the DPDP Act right to erasure. | Must | 1. `DELETE /resumes/:id` returns 204. 2. The S3 file is deleted within `ERASURE_SLA` (K-08): `DELETE` enqueues a `resume-cleanup` job on CMP-010 (same BullMQ instance, `CLEANUP_ATTEMPTS` / `CLEANUP_BACKOFF`, K-33) that calls S3 `DeleteObject`. 3. All rows referencing the resume in `analyses`, `dimension_scores`, `rewrite_suggestions` are cascade-deleted. 4. Attempting to access a deleted resume returns 404. |
 | FR-011 | Resume Pro subscription | A user can subscribe to Resume Pro for `PRO_PRICE` (K-20) via Razorpay. Pro benefits: unlimited analyses, all rewrite suggestions visible, analysis history with score comparison. The subscription auto-renews monthly. Users can cancel anytime; Pro access continues until the end of the paid period. Free users are unchanged. | Must | 1. `POST /subscriptions` creates a Razorpay subscription and returns the `subscriptionId` and `paymentLink`. 2. After successful payment (webhook), the user's derived `tier` (§5.5: computed from TBL-006, cached in Redis `user_tier:{userId}`) becomes `pro`. 3. Pro users bypass the `FREE_MONTHLY_LIMIT` check (K-03). 4. Pro users see all rewrite suggestions (not just the first `FREE_VISIBLE_SUGGESTIONS`, K-04). 5. Cancellation via `POST /subscriptions/:id/cancel` sets `cancelAtPeriodEnd: true`; Pro access remains until `currentPeriodEnd`. 6. After `currentPeriodEnd` the tier reverts to `free` automatically (the derivation rule compares `current_period_end` to `now()`; the daily sweep in CMP-008 marks the row `expired`). 7. Pro-only endpoints (`GET /analyses/compare`) are protected by `ProGuard` and return `ERR_PRO_REQUIRED` (403) for free users. |
 | FR-012 | Razorpay payment integration | The system integrates with Razorpay Subscriptions API. Payment lifecycle: create subscription → user pays on Razorpay checkout → webhook confirms payment → activate Pro. Razorpay webhooks are verified using the `WEBHOOK_SECRET`. | Must | 1. Webhook signature is verified using HMAC-SHA256 with `WEBHOOK_SECRET`; invalid signatures return 400. 2. Webhook events handled: `subscription.activated`, `subscription.charged`, `subscription.cancelled`, `subscription.halted`, `payment.failed`. 3. Each webhook is idempotent (duplicate delivery does not create duplicate records). 4. Payment records are stored with Razorpay `paymentId`, `amount` (in paise), `status`, `method`. |
 | FR-013 | Subscription management | A user can view their subscription status, payment history, and cancel their subscription. | Should | 1. `GET /subscriptions/me` returns current subscription or `null`. 2. `GET /subscriptions/me/payments` returns payment history, paginated. 3. `POST /subscriptions/:id/cancel` cancels at period end. 4. Re-subscribing after cancellation creates a new subscription. |
-| FR-014 | Score comparison | Pro users can compare scores across their analysis history. The comparison shows dimension scores between any two selected analyses side by side. | Should | 1. `GET /analyses/compare?ids=<id1>,<id2>` returns both analyses' dimension scores side by side. 2. Only completed analyses can be compared. 3. Maximum 2 analyses per comparison request. 4. Only the owner of both analyses can compare them. 5. The endpoint is Pro-gated: a free user (tier per §5.5) receives `ERR_PRO_REQUIRED` (403) before any analysis lookup happens. |
+| FR-014 | Score comparison | Pro users can compare scores across their analysis history. The comparison shows dimension scores between any two selected analyses side by side. | Should | 1. `GET /analyses/compare?ids=<id1>,<id2>` returns both analyses' dimension scores side by side. 2. Only completed analyses can be compared. 3. Maximum 2 analyses per comparison request. 4. Only the owner of both analyses, or an admin, can compare them; an analysis owned by someone else is answered 404 (§6.1 ownership rule). 5. The endpoint is Pro-gated: a free user (tier per §5.5) receives `ERR_PRO_REQUIRED` (403) before any analysis lookup happens. |
 | FR-015 | List job roles | Any authenticated user can fetch the list of available job roles. | Must | 1. `GET /job-roles` returns `[{ "id": "<uuid>", "name": "<string>", "slug": "<string>" }]`. 2. Results are cached in Redis for `CACHE_TTL` (K-17). |
 | FR-016 | Admin: add job role | An admin can add a new job role. | Could | 1. `POST /job-roles` with `{ "name": "..." }` creates a new role. Slug is auto-generated from name. 2. Duplicate names return `ERR_DUPLICATE_JOB_ROLE` (409). |
 | FR-017 | Retry failed analysis | A user can retry a failed analysis without uploading the resume again and without consuming an additional analysis credit. | Should | 1. `POST /analyses/:id/retry` re-enqueues the same analysis row on the `analysis` queue (CMP-010), resets status to `pending`, clears `error_code`/`error_message`, increments `attempts` and returns `202`. No new credit is reserved. 2. Only analyses with status `failed` can be retried. 3. Retrying a non-failed analysis returns `ERR_ANALYSIS_NOT_FAILED` (400). |
@@ -203,11 +212,11 @@ Frontend (Next.js) is a separate repository and out of scope for this backend sp
 |---|---|---|---|---|
 | NFR-001 | Performance — analysis latency | AI resume analysis completes within acceptable time. | End-to-end p95 < `ANALYSIS_P95` (K-12), p99 < 2 × K-12, measured from job enqueue (`analyses.created_at`) to terminal status (`analyses.completed_at`). Queue wait alone (`started_at - created_at`): p95 < `QUEUE_WAIT_P95` (K-14) at `MAX_CONCURRENT_ANALYSES` (K-35) in flight. `POST /analyses` itself: p95 < `ENQUEUE_P95` (K-13). | Load test with K-35 concurrent analyses in staging; measure via APM (Datadog) + BullMQ job timings. |
 | NFR-002 | Performance — API latency | Non-analysis endpoints respond quickly. | p95 < 200 ms for CRUD endpoints. p95 < 500 ms for PDF generation. | Load test + APM. |
-| NFR-003 | Availability | The service is available for users. | 99.5% uptime per month (allows ~3.6 h downtime/month). Measured by health check endpoint `/health`. | Uptime monitoring (UptimeRobot or Datadog Synthetics), 1-minute interval. |
+| NFR-003 | Availability | The service is available for users. | 99.5% uptime per month (allows ~3.6 h downtime/month). Measured on `GET /api/v1/health` (API-019): any response other than 200 counts as downtime. | Uptime monitoring (UptimeRobot or Datadog Synthetics), 1-minute interval. |
 | NFR-004 | Scalability | The service handles concurrent users. | `MAX_CONCURRENT_USERS` (K-36) and `MAX_CONCURRENT_ANALYSES` (K-35). Achieved via horizontal scaling (ECS auto-scaling: min 2, max 8 tasks, target CPU 60%). | Load test with k6 in staging. |
 | NFR-005 | Security — data protection | Personal data in resumes is protected. | Encryption at rest (AES-256) and in transit (TLS 1.2+). No PII in logs. Resume text is not stored in the database; only the S3 key is stored. | Security audit + pen test annually. |
 | NFR-006 | Privacy — data retention | User data is not retained longer than necessary. | Free users: resumes auto-deleted `RETENTION_DAYS` (K-07) after upload. Pro users: resumes auto-deleted `RETENTION_DAYS` after the subscription ends. Deletion job runs at `SWEEP_TIME` (K-27). | Automated test: create resume with past date, run job, verify deletion. |
-| NFR-007 | Observability | The team can monitor and debug the system. | Structured JSON logs (see CR-004). Health endpoint at `/health` returns `{ "status": "ok", "db": "ok", "redis": "ok", "s3": "ok" }`. Request traces via `X-Request-Id` header propagated to all internal calls and logs. | Dashboard in Datadog/CloudWatch. |
+| NFR-007 | Observability | The team can monitor and debug the system. | Structured JSON logs (see CR-004). Health endpoint `GET /api/v1/health` (API-019) returns 200 `{ "status": "ok", "services": { "database": "ok", "redis": "ok", "s3": "ok" } }` or 503 with `status: degraded`. Request traces via `X-Request-Id` header propagated to all internal calls and logs. | Dashboard in Datadog/CloudWatch. |
 | NFR-008 | Reliability — AI failure | The system degrades gracefully when OpenAI is down. | If OpenAI returns 5xx or times out (`AI_TIMEOUT`, K-09), the worker job retries per `AI_ATTEMPTS` / `AI_BACKOFF` (K-10 / K-11). If the retry fails, the analysis status is set to `failed` with `error_code = ERR_AI_SERVICE_UNAVAILABLE`, the reserved credit is released, and the client sees the failure on its next poll of `GET /analyses/:id`. Jobs that exhaust attempts stay in the BullMQ `failed` set for `FAILED_JOB_RETENTION` (K-18) for inspection. No data is lost. The rest of the system (uploads, history, PDF download of past analyses) continues to work. | Chaos test: block OpenAI endpoint, verify graceful degradation. |
 | NFR-009 | Testability | The codebase is testable. | Unit test coverage ≥ 80% (lines). Integration tests for all API endpoints. E2E tests for critical flows (upload → analyze → download PDF). Mocked OpenAI in tests. | CI pipeline: `jest --coverage` fails if < 80%. |
 
@@ -332,13 +341,13 @@ The API never calls OpenAI directly: every analysis runs in the Worker. The Work
 |---|---|---|---|
 | CMP-001 | API Server | Handles HTTP requests, authentication, validation, routing, and orchestration of all business logic. | NestJS 10.x (TypeScript 5.x) on Node.js 20 LTS. Chosen because: (a) NestJS is the team's primary backend framework, (b) decorators + DI map cleanly to the module structure, (c) built-in support for guards, pipes, interceptors matches our cross-cutting concerns. |
 | CMP-002 | PostgreSQL Database | Persistent storage for all structured data: resumes (metadata), analyses, dimension scores, rewrite suggestions, subscriptions, payments, job roles. | PostgreSQL 16 on AWS RDS. Chosen because: (a) required by the brief, (b) JSONB support for flexible AI response storage, (c) strong transaction support for payment recording. |
-| CMP-003 | Redis Cache | Caches the job role list, monthly usage counters (credit reservation, FR-007), rate-limit counters and the derived user tier (`user_tier:{userId}`, §5.5). Also hosts the BullMQ queues used by CMP-010. | Redis 7.x on AWS ElastiCache. Chosen because: (a) required by the brief, (b) atomic counters for rate limiting and usage tracking, (c) sub-millisecond reads for frequently accessed data, (d) one Redis serves both cache and queue, so no extra broker to run. |
+| CMP-003 | Redis Cache | Caches the job role list, monthly usage counters (credit reservation, FR-007), rate-limit counters and the derived user tier (`user_tier:{userId}`, §5.5). Also hosts the BullMQ queues used by CMP-010. `maxmemory-policy noeviction` in every environment: queue jobs and usage counters must never be evicted; cache keys expire by TTL instead. | Redis 7.x on AWS ElastiCache. Chosen because: (a) required by the brief, (b) atomic counters for rate limiting and usage tracking, (c) sub-millisecond reads for frequently accessed data, (d) one Redis serves both cache and queue, so no extra broker to run. |
 | CMP-004 | S3 File Storage | Stores uploaded resume files. Files are encrypted at rest. **Upload goes through the API** (multipart, decision D-02) so the API can check size and magic bytes before `PutObject`; **download** uses a presigned GET URL (`PRESIGNED_URL_TTL`, K-16) so file bytes do not stream through the API. | AWS S3 with SSE-S3 encryption. Chosen because: (a) durable (99.999999999%), (b) presigned download URLs keep file bytes off the API server, (c) lifecycle policies automate retention-based deletion. |
 | CMP-005 | AI Analysis Service | Extracts text from resumes, constructs prompts, calls OpenAI GPT-4o, and parses the structured response. Runs inside the Analysis Worker (CMP-010), never in the API request path. | OpenAI GPT-4o API via `openai` npm package (v4.x). Chosen because: (a) GPT-4o balances quality and cost for text analysis, (b) structured JSON output mode reduces parsing errors, (c) extensive documentation and npm SDK. |
 | CMP-006 | PDF Generator | Renders analysis results into a styled HTML template and converts to PDF. | Puppeteer 22.x with Handlebars 4.x templates. Chosen because: (a) pixel-perfect PDF output matching the web design, (b) supports charts via inline SVG, (c) headless Chrome is well-maintained. |
 | CMP-007 | Razorpay Integration | Manages subscription creation, webhook processing, and payment recording. | Razorpay Node.js SDK (`razorpay` npm). Chosen because: (a) specified in the requirement, (b) native subscription support, (c) INR support with no forex. |
 | CMP-008 | Scheduler | Runs in the Worker process only (never in the API). Daily at `SWEEP_TIME` (K-27): (a) deletes expired resumes and enqueues `resume-cleanup` jobs for their S3 files per retention policy; (b) **subscription expiry sweep** — `UPDATE subscriptions SET status = 'expired' WHERE status IN ('cancelled', 'halted') AND current_period_end < now()`, and `active` rows whose `current_period_end < now() - RENEWAL_GRACE` (K-28), then `DEL user_tier:{userId}` for each affected user. | `@nestjs/schedule` (cron) with a Redis `SET NX` leader lock (TTL 10 min) so only one worker instance runs the job. Chosen because: (a) built into NestJS, (b) the lock makes it safe with 2+ worker tasks. |
-| CMP-009 | Load Balancer | Terminates TLS, routes to healthy API instances, handles CORS preflight at the infra level. | AWS ALB. Chosen because: (a) native ECS integration, (b) built-in health checks, (c) TLS termination. |
+| CMP-009 | Load Balancer | Terminates TLS, enforces `MAX_REQUEST_BODY` (K-02), routes to healthy API instances (target-group health check = API-019, 503 = unhealthy). Forwards `OPTIONS` untouched; CORS lives in the API (CR-007). | AWS ALB. Chosen because: (a) native ECS integration, (b) built-in health checks, (c) TLS termination. |
 | CMP-010 | Analysis Queue + Worker | Decouples the expensive OpenAI call from the HTTP request (decision D-01). Two queues on Redis: `analysis` (jobs: `{ analysisId }`, `AI_ATTEMPTS` / `AI_BACKOFF` (K-10 / K-11), concurrency `WORKER_CONCURRENCY` (K-37) per worker task, `removeOnComplete: 1000`, `removeOnFail: FAILED_JOB_RETENTION` (K-18)) and `resume-cleanup` (jobs: `{ s3Key }`, `CLEANUP_ATTEMPTS` / `CLEANUP_BACKOFF`, K-33). The Worker is a separate ECS service (same image, `PROCESS_ROLE=worker`, min 1 / max 4 tasks, scaled on `analysis` queue depth > 20) that runs CMP-005 and updates `analyses` status `pending → processing → completed | failed`. | BullMQ 5.x (`@nestjs/bullmq`). Chosen because: (a) runs on the Redis we already have, no SQS/RabbitMQ to operate, (b) per-job retries, backoff, timeouts and locks are built in, (c) NestJS integration via decorators (`@Processor`, `@InjectQueue`), (d) Bull Board gives a free admin UI in dev/staging. |
 
 ### 4.3 Main flows
@@ -773,6 +782,8 @@ LIMIT 1;
 | yes | `current_period_end > now()` | `pro` |
 | yes | `current_period_end <= now()` | `free` (row will be marked `expired` by the daily sweep; the tier is already correct before that) |
 
+**Admin rule:** a JWT whose `roles[]` contains `admin` (CR-003) is treated as tier `pro` at every enforcement point below and passes `ProGuard`; admins' own subscription rows are not consulted. **Mid-request rule:** the tier is read once per request (API-007/008 at response time), so a Pro user whose period ends between two polls sees the free view from the next poll on; this is intended.
+
 `created` (unpaid) and `halted` (payment failed) rows never grant Pro. `cancelled` grants Pro until `current_period_end` (requirement: access continues to the end of the paid month).
 
 **Cache:** Redis key `user_tier:{userId}` with value `pro` or `free`, TTL = `min(current_period_end - now(), CACHE_TTL)` for `pro`, `CACHE_TTL` (K-17) for `free`. Invalidated (`DEL`) by: every Razorpay webhook event for that user (API-018), `POST /subscriptions/:id/cancel` (API-016) and the daily sweep (CMP-008). Redis unavailable → derive from DB on every call (slower, still correct).
@@ -788,7 +799,7 @@ LIMIT 1;
 | Score comparison (FR-014) | `@UseGuards(JwtGuard, ProGuard)` on API-011 | `ERR_PRO_REQUIRED` (403) |
 | Retention (NFR-006) | CMP-008 reads tier to compute `expires_at` | `RETENTION_DAYS` (K-07) from upload |
 
-`ProGuard` runs after `JwtGuard` and before pipes; it reads the tier via `EntitlementService` (Flow 4). Analysis history (FR-009) stays available to free users because the brief says free users keep what they have today.
+`ProGuard` runs after `JwtAuthGuard` and before pipes; it reads the tier via `EntitlementService` (Flow 4). Analysis history (FR-009) stays available to free users because the brief says free users keep what they have today.
 
 ---
 
@@ -804,7 +815,13 @@ LIMIT 1;
 - **Content-Type:** `application/json` for all responses except file downloads (PDF, resume). File uploads use `multipart/form-data`.
 - **Request IDs:** Every request gets a UUID in the `X-Request-Id` response header (echoed from request header if provided, otherwise auto-generated).
 - **Async operations (D-01):** `POST /analyses` and `POST /analyses/:id/retry` return `202 Accepted` with `{ "id", "status": "pending", "pollUrl" }`. The client polls `pollUrl` (= `GET /analyses/:id`) every `POLL_INTERVAL` (K-15) until `status` is `completed` or `failed`. Failures of the background job are reported in that resource (`status: "failed"`, `errorCode`, `errorMessage`), never as an HTTP error of the original POST.
-- **Pro gating (D-03):** Pro-only endpoints carry `ProGuard` and return `ERR_PRO_REQUIRED` (403) for free users before any other validation. Currently: API-011 only.
+- **Pro gating (D-03):** Pro-only endpoints carry `ProGuard` and return `ERR_PRO_REQUIRED` (403) for free users before any other validation. Currently: API-011 only. Admins pass the guard (§5.5).
+- **Ownership rule (no ID probing):** a resource that exists but belongs to another user is answered **404 with that resource's not-found code** (`ERR_RESUME_NOT_FOUND`, `ERR_ANALYSIS_NOT_FOUND`, `ERR_SUBSCRIPTION_NOT_FOUND`), exactly as if it did not exist. `ERR_FORBIDDEN` (403) is used **only** for role failures (a non-admin calling an admin endpoint). Admins read any resume or analysis by id; subscriptions are always own-only.
+- **Errors every endpoint may return (not repeated in the per-endpoint tables):** 400 `ERR_VALIDATION` (pipe failure, see mapping), 401 `ERR_UNAUTHORIZED` (every endpoint except API-018 and API-019), 413 `ERR_PAYLOAD_TOO_LARGE` (body above K-02), 429 `ERR_RATE_LIMITED`, 500 `ERR_INTERNAL`, 502 `ERR_STORAGE_UNAVAILABLE` (endpoints that touch S3: API-001, API-003, API-004), 503 `ERR_SERVICE_UNAVAILABLE` (Redis, BullMQ or PostgreSQL unreachable). Per-endpoint tables list only the codes specific to that endpoint.
+- **Validation → error code mapping:** a specific code wins over the generic one. `experienceLevel` outside the enum → `ERR_INVALID_EXPERIENCE_LEVEL`; `ids` on API-011 not exactly 2 UUIDs → `ERR_INVALID_COMPARISON`; file MIME / size / empty → ERR-003 / ERR-004 / ERR-005. Everything else the pipe rejects (missing field, wrong type, malformed UUID in body, query or path, unknown field) → `ERR_VALIDATION` with `details: [{ "field": "<name>", "constraint": "<rule>" }]` (max `ERROR_DETAILS_MAX`, K-34). A well-formed `jobRoleId` that matches no role → `ERR_INVALID_JOB_ROLE` (service lookup); a well-formed `resumeId` that is unknown or not owned → `ERR_RESUME_NOT_FOUND`.
+- **Rate-limit scope:** `RATE_LIMIT_USER` (K-23) on every JWT endpoint; `RATE_LIMIT_ANALYSIS` (K-25) additionally on API-005 and API-010; `RATE_LIMIT_ANON` (K-24) on unauthenticated requests. API-018 and API-019 are **exempt** from throttling (Razorpay re-delivers in bursts; monitors poll every minute); API-018 is protected by its signature instead.
+- **Route order:** the static routes `/analyses/usage` (API-009) and `/analyses/compare` (API-011) are declared before `/analyses/:id` in `AnalysesController`; otherwise `ParseUuidPipe` on `:id` would answer them with `ERR_VALIDATION`.
+- **Responses are never wrapped** (no `{ data: ... }` envelope) except the pagination wrapper above. `RequestIdInterceptor` only sets the `X-Request-Id` header.
 
 ### 6.2 Endpoints
 
@@ -839,7 +856,6 @@ LIMIT 1;
 | 400 | ERR_FILE_TOO_LARGE | File exceeds `MAX_FILE_SIZE` (K-01). |
 | 400 | ERR_EMPTY_FILE | File is 0 bytes. |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
-| 429 | ERR_RATE_LIMITED | Too many requests. |
 
 ---
 
@@ -912,8 +928,7 @@ The `downloadUrl` is a presigned S3 URL valid for `PRESIGNED_URL_TTL` (K-16).
 | HTTP | Error code | When |
 |---|---|---|
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
-| 403 | ERR_FORBIDDEN | User does not own this resume and is not admin. |
-| 404 | ERR_RESUME_NOT_FOUND | Resume ID does not exist or has been deleted. |
+| 404 | ERR_RESUME_NOT_FOUND | Resume ID does not exist, was deleted, or is not owned by the caller (§6.1 ownership rule; admins see any). |
 
 ---
 
@@ -935,8 +950,7 @@ The `downloadUrl` is a presigned S3 URL valid for `PRESIGNED_URL_TTL` (K-16).
 | HTTP | Error code | When |
 |---|---|---|
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
-| 403 | ERR_FORBIDDEN | User does not own this resume and is not admin. |
-| 404 | ERR_RESUME_NOT_FOUND | Resume ID does not exist. |
+| 404 | ERR_RESUME_NOT_FOUND | Resume ID does not exist or is not owned by the caller (§6.1; admins may delete any). |
 
 ---
 
@@ -1013,7 +1027,7 @@ The client polls `pollUrl` every `POLL_INTERVAL` (K-15). Possible `status` value
 }
 ```
 
-While `status` is `pending` or `processing`, the same resource is returned with `overallScore: null`, `dimensions: []`, `missingSkills: []`, `suggestions: []`, `totalSuggestions: 0`, `completedAt: null` (and `startedAt: null` while pending). When `status` is `failed`, `errorCode` is `ERR_TEXT_EXTRACTION_FAILED` or `ERR_AI_SERVICE_UNAVAILABLE` and `errorMessage` carries the matching message from §6.3.
+While `status` is `pending` or `processing`, the same resource is returned with `overallScore: null`, `dimensions: []`, `missingSkills: []`, `suggestions: []`, `totalSuggestions: 0`, `completedAt: null` (and `startedAt: null` while pending). When `status` is `failed`, `errorCode` is one of the resource-level codes in §6.3 (`ERR_TEXT_EXTRACTION_FAILED`, `ERR_AI_SERVICE_UNAVAILABLE`, `ERR_AI_RESPONSE_INVALID`, `ERR_ANALYSIS_TIMEOUT`) and `errorMessage` carries the matching message.
 
 Note: Free users see only the first `FREE_VISIBLE_SUGGESTIONS` (K-04) suggestions by `sort_order`. `totalSuggestions` shows the total available. Pro users see all (up to `MAX_SUGGESTIONS`, K-05). The tier is derived per §5.5 at response time.
 
@@ -1025,9 +1039,9 @@ Note: Free users see only the first `FREE_VISIBLE_SUGGESTIONS` (K-04) suggestion
 | 400 | ERR_INVALID_JOB_ROLE | `jobRoleId` does not match any existing job role. |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
 | 403 | ERR_MONTHLY_LIMIT_REACHED | Free user already has `FREE_MONTHLY_LIMIT` (K-03) analyses reserved or used this month. |
-| 404 | ERR_RESUME_NOT_FOUND | `resumeId` does not exist or is not owned by the user. |
-| 429 | ERR_RATE_LIMITED | `RATE_LIMIT_ANALYSIS` (K-25) exceeded. |
-| 503 | ERR_INTERNAL | Redis/BullMQ unavailable so the job could not be enqueued (credit is rolled back). |
+| 404 | ERR_RESUME_NOT_FOUND | `resumeId` does not exist or is not owned by the user (§6.1). |
+| 429 | ERR_RATE_LIMITED | `RATE_LIMIT_ANALYSIS` (K-25) exceeded (endpoint-specific limit on top of the global one). |
+| 503 | ERR_SERVICE_UNAVAILABLE | Redis/BullMQ unavailable so the job could not be enqueued; the reserved credit is released and no `analyses` row remains (CMP-010 enqueue rollback). |
 
 ---
 
@@ -1044,6 +1058,7 @@ Note: Free users see only the first `FREE_VISIBLE_SUGGESTIONS` (K-04) suggestion
 | limit | query | integer | No | Min 1, max `PAGE_MAX` (K-22). Default `PAGE_DEFAULT` (K-21). |
 | status | query | string | No | One of: `pending`, `processing`, `completed`, `failed`. |
 | jobRoleId | query | uuid | No | Valid UUID. |
+| userId | query | uuid | No | **Admin only.** Restricts the list to one user. Ignored (always the caller's own analyses) when the caller is not admin. Without it an admin receives all users' analyses. |
 
 **Response 200**
 
@@ -1092,8 +1107,7 @@ The **Analysis resource** shown under API-005, in whichever state the row is in.
 | HTTP | Error code | When |
 |---|---|---|
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
-| 403 | ERR_FORBIDDEN | User does not own this analysis and is not admin. |
-| 404 | ERR_ANALYSIS_NOT_FOUND | Analysis ID does not exist. |
+| 404 | ERR_ANALYSIS_NOT_FOUND | Analysis ID does not exist or is not owned by the caller (§6.1; admins see any). |
 
 ---
 
@@ -1120,8 +1134,7 @@ The **Analysis resource** shown under API-005, in whichever state the row is in.
 |---|---|---|
 | 400 | ERR_ANALYSIS_NOT_READY | Analysis status is not `completed`. |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
-| 403 | ERR_FORBIDDEN | User does not own this analysis and is not admin. |
-| 404 | ERR_ANALYSIS_NOT_FOUND | Analysis ID does not exist. |
+| 404 | ERR_ANALYSIS_NOT_FOUND | Analysis ID does not exist or is not owned by the caller (§6.1). |
 
 ---
 
@@ -1183,16 +1196,17 @@ The row's `status` is reset to `pending`, `error_code`/`error_message` are clear
 | HTTP | Error code | When |
 |---|---|---|
 | 400 | ERR_ANALYSIS_NOT_FAILED | Analysis status is not `failed` (including `pending`/`processing`). |
+| 400 | ERR_RETRY_LIMIT_REACHED | `MAX_MANUAL_RETRIES` (K-31) already used, or the failure is `ERR_TEXT_EXTRACTION_FAILED` (deterministic; re-upload instead). |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
-| 403 | ERR_FORBIDDEN | User does not own this analysis and is not admin. |
-| 404 | ERR_ANALYSIS_NOT_FOUND | Analysis ID does not exist. |
-| 503 | ERR_INTERNAL | Redis/BullMQ unavailable so the job could not be enqueued; status stays `failed`. |
+| 404 | ERR_ANALYSIS_NOT_FOUND | Analysis ID does not exist or is not owned by the caller (§6.1). |
+| 429 | ERR_RATE_LIMITED | `RATE_LIMIT_ANALYSIS` (K-25) exceeded. |
+| 503 | ERR_SERVICE_UNAVAILABLE | Redis/BullMQ unavailable so the job could not be enqueued; status stays `failed`. |
 
 ---
 
 #### API-011 `GET /api/v1/analyses/compare`
 - **Purpose:** Compare dimension scores of two completed analyses side by side.
-- **Auth / role:** `user` **with tier `pro`** (own analyses), `admin` (any). Guards: `JwtGuard` → `ProGuard` (§5.5, Flow 4). Free users get 403 `ERR_PRO_REQUIRED` before any lookup.
+- **Auth / role:** `user` **with tier `pro`** (own analyses), `admin` (any). Guards: `JwtAuthGuard` → `ProGuard` (§5.5, Flow 4). Free users get 403 `ERR_PRO_REQUIRED` before any lookup; admins pass `ProGuard` (§5.5 admin rule).
 - **Implements:** FR-014, FR-011 (AC 7)
 
 **Request**
@@ -1249,8 +1263,7 @@ The row's `status` is reset to `pending`, `error_code`/`error_message` are clear
 | 400 | ERR_INVALID_COMPARISON | Not exactly 2 IDs, or an analysis is not `completed`. |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
 | 403 | ERR_PRO_REQUIRED | Caller's tier is `free` (checked first, by `ProGuard`). |
-| 403 | ERR_FORBIDDEN | User does not own one or both analyses. |
-| 404 | ERR_ANALYSIS_NOT_FOUND | One or both analysis IDs do not exist. |
+| 404 | ERR_ANALYSIS_NOT_FOUND | One or both analysis IDs do not exist or are not owned by the caller (§6.1; admins may compare any). |
 
 ---
 
@@ -1375,14 +1388,14 @@ Returns `null` (with 200 status) if no active subscription.
 
 #### API-016 `POST /api/v1/subscriptions/:id/cancel`
 - **Purpose:** Cancel subscription at the end of the current billing period.
-- **Auth / role:** `user` (own only)
+- **Auth / role:** `user`, `admin` (own subscription only)
 - **Implements:** FR-013
 
 **Request**
 
 | Field | In | Type | Required | Validation |
 |---|---|---|---|---|
-| id | path | uuid | Yes | Valid UUID. Must be an active subscription owned by the user. |
+| id | path | uuid | Yes | Valid UUID. Must be an `active` subscription owned by the caller. |
 
 **Response 200**
 
@@ -1400,10 +1413,9 @@ Returns `null` (with 200 status) if no active subscription.
 
 | HTTP | Error code | When |
 |---|---|---|
-| 400 | ERR_SUBSCRIPTION_NOT_ACTIVE | Subscription is not in `active` status. |
+| 400 | ERR_SUBSCRIPTION_NOT_ACTIVE | Subscription is not in `active` status (already cancelling, `pending`, `halted`, `expired` or `created`). |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
-| 403 | ERR_FORBIDDEN | User does not own this subscription. |
-| 404 | ERR_SUBSCRIPTION_NOT_FOUND | Subscription ID does not exist. |
+| 404 | ERR_SUBSCRIPTION_NOT_FOUND | Subscription ID does not exist or is not owned by the caller (§6.1). |
 
 ---
 
@@ -1480,7 +1492,7 @@ Handled events (every one ends with `DEL user_tier:{userId}` so the derived tier
 ---
 
 #### API-019 `GET /api/v1/health`
-- **Purpose:** Health check. No auth required.
+- **Purpose:** Health check for the ALB target group and uptime monitors. No auth, exempt from rate limiting (§6.1). NFR-003 / NFR-007 refer to it as `/health` for short.
 - **Auth / role:** None
 - **Implements:** NFR-003, NFR-007
 
@@ -1500,7 +1512,7 @@ Handled events (every one ends with `DEL user_tier:{userId}` so the derived tier
 }
 ```
 
-If any service is down: `"status": "degraded"`, the failed service shows `"error"`.
+**Response 503** when any dependency check fails: same body with `"status": "degraded"` and the failed service showing `"error"`. A non-200 answer is what makes the ALB mark the task unhealthy and what NFR-003 counts as downtime. Checks: `SELECT 1` (PostgreSQL), `PING` (Redis), `HeadBucket` (S3); each with a 2 s timeout.
 
 ---
 
@@ -1518,12 +1530,12 @@ If any service is down: `"status": "degraded"`, the failed service shows `"error
 | ERR-008 | ERR_INVALID_JOB_ROLE | 400 | Invalid job role. | `jobRoleId` does not match any existing role. |
 | ERR-009 | ERR_INVALID_EXPERIENCE_LEVEL | 400 | Experience level must be one of: entry, mid, senior, lead. | Invalid `experienceLevel` value. |
 | ERR-010 | ERR_MONTHLY_LIMIT_REACHED | 403 | You have reached your monthly analysis limit ({FREE_MONTHLY_LIMIT}). Upgrade to Pro for unlimited analyses. | Free user used all `FREE_MONTHLY_LIMIT` (K-03) analyses this calendar month. |
-| ERR-011 | ERR_TEXT_EXTRACTION_FAILED | 422 | Could not extract text from the resume. The file may be corrupted or image-only. | `pdf-parse` or `mammoth` could not read the file. |
-| ERR-012 | ERR_AI_SERVICE_UNAVAILABLE | 502 | The analysis service is temporarily unavailable. Please try again later. | OpenAI API returned 5xx or timed out after retry. |
+| ERR-011 | ERR_TEXT_EXTRACTION_FAILED | — (resource-level, D-01) | Could not extract text from the resume. The file may be corrupted or image-only. | Worker: `pdf-parse` or `mammoth` could not read the file. Surfaces as `errorCode` on the analysis resource, never as an HTTP status. Not retryable via API-010. |
+| ERR-012 | ERR_AI_SERVICE_UNAVAILABLE | — (resource-level, D-01) | The analysis service is temporarily unavailable. Please try again later. | Worker: OpenAI 5xx, timeout (K-09) or 429 after `AI_ATTEMPTS` (K-10). Surfaces as `errorCode` on the resource. |
 | ERR-013 | ERR_ANALYSIS_NOT_READY | 400 | Analysis is not yet completed. | PDF download requested for non-completed analysis. |
 | ERR-014 | ERR_ANALYSIS_NOT_FAILED | 400 | Only failed analyses can be retried. | Retry requested for non-failed analysis. |
 | ERR-015 | ERR_RATE_LIMITED | 429 | Too many requests. Please try again later. | Rate limit exceeded. |
-| ERR-016 | ERR_VALIDATION | 400 | Validation failed: {details}. | Request body/query/path validation failed. |
+| ERR-016 | ERR_VALIDATION | 400 | Validation failed. | Request body/query/path validation failed (mapping in §6.1). The standard error shape gains `"details": [{ "field": "<name>", "constraint": "<rule>" }]`, at most `ERROR_DETAILS_MAX` (K-34) entries. |
 | ERR-017 | ERR_DUPLICATE_JOB_ROLE | 409 | A job role with this name already exists. | Admin tried to create a duplicate job role. |
 | ERR-018 | ERR_SUBSCRIPTION_ALREADY_ACTIVE | 409 | You already have an active subscription. | User tried to subscribe while already subscribed. |
 | ERR-019 | ERR_SUBSCRIPTION_NOT_FOUND | 404 | Subscription not found. | Subscription ID does not exist. |
@@ -1531,10 +1543,16 @@ If any service is down: `"status": "degraded"`, the failed service shows `"error
 | ERR-021 | ERR_PAYMENT_SERVICE_UNAVAILABLE | 502 | Payment service is temporarily unavailable. | Razorpay API failed. |
 | ERR-022 | ERR_INVALID_WEBHOOK_SIGNATURE | 400 | Invalid webhook signature. | Razorpay webhook HMAC verification failed. |
 | ERR-023 | ERR_INVALID_COMPARISON | 400 | Provide exactly 2 completed analysis IDs to compare. | Compare endpoint: wrong number of IDs or non-completed analysis. |
-| ERR-024 | ERR_INTERNAL | 500 | Internal server error. | Unexpected error. No internal details leaked. Returned as 503 when the cause is a dependency (Redis/BullMQ) refusing an enqueue. |
+| ERR-024 | ERR_INTERNAL | 500 | Internal server error. | Unexpected error. No internal details leaked. (v1.3: the 503 dependency case moved to ERR-026.) |
 | ERR-025 | ERR_PRO_REQUIRED | 403 | This feature requires Resume Pro. Upgrade to compare analyses. | Free user called a Pro-gated endpoint (API-011). Raised by `ProGuard` (§5.5). |
+| ERR-026 | ERR_SERVICE_UNAVAILABLE | 503 | Service temporarily unavailable. Please retry in a moment. | Redis, BullMQ or PostgreSQL unreachable (enqueue refused, counter or query failed). Any endpoint (§6.1). |
+| ERR-027 | ERR_STORAGE_UNAVAILABLE | 502 | File storage is temporarily unavailable. | S3 `PutObject`, presign or `DeleteObject` failed or exceeded `EXTERNAL_TIMEOUT` (K-39). API-001, API-003, API-004. |
+| ERR-028 | ERR_AI_RESPONSE_INVALID | — (resource-level, D-01) | The analysis service returned an unusable result. Please retry. | Worker: AI JSON failed schema validation on every attempt (CMP-005 validation rules). `errorCode` on the resource; retryable via API-010. |
+| ERR-029 | ERR_ANALYSIS_TIMEOUT | — (resource-level, D-01) | The analysis took too long and was stopped. Please retry. | Worker abort at `AI_TIMEOUT` (K-09) on the last attempt, or the stalled-job sweep found the row in `processing` for more than `JOB_STALL_TIMEOUT` (K-30). Retryable via API-010. |
+| ERR-030 | ERR_RETRY_LIMIT_REACHED | 400 | This analysis cannot be retried again. | API-010: `MAX_MANUAL_RETRIES` (K-31) used, or the failure is `ERR_TEXT_EXTRACTION_FAILED`. |
+| ERR-031 | ERR_PAYLOAD_TOO_LARGE | 413 | Request body exceeds the allowed size. | Body above `MAX_REQUEST_BODY` (K-02), rejected by the ALB or multer before the handler. A file between K-01 and K-02 is ERR-004 (400) instead. |
 
-Note (D-01): `ERR_TEXT_EXTRACTION_FAILED` (ERR-011) and `ERR_AI_SERVICE_UNAVAILABLE` (ERR-012) are no longer HTTP responses of `POST /analyses`. They appear as `errorCode` on the analysis resource (`status: "failed"`) returned by API-006/007. The codes and IDs are kept; their HTTP column describes the status they would map to if surfaced directly.
+Note (D-01): resource-level codes (ERR-011, ERR-012, ERR-028, ERR-029) are never HTTP responses of `POST /analyses`. They appear as `errorCode` on the analysis resource (`status: "failed"`) returned by API-006/007, with `errorMessage` = the Message column. Their HTTP column is `—` on purpose.
 
 ---
 
