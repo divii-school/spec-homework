@@ -188,23 +188,23 @@ Frontend (Next.js) is a separate repository and out of scope for this backend sp
 
 | ID | Title | Description | Priority | Acceptance criteria |
 |---|---|---|---|---|
-| FR-001 | Upload resume | A logged-in user uploads a resume file. The system accepts PDF and DOCX formats only, with a maximum size of `MAX_FILE_SIZE` (K-01). The file is stored in S3 and a record is created in the database. | Must | 1. Only `.pdf` and `.docx` MIME types are accepted; any other type returns `ERR_INVALID_FILE_TYPE` (400). 2. Files larger than `MAX_FILE_SIZE` (K-01) return `ERR_FILE_TOO_LARGE` (400). 3. Files with 0 bytes return `ERR_EMPTY_FILE` (400). 4. After upload, the response contains `resumeId` (UUID), `fileName`, `fileSize`, `mimeType`, `uploadedAt`. 5. The file is stored in S3 at key `resumes/{userId}/{resumeId}/{originalFileName}`. 6. A malicious file (e.g. `.exe` renamed to `.pdf`) is rejected by checking the file's magic bytes, not just the extension. |
+| FR-001 | Upload resume | A logged-in user uploads a resume file. The system accepts PDF and DOCX formats only, with a maximum size of `MAX_FILE_SIZE` (K-01). The file is stored in S3 and a record is created in the database. | Must | 1. Only `.pdf` and `.docx` MIME types are accepted; any other type returns `ERR_INVALID_FILE_TYPE` (400). 2. Files larger than `MAX_FILE_SIZE` (K-01) return `ERR_FILE_TOO_LARGE` (400). 3. Files with 0 bytes return `ERR_EMPTY_FILE` (400). 4. After upload, the response contains `id` (UUID), `fileName`, `fileSize`, `mimeType`, `uploadedAt` (API-001). 5. The file is stored in S3 at key `resumes/{userId}/{resumeId}/{safeName}` where `safeName` = original name NFC-normalised, path separators and control characters removed, whitespace collapsed to `-`, truncated to 100 characters keeping the extension; the original name is kept untouched in `resumes.file_name`. 6. The stored `mime_type` is the **detected** type, never the declared one: PDF = bytes `%PDF-`; DOCX = ZIP signature `PK\x03\x04` **and** a `[Content_Types].xml` entry plus a `word/document.xml` entry in the central directory (plain ZIPs fail). A declared/detected mismatch or an undetectable file returns `ERR_INVALID_FILE_TYPE`. 7. No malware scan is performed in v1 (assumption A-07): files are never executed or served to other users, and only extracted text reaches the AI. |
 | FR-002 | Select target job role | When starting an analysis, the user selects a target job role from a predefined list (e.g. "Software Engineer", "Data Analyst", "Product Manager", "DevOps Engineer", "UI/UX Designer", "Project Manager", "Business Analyst", "QA Engineer", "System Administrator", "Marketing Manager"). Admins can add roles via `POST /job-roles`. | Must | 1. The list is returned by `GET /job-roles`. 2. Selecting a role not in the list returns `ERR_INVALID_JOB_ROLE` (400). 3. The selected role is stored with the analysis. |
 | FR-003 | Select experience level | When starting an analysis, the user selects an experience level: `entry` (0–2 years), `mid` (3–5 years), `senior` (6–10 years), `lead` (10+ years). | Must | 1. Only the four values are accepted; anything else returns `ERR_INVALID_EXPERIENCE_LEVEL` (400). 2. The level is stored with the analysis. |
-| FR-004 | AI resume analysis | **Analysis is asynchronous (decision D-01, §4.6).** `POST /analyses` validates the request, reserves the user's credit, creates the analysis row with status `pending`, enqueues a job on the `analysis` queue (CMP-010) and returns `202 Accepted` immediately. The Analysis Worker picks up the job, sets status `processing`, extracts the resume text, sends text + job role + experience level to OpenAI GPT-4o and stores the structured result (overall score 0–100, per-dimension scores, missing skills, rewrite suggestions). The client polls `GET /analyses/:id` until status is `completed` or `failed`. | Must | 1. `POST /analyses` responds `202` with `status: "pending"` within `ENQUEUE_P95` (K-13); the job reaches `completed` or `failed` within `ANALYSIS_P95` (K-12) of enqueue. The client polls `GET /analyses/:id` every `POLL_INTERVAL` (K-15) and stops on a terminal status. 2. The overall score is an integer 0–100. 3. The seven dimensions of the dimension catalogue (§3.4, K-40) are scored; each dimension score is an integer from 0 to that dimension's weight. 4. `overall_score` is computed by the Worker as the plain sum of the seven dimension scores (weights total 100, so the sum is already 0–100); the AI's own overall figure, if any, is ignored. 5. If the AI call fails (timeout, rate limit, server error) after the job's retry policy (`AI_ATTEMPTS` / `AI_BACKOFF`, K-10 / K-11, see CMP-010), the analysis status is set to `failed`, `error_code` is set (`ERR_AI_SERVICE_UNAVAILABLE` or `ERR_TEXT_EXTRACTION_FAILED`) and the reserved credit is released; the user can retry without consuming another credit. 6. The resume text is extracted inside the worker using `pdf-parse` (PDF) or `mammoth` (DOCX) before sending to the AI. 7. Exactly one worker processes a given job at a time (BullMQ lock); a job is never processed twice concurrently. |
+| FR-004 | AI resume analysis | **Analysis is asynchronous (decision D-01, §4.6).** `POST /analyses` validates the request, reserves the user's credit, creates the analysis row with status `pending`, enqueues a job on the `analysis` queue (CMP-010) and returns `202 Accepted` immediately. The Analysis Worker picks up the job, sets status `processing`, extracts the resume text, sends text + job role + experience level to OpenAI GPT-4o and stores the structured result (overall score 0–100, per-dimension scores, missing skills, rewrite suggestions). The client polls `GET /analyses/:id` until status is `completed` or `failed`. | Must | 1. `POST /analyses` responds `202` with `status: "pending"` within `ENQUEUE_P95` (K-13); the job reaches `completed` or `failed` within `ANALYSIS_P95` (K-12) of enqueue. The client polls `GET /analyses/:id` every `POLL_INTERVAL` (K-15) and stops on a terminal status. 2. The overall score is an integer 0–100. 3. The seven dimensions of the dimension catalogue (§3.4, K-40) are scored; each dimension score is an integer from 0 to that dimension's weight. 4. `overall_score` is computed by the Worker as the plain sum of the seven dimension scores (weights total 100, so the sum is already 0–100); the AI's own overall figure, if any, is ignored. 5. If the AI call fails (timeout at `AI_TIMEOUT`, HTTP 429, 5xx, network error) the Worker throws and BullMQ retries per `AI_ATTEMPTS` / `AI_BACKOFF` (K-10 / K-11); after the last attempt the row becomes `failed` with `error_code` = `ERR_AI_SERVICE_UNAVAILABLE` (5xx / 429 / network) or `ERR_ANALYSIS_TIMEOUT` (abort at K-09), and the reserved credit is released (FR-007 AC 2). Text extraction failure is **not** retried: `failed` with `ERR_TEXT_EXTRACTION_FAILED` at once. 6. The resume text is extracted inside the worker using `pdf-parse` (PDF) or `mammoth` (DOCX) before sending to the AI. 7. Exactly one worker processes a given job at a time (BullMQ lock); a job is never processed twice concurrently. 8. **AI response validation** (CMP-005): the JSON must contain exactly the 7 dimension keys of K-40, each with an integer `score` in `0..weight` and a non-empty `feedback`; `missingSkills` and `suggestions` arrays with the field shapes of FR-005 / FR-006. Missing keys, wrong types or out-of-range scores → the attempt is treated like an AI failure (retry per K-10; on the last attempt `failed` with `ERR_AI_RESPONSE_INVALID`). Over-long lists are **truncated**, not rejected: skills to `MAX_MISSING_SKILLS` (K-06), suggestions to `MAX_SUGGESTIONS` (K-05) after ordering by impact; text fields are cut to their max length (FR-005, FR-006, TBL-004). |
 | FR-005 | Missing skills list | The analysis result includes a list of skills that are expected for the target role and experience level but are missing from the resume. Each skill has a name and a brief explanation of why it matters for the role. | Must | 1. At least 0 and at most `MAX_MISSING_SKILLS` (K-06) missing skills are returned. 2. Each skill has `name` (string, 1–100 chars) and `reason` (string, 1–300 chars). 3. Skills are ordered by relevance (most important first, as ranked by the AI). |
-| FR-006 | Rewrite suggestions | The analysis result includes rewrite suggestions for weak lines in the resume. Each suggestion has the original line, the suggested rewrite, the dimension it improves, and the expected score impact. | Must | 1. Each suggestion has `originalText`, `suggestedText`, `dimension` (one of the 7 dimension keys), `impact` (`low` / `medium` / `high`). 2. Free users see only the first `FREE_VISIBLE_SUGGESTIONS` (K-04) suggestions by `sort_order` (TBL-004). Pro users see all, at most `MAX_SUGGESTIONS` (K-05). 3. The response includes `totalSuggestions` count even for free users, so they know how many they are missing. |
-| FR-007 | Free tier usage limits | Free users can run at most `FREE_MONTHLY_LIMIT` (K-03) analyses per calendar month (UTC). The count resets on the 1st of each month at 00:00 UTC. If the limit is reached, `POST /analyses` returns `ERR_MONTHLY_LIMIT_REACHED` (403). | Must | 1. After `FREE_MONTHLY_LIMIT` analyses in a month, the next attempt returns 403 with `ERR_MONTHLY_LIMIT_REACHED`. 2. Because analysis is asynchronous, the credit is **reserved at enqueue** (`INCR usage:{userId}:{YYYY-MM}` in Redis, atomic) so two concurrent requests cannot both pass the check; it is **released** (`DECR`) by the worker when the job ends in `failed`. Pending and processing analyses therefore count; failed ones do not. 3. `GET /analyses/usage` returns `{ "used": <n>, "limit": 3, "resetsAt": "<ISO-8601>" }`. 4. Pro users (tier derived per §5.5) and callers with the `admin` role skip the check entirely. 5. The Redis key expires `USAGE_KEY_TTL` (K-19) after the month starts; if Redis is unavailable the API falls back to `SELECT count(*) FROM analyses WHERE user_id = ? AND status <> 'failed' AND created_at >= <month start>`. |
+| FR-006 | Rewrite suggestions | The analysis result includes rewrite suggestions for weak lines in the resume. Each suggestion has the original line, the suggested rewrite, the dimension it improves, and the expected score impact. | Must | 1. Each suggestion has `originalText` and `suggestedText` (1–1000 characters each, cut by the Worker if longer), `dimension` (one of the 7 keys of K-40), `impact` (`low` / `medium` / `high`). 2. Free users see only the first `FREE_VISIBLE_SUGGESTIONS` (K-04) suggestions by `sort_order` (TBL-004). Pro users see all, at most `MAX_SUGGESTIONS` (K-05). 3. The response includes `totalSuggestions` count even for free users, so they know how many they are missing. |
+| FR-007 | Free tier usage limits | Free users can run at most `FREE_MONTHLY_LIMIT` (K-03) analyses per calendar month (UTC). The count resets on the 1st of each month at 00:00 UTC. If the limit is reached, `POST /analyses` returns `ERR_MONTHLY_LIMIT_REACHED` (403). | Must | 1. After `FREE_MONTHLY_LIMIT` analyses in a month, the next attempt returns 403 with `ERR_MONTHLY_LIMIT_REACHED`. 2. Because analysis is asynchronous, the credit is **reserved at enqueue** (`INCR usage:{userId}:{YYYY-MM}` in Redis, atomic) so two concurrent requests cannot both pass the check, and the row records it (`analyses.credit_reserved = true`, TBL-002). It is **released exactly once** (`DECR` on the key of the month in which it was reserved, flag set to `false`) by whichever component moves the row to `failed` (Worker, stalled-job sweep) or deletes it while unfinished (API-004). A manual retry (API-010) reserves a credit again, so one successful analysis always costs exactly one credit, counted in the month of the (re)enqueue. Pending, processing and completed analyses therefore count; failed ones do not. 3. `GET /analyses/usage` returns `{ "used": <n>, "limit": 3, "resetsAt": "<ISO-8601>" }`. 4. Pro users (tier derived per §5.5) and callers with the `admin` role skip the check entirely. 5. The Redis key expires `USAGE_KEY_TTL` (K-19) after the month starts; if Redis is unavailable the API falls back to `SELECT count(*) FROM analyses WHERE user_id = ? AND credit_reserved = true AND reserved_month = <YYYY-MM>`, which by construction equals the counter. |
 | FR-008 | Download analysis as PDF | A user can download any of their own completed analyses as a PDF. The PDF contains: overall score, dimension scores as a radar chart, missing skills, rewrite suggestions (all for Pro, the first `FREE_VISIBLE_SUGGESTIONS` for free, K-04), and a timestamp. | Must | 1. `GET /analyses/:id/pdf` returns `Content-Type: application/pdf`. 2. The PDF file size is below `PDF_MAX_SIZE` (K-26). 3. If the analysis status is not `completed`, the endpoint returns `ERR_ANALYSIS_NOT_READY` (400). 4. The PDF includes the SurfingBear logo, the user's name, and the analysis date. |
 | FR-009 | View analysis history | A user can view a list of their past analyses, paginated, sorted by creation date descending. Each list item shows: overall score, job role, experience level, status, and created date. | Should | 1. `GET /analyses` returns a paginated list. 2. Page size: default `PAGE_DEFAULT` (K-21), max `PAGE_MAX` (K-22). 3. Filterable by `status` (pending, processing, completed, failed) and `jobRoleId`. 4. Each item includes `id`, `resumeId`, `jobRole`, `experienceLevel`, `overallScore`, `status`, `createdAt`. |
-| FR-010 | Delete resume and associated data | A user can delete their own resume. Deleting a resume also deletes the S3 file and all associated analyses, dimension scores, and rewrite suggestions. This supports the DPDP Act right to erasure. | Must | 1. `DELETE /resumes/:id` returns 204. 2. The S3 file is deleted within `ERASURE_SLA` (K-08): `DELETE` enqueues a `resume-cleanup` job on CMP-010 (same BullMQ instance, `CLEANUP_ATTEMPTS` / `CLEANUP_BACKOFF`, K-33) that calls S3 `DeleteObject`. 3. All rows referencing the resume in `analyses`, `dimension_scores`, `rewrite_suggestions` are cascade-deleted. 4. Attempting to access a deleted resume returns 404. |
+| FR-010 | Delete resume and associated data | A user can delete their own resume. Deleting a resume also deletes the S3 file and all associated analyses, dimension scores, and rewrite suggestions. This supports the DPDP Act right to erasure. | Must | 1. `DELETE /resumes/:id` returns 204. 2. In one DB transaction the API releases the credit of every `pending`/`processing` analysis of the resume (FR-007 AC 2), hard-deletes those analyses (cascade to scores and suggestions) and sets `resumes.deleted_at = now()` (soft delete, TBL-001); every read filters `deleted_at IS NULL`, so the resume and its analyses are gone from the API immediately. 3. After commit the API enqueues a `resume-cleanup` job (CMP-010, `CLEANUP_ATTEMPTS` / `CLEANUP_BACKOFF`, K-33) that calls S3 `DeleteObject` and then hard-deletes the `resumes` row. 4. **Guarantee within `ERASURE_SLA` (K-08):** if the enqueue fails or every job attempt fails, the retention sweep (CMP-008, daily) picks up any row with `deleted_at < now()`, deletes the object and the row itself; no path depends on Redis being up. 5. A Worker that loads an `analysis` job whose row no longer exists ends the job as completed with result `skipped`; nothing is written. 6. Attempting to access a deleted resume or its analyses returns 404. |
 | FR-011 | Resume Pro subscription | A user can subscribe to Resume Pro for `PRO_PRICE` (K-20) via Razorpay. Pro benefits: unlimited analyses, all rewrite suggestions visible, analysis history with score comparison. The subscription auto-renews monthly. Users can cancel anytime; Pro access continues until the end of the paid period. Free users are unchanged. | Must | 1. `POST /subscriptions` creates a Razorpay subscription and returns the `subscriptionId` and `paymentLink`. 2. After successful payment (webhook), the user's derived `tier` (§5.5: computed from TBL-006, cached in Redis `user_tier:{userId}`) becomes `pro`. 3. Pro users bypass the `FREE_MONTHLY_LIMIT` check (K-03). 4. Pro users see all rewrite suggestions (not just the first `FREE_VISIBLE_SUGGESTIONS`, K-04). 5. Cancellation via `POST /subscriptions/:id/cancel` sets `cancelAtPeriodEnd: true`; Pro access remains until `currentPeriodEnd`. 6. After `currentPeriodEnd` the tier reverts to `free` automatically (the derivation rule compares `current_period_end` to `now()`; the daily sweep in CMP-008 marks the row `expired`). 7. Pro-only endpoints (`GET /analyses/compare`) are protected by `ProGuard` and return `ERR_PRO_REQUIRED` (403) for free users. |
 | FR-012 | Razorpay payment integration | The system integrates with Razorpay Subscriptions API. Payment lifecycle: create subscription → user pays on Razorpay checkout → webhook confirms payment → activate Pro. Razorpay webhooks are verified using the `WEBHOOK_SECRET`. | Must | 1. Webhook signature is verified using HMAC-SHA256 with `WEBHOOK_SECRET`; invalid signatures return 400. 2. Webhook events handled: `subscription.activated`, `subscription.charged`, `subscription.cancelled`, `subscription.halted`, `payment.failed`. 3. Each webhook is idempotent (duplicate delivery does not create duplicate records). 4. Payment records are stored with Razorpay `paymentId`, `amount` (in paise), `status`, `method`. |
 | FR-013 | Subscription management | A user can view their subscription status, payment history, and cancel their subscription. | Should | 1. `GET /subscriptions/me` returns current subscription or `null`. 2. `GET /subscriptions/me/payments` returns payment history, paginated. 3. `POST /subscriptions/:id/cancel` cancels at period end. 4. Re-subscribing after cancellation creates a new subscription. |
 | FR-014 | Score comparison | Pro users can compare scores across their analysis history. The comparison shows dimension scores between any two selected analyses side by side. | Should | 1. `GET /analyses/compare?ids=<id1>,<id2>` returns both analyses' dimension scores side by side. 2. Only completed analyses can be compared. 3. Maximum 2 analyses per comparison request. 4. Only the owner of both analyses, or an admin, can compare them; an analysis owned by someone else is answered 404 (§6.1 ownership rule). 5. The endpoint is Pro-gated: a free user (tier per §5.5) receives `ERR_PRO_REQUIRED` (403) before any analysis lookup happens. |
 | FR-015 | List job roles | Any authenticated user can fetch the list of available job roles. | Must | 1. `GET /job-roles` returns `[{ "id": "<uuid>", "name": "<string>", "slug": "<string>" }]`. 2. Results are cached in Redis for `CACHE_TTL` (K-17). |
 | FR-016 | Admin: add job role | An admin can add a new job role. | Could | 1. `POST /job-roles` with `{ "name": "..." }` creates a new role. Slug is auto-generated from name. 2. Duplicate names return `ERR_DUPLICATE_JOB_ROLE` (409). |
-| FR-017 | Retry failed analysis | A user can retry a failed analysis without uploading the resume again and without consuming an additional analysis credit. | Should | 1. `POST /analyses/:id/retry` re-enqueues the same analysis row on the `analysis` queue (CMP-010), resets status to `pending`, clears `error_code`/`error_message`, increments `attempts` and returns `202`. No new credit is reserved. 2. Only analyses with status `failed` can be retried. 3. Retrying a non-failed analysis returns `ERR_ANALYSIS_NOT_FAILED` (400). |
+| FR-017 | Retry failed analysis | A user can retry a failed analysis without uploading the resume again and without consuming an additional analysis credit. | Should | 1. `POST /analyses/:id/retry` re-enqueues the same analysis row on the `analysis` queue (CMP-010): for a free user it first reserves a credit exactly like API-005 (FR-007 AC 2; may answer `ERR_MONTHLY_LIMIT_REACHED`), then sets status `pending`, clears `error_code` / `error_message` / `started_at` / `completed_at` / `heartbeat_at`, increments `manual_retries` and returns `202`. `attempts` is owned by the Worker and not touched here. Because the failed attempt's credit was released, the user never pays twice for one successful analysis. 2. Only analyses with status `failed` can be retried; anything else returns `ERR_ANALYSIS_NOT_FAILED` (400). 3. At most `MAX_MANUAL_RETRIES` (K-31) per analysis, and never when `error_code` is `ERR_TEXT_EXTRACTION_FAILED` (the same file would fail again; the user re-uploads instead): both return `ERR_RETRY_LIMIT_REACHED` (400). |
 
 ### 3.2 Non-functional requirements
 
@@ -217,7 +217,7 @@ Frontend (Next.js) is a separate repository and out of scope for this backend sp
 | NFR-005 | Security — data protection | Personal data in resumes is protected. | Encryption at rest (AES-256) and in transit (TLS 1.2+). No PII in logs. Resume text is not stored in the database; only the S3 key is stored. | Security audit + pen test annually. |
 | NFR-006 | Privacy — data retention | User data is not retained longer than necessary. | Free users: resumes auto-deleted `RETENTION_DAYS` (K-07) after upload. Pro users: resumes auto-deleted `RETENTION_DAYS` after the subscription ends. Deletion job runs at `SWEEP_TIME` (K-27). | Automated test: create resume with past date, run job, verify deletion. |
 | NFR-007 | Observability | The team can monitor and debug the system. | Structured JSON logs (see CR-004). Health endpoint `GET /api/v1/health` (API-019) returns 200 `{ "status": "ok", "services": { "database": "ok", "redis": "ok", "s3": "ok" } }` or 503 with `status: degraded`. Request traces via `X-Request-Id` header propagated to all internal calls and logs. | Dashboard in Datadog/CloudWatch. |
-| NFR-008 | Reliability — AI failure | The system degrades gracefully when OpenAI is down. | If OpenAI returns 5xx or times out (`AI_TIMEOUT`, K-09), the worker job retries per `AI_ATTEMPTS` / `AI_BACKOFF` (K-10 / K-11). If the retry fails, the analysis status is set to `failed` with `error_code = ERR_AI_SERVICE_UNAVAILABLE`, the reserved credit is released, and the client sees the failure on its next poll of `GET /analyses/:id`. Jobs that exhaust attempts stay in the BullMQ `failed` set for `FAILED_JOB_RETENTION` (K-18) for inspection. No data is lost. The rest of the system (uploads, history, PDF download of past analyses) continues to work. | Chaos test: block OpenAI endpoint, verify graceful degradation. |
+| NFR-008 | Reliability — AI failure | The system degrades gracefully when OpenAI is down. | If OpenAI returns 5xx or times out (`AI_TIMEOUT`, K-09), the worker job retries per `AI_ATTEMPTS` / `AI_BACKOFF` (K-10 / K-11). If the retry fails, the analysis status is set to `failed` with `error_code = ERR_AI_SERVICE_UNAVAILABLE` (or `ERR_ANALYSIS_TIMEOUT` / `ERR_AI_RESPONSE_INVALID`, FR-004 AC 5/8), the reserved credit is released, and the client sees the failure on its next poll of `GET /analyses/:id`. A Worker crash leaves no row stuck: the stalled-job sweep (CMP-010) fails any `processing` row whose `heartbeat_at` is older than `JOB_STALL_TIMEOUT` (K-30). Jobs that exhaust attempts stay in the BullMQ `failed` set for `FAILED_JOB_RETENTION` (K-18) for inspection. No data is lost. The rest of the system (uploads, history, PDF download of past analyses) continues to work. | Chaos test: block OpenAI endpoint, verify graceful degradation. |
 | NFR-009 | Testability | The codebase is testable. | Unit test coverage ≥ 80% (lines). Integration tests for all API endpoints. E2E tests for critical flows (upload → analyze → download PDF). Mocked OpenAI in tests. | CI pipeline: `jest --coverage` fails if < 80%. |
 
 ### 3.3 Assumptions and out of scope
@@ -228,6 +228,7 @@ Frontend (Next.js) is a separate repository and out of scope for this backend sp
 3. The OpenAI API is available with an SLA sufficient for our 99.5% uptime target.
 4. The frontend (Next.js) is built and maintained by the frontend team; this spec covers the backend API only.
 5. Razorpay test mode is available for dev/staging; live mode for prod.
+6. No malware scanning of uploads in v1: files are never executed, never served to other users, and only extracted text leaves the system (FR-001 AC 7). Revisit if files are ever shared.
 
 **Out of scope:**
 1. User registration and login (handled by the platform).
@@ -343,18 +344,18 @@ The API never calls OpenAI directly: every analysis runs in the Worker. The Work
 | CMP-002 | PostgreSQL Database | Persistent storage for all structured data: resumes (metadata), analyses, dimension scores, rewrite suggestions, subscriptions, payments, job roles. | PostgreSQL 16 on AWS RDS. Chosen because: (a) required by the brief, (b) JSONB support for flexible AI response storage, (c) strong transaction support for payment recording. |
 | CMP-003 | Redis Cache | Caches the job role list, monthly usage counters (credit reservation, FR-007), rate-limit counters and the derived user tier (`user_tier:{userId}`, §5.5). Also hosts the BullMQ queues used by CMP-010. `maxmemory-policy noeviction` in every environment: queue jobs and usage counters must never be evicted; cache keys expire by TTL instead. | Redis 7.x on AWS ElastiCache. Chosen because: (a) required by the brief, (b) atomic counters for rate limiting and usage tracking, (c) sub-millisecond reads for frequently accessed data, (d) one Redis serves both cache and queue, so no extra broker to run. |
 | CMP-004 | S3 File Storage | Stores uploaded resume files. Files are encrypted at rest. **Upload goes through the API** (multipart, decision D-02) so the API can check size and magic bytes before `PutObject`; **download** uses a presigned GET URL (`PRESIGNED_URL_TTL`, K-16) so file bytes do not stream through the API. | AWS S3 with SSE-S3 encryption. Chosen because: (a) durable (99.999999999%), (b) presigned download URLs keep file bytes off the API server, (c) lifecycle policies automate retention-based deletion. |
-| CMP-005 | AI Analysis Service | Extracts text from resumes, constructs prompts, calls OpenAI GPT-4o, and parses the structured response. Runs inside the Analysis Worker (CMP-010), never in the API request path. | OpenAI GPT-4o API via `openai` npm package (v4.x). Chosen because: (a) GPT-4o balances quality and cost for text analysis, (b) structured JSON output mode reduces parsing errors, (c) extensive documentation and npm SDK. |
+| CMP-005 | AI Analysis Service | Extracts text from resumes, constructs prompts from the dimension catalogue (K-40), calls OpenAI GPT-4o with an `AbortController` signal that fires at `AI_TIMEOUT` (K-09), validates the JSON against the schema in FR-004 AC 8 (truncating over-long lists, rejecting bad shapes), assigns `sort_order` (TBL-004) and computes `overall_score` as the sum of dimension scores. Runs inside the Analysis Worker (CMP-010), never in the API request path. | OpenAI GPT-4o API via `openai` npm package (v4.x). Chosen because: (a) GPT-4o balances quality and cost for text analysis, (b) structured JSON output mode reduces parsing errors, (c) extensive documentation and npm SDK. |
 | CMP-006 | PDF Generator | Renders analysis results into a styled HTML template and converts to PDF. | Puppeteer 22.x with Handlebars 4.x templates. Chosen because: (a) pixel-perfect PDF output matching the web design, (b) supports charts via inline SVG, (c) headless Chrome is well-maintained. |
 | CMP-007 | Razorpay Integration | Manages subscription creation, webhook processing, and payment recording. | Razorpay Node.js SDK (`razorpay` npm). Chosen because: (a) specified in the requirement, (b) native subscription support, (c) INR support with no forex. |
 | CMP-008 | Scheduler | Runs in the Worker process only (never in the API). Daily at `SWEEP_TIME` (K-27): (a) deletes expired resumes and enqueues `resume-cleanup` jobs for their S3 files per retention policy; (b) **subscription expiry sweep** — `UPDATE subscriptions SET status = 'expired' WHERE status IN ('cancelled', 'halted') AND current_period_end < now()`, and `active` rows whose `current_period_end < now() - RENEWAL_GRACE` (K-28), then `DEL user_tier:{userId}` for each affected user. | `@nestjs/schedule` (cron) with a Redis `SET NX` leader lock (TTL 10 min) so only one worker instance runs the job. Chosen because: (a) built into NestJS, (b) the lock makes it safe with 2+ worker tasks. |
 | CMP-009 | Load Balancer | Terminates TLS, enforces `MAX_REQUEST_BODY` (K-02), routes to healthy API instances (target-group health check = API-019, 503 = unhealthy). Forwards `OPTIONS` untouched; CORS lives in the API (CR-007). | AWS ALB. Chosen because: (a) native ECS integration, (b) built-in health checks, (c) TLS termination. |
-| CMP-010 | Analysis Queue + Worker | Decouples the expensive OpenAI call from the HTTP request (decision D-01). Two queues on Redis: `analysis` (jobs: `{ analysisId }`, `AI_ATTEMPTS` / `AI_BACKOFF` (K-10 / K-11), concurrency `WORKER_CONCURRENCY` (K-37) per worker task, `removeOnComplete: 1000`, `removeOnFail: FAILED_JOB_RETENTION` (K-18)) and `resume-cleanup` (jobs: `{ s3Key }`, `CLEANUP_ATTEMPTS` / `CLEANUP_BACKOFF`, K-33). The Worker is a separate ECS service (same image, `PROCESS_ROLE=worker`, min 1 / max 4 tasks, scaled on `analysis` queue depth > 20) that runs CMP-005 and updates `analyses` status `pending → processing → completed | failed`. | BullMQ 5.x (`@nestjs/bullmq`). Chosen because: (a) runs on the Redis we already have, no SQS/RabbitMQ to operate, (b) per-job retries, backoff, timeouts and locks are built in, (c) NestJS integration via decorators (`@Processor`, `@InjectQueue`), (d) Bull Board gives a free admin UI in dev/staging. |
+| CMP-010 | Analysis Queue + Worker | Decouples the expensive OpenAI call from the HTTP request (decision D-01). Two queues on Redis: `analysis` (jobs: `{ analysisId }`, `AI_ATTEMPTS` / `AI_BACKOFF` (K-10 / K-11), concurrency `WORKER_CONCURRENCY` (K-37) per worker task, `removeOnComplete: 1000`, `removeOnFail: FAILED_JOB_RETENTION` (K-18)) and `resume-cleanup` (jobs: `{ s3Key }`, `CLEANUP_ATTEMPTS` / `CLEANUP_BACKOFF`, K-33). The Worker is a separate ECS service (same image, `PROCESS_ROLE=worker`, min 2 / max 5 tasks × `WORKER_CONCURRENCY` (K-37) = 20–50 parallel jobs, scaled out when `analysis` waiting-count > 10, so `MAX_CONCURRENT_ANALYSES` (K-35) is reachable, NFR-001) that runs CMP-005 and owns the `analyses` state machine: `pending → processing → completed \| failed`, plus `failed → pending` via API-010. **Timeouts and stalls (BullMQ 5 has no per-job timeout):** (a) the processor aborts the OpenAI call itself at K-09 (CMP-005) and throws, so BullMQ retries or fails the job; (b) the processor writes `heartbeat_at` on attempt start, after text extraction and after the AI reply; (c) BullMQ `stalledInterval` 30 s / `maxStalledCount` 1 re-queues a job whose worker died once, then fails it; (d) a `QueueEvents` listener in the Worker handles the final `failed` event for any reason (handler exception, stall, abort) by setting the row `failed` with the matching `error_code` and releasing the credit if `credit_reserved`; (e) the **stalled-job sweep** (every minute, Redis `SET NX` lock) runs `UPDATE analyses SET status='failed', error_code='ERR_ANALYSIS_TIMEOUT', completed_at=now() WHERE status='processing' AND heartbeat_at < now() - JOB_STALL_TIMEOUT` (K-30) and releases those credits — this covers a Redis loss where no event can arrive. **Enqueue failure** (API-005/010): the `queue.add` error is caught; the API deletes the `pending` row it just inserted (API-005) or leaves the row `failed` (API-010), releases the credit and answers 503 `ERR_SERVICE_UNAVAILABLE`. | BullMQ 5.x (`@nestjs/bullmq`). Chosen because: (a) runs on the Redis we already have, no SQS/RabbitMQ to operate, (b) per-job retries, backoff, timeouts and locks are built in, (c) NestJS integration via decorators (`@Processor`, `@InjectQueue`), (d) Bull Board gives a free admin UI in dev/staging. |
 
 ### 4.3 Main flows
 
 #### Flow 1: Upload resume
 
-Upload design (decision D-02): the file is sent as `multipart/form-data` **to the API**, which validates it and writes it to S3. There is no presigned PUT upload. Rationale: files are small (at most `MAX_FILE_SIZE`, K-01), and the API must read the first bytes to verify magic bytes (FR-001 AC 6) and reject disguised executables before anything reaches S3. Presigned URLs are used only for **download** (API-003).
+Upload design (decision D-02): the file is sent as `multipart/form-data` **to the API**, which validates it and writes it to S3. There is no presigned PUT upload. Rationale: files are small (at most `MAX_FILE_SIZE`, K-01), and the API must read the first bytes to verify magic bytes (FR-001 AC 6) and reject disguised executables before anything reaches S3. Presigned URLs are used only for **download** (API-003). Order: the DB row is written **before** `PutObject`, so a storage failure is undone with one reliable `DELETE`; an S3 object can never exist without a row, and the nightly sweep (CMP-008) needs no orphan scan.
 
 ```mermaid
 sequenceDiagram
@@ -363,15 +364,19 @@ sequenceDiagram
     participant S3 as AWS S3
     participant DB as PostgreSQL
 
-    U->>A: POST /resumes (multipart, file + metadata)
-    A->>A: Validate JWT, file type, file size, magic bytes
+    U->>A: POST /resumes (multipart, single field "file")
+    A->>A: Validate JWT, size, detected MIME + magic bytes (FR-001 AC 6)
     alt Validation fails
         A-->>U: 400 ERR_INVALID_FILE_TYPE / ERR_FILE_TOO_LARGE / ERR_EMPTY_FILE
     end
-    A->>S3: PutObject (resumes/{userId}/{resumeId}/{fileName})
+    A->>DB: INSERT INTO resumes (id, user_id, file_name, s3_key, mime_type, size, expires_at)
+    DB-->>A: row
+    A->>S3: PutObject (s3_key), timeout EXTERNAL_TIMEOUT (K-39)
+    alt PutObject fails
+        A->>DB: DELETE FROM resumes WHERE id = :id
+        A-->>U: 502 ERR_STORAGE_UNAVAILABLE
+    end
     S3-->>A: 200 OK (ETag)
-    A->>DB: INSERT INTO resumes (id, user_id, file_name, s3_key, ...)
-    DB-->>A: Resume record
     A-->>U: 201 { id, fileName, fileSize, mimeType, uploadedAt }
 ```
 
@@ -397,8 +402,13 @@ sequenceDiagram
             A-->>U: 403 ERR_MONTHLY_LIMIT_REACHED
         end
     end
-    A->>DB: INSERT INTO analyses (status=pending, attempts=0)
+    A->>DB: INSERT INTO analyses (status=pending, attempts=0, credit_reserved, reserved_month)
     A->>R: queue "analysis".add({ analysisId }) (AI_ATTEMPTS / AI_BACKOFF, K-10 / K-11)
+    alt enqueue fails (Redis down)
+        A->>DB: DELETE the pending row
+        A->>R: DECR usage key if credit_reserved (best effort)
+        A-->>U: 503 ERR_SERVICE_UNAVAILABLE
+    end
     A-->>U: 202 { id, status: "pending", pollUrl }
 
     loop every POLL_INTERVAL (K-15) until completed | failed
@@ -408,26 +418,28 @@ sequenceDiagram
     end
 
     R->>W: job { analysisId }
-    W->>DB: UPDATE analyses SET status=processing, started_at=now(), attempts=attempts+1
+    W->>DB: UPDATE analyses SET status=processing, started_at=coalesce(started_at, now()), heartbeat_at=now(), attempts=attempts+1
     W->>S3: GetObject (resume file)
     S3-->>W: File bytes
     W->>W: Extract text (pdf-parse / mammoth)
     alt Text extraction fails (not retried)
-        W->>DB: UPDATE analyses SET status=failed, error_code=ERR_TEXT_EXTRACTION_FAILED
-        W->>R: DECR usage:{userId}:{YYYY-MM} (release credit, free users)
+        W->>DB: UPDATE analyses SET status=failed, error_code=ERR_TEXT_EXTRACTION_FAILED, completed_at=now()
+        W->>R: DECR usage:{userId}:{reserved_month} if credit_reserved, then flag=false
     end
+    W->>DB: UPDATE analyses SET heartbeat_at=now()
     W->>AI: Chat completion (resume text + role + level), timeout AI_TIMEOUT (K-09)
-    alt AI 5xx / timeout
+    alt AI 5xx / 429 / abort at AI_TIMEOUT / invalid JSON shape
         W->>W: throw → BullMQ retries per AI_ATTEMPTS / AI_BACKOFF (K-10 / K-11)
-        alt second attempt fails
-            W->>DB: UPDATE analyses SET status=failed, error_code=ERR_AI_SERVICE_UNAVAILABLE
-            W->>R: DECR usage:{userId}:{YYYY-MM} (release credit, free users)
+        alt last attempt failed (QueueEvents "failed")
+            W->>DB: UPDATE analyses SET status=failed, error_code=ERR_AI_SERVICE_UNAVAILABLE | ERR_ANALYSIS_TIMEOUT | ERR_AI_RESPONSE_INVALID, completed_at=now()
+            W->>R: DECR usage:{userId}:{reserved_month} if credit_reserved, then flag=false
         end
     end
     AI-->>W: Structured JSON (scores, skills, suggestions)
-    W->>W: Validate AI response shape
+    W->>DB: UPDATE analyses SET heartbeat_at=now()
+    W->>W: Validate shape (FR-004 AC 8), truncate lists, assign sort_order, sum scores
     W->>DB: INSERT dimension_scores, rewrite_suggestions
-    W->>DB: UPDATE analyses SET status=completed, overall_score=X, completed_at=now()
+    W->>DB: UPDATE analyses SET status=completed, overall_score=sum, completed_at=now()
 ```
 
 Why async: the OpenAI call can take up to `AI_TIMEOUT` (K-09). Holding an HTTP connection that long collides with `ALB_IDLE_TIMEOUT` (K-38), blocks ECS task scaling on request count, and makes retries double-charge the user. With the queue, the API stays fast (NFR-001: `POST /analyses` p95 < `ENQUEUE_P95`, K-13), retries are a worker concern, and the credit reservation makes the limit race-free.
@@ -483,7 +495,7 @@ sequenceDiagram
 
 | System | Purpose | Protocol / auth | Failure handling |
 |---|---|---|---|
-| OpenAI GPT-4o | Resume analysis (scoring, skills, suggestions) | HTTPS REST. Auth: `Authorization: Bearer <OPENAI_API_KEY>`. Model: `gpt-4o`. Response format: `json_object`. Max tokens: 4096. Temperature: 0.2 (low variance for consistent scoring). | Called only from the Worker (CMP-010). Timeout: `AI_TIMEOUT` (K-09). Retry: per `AI_ATTEMPTS` / `AI_BACKOFF` (K-10 / K-11) on 5xx or timeout. On final failure: set analysis status to `failed`, `error_code = ERR_AI_SERVICE_UNAVAILABLE`, release the credit. Rate limit (429): no retry, same failure handling. The client learns of the failure via `GET /analyses/:id`. |
+| OpenAI GPT-4o | Resume analysis (scoring, skills, suggestions) | HTTPS REST. Auth: `Authorization: Bearer <OPENAI_API_KEY>`. Model: `gpt-4o`. Response format: `json_object`. Max tokens: 4096. Temperature: 0.2 (low variance for consistent scoring). | Called only from the Worker (CMP-010). Timeout: `AI_TIMEOUT` (K-09). Retry: per `AI_ATTEMPTS` / `AI_BACKOFF` (K-10 / K-11) on 5xx or timeout. HTTP 429 is retried exactly like 5xx (same K-10 / K-11 policy, honouring `Retry-After` when it is ≤ K-11, otherwise K-11). On final failure: set analysis status to `failed`, `error_code = ERR_AI_SERVICE_UNAVAILABLE` (or `ERR_ANALYSIS_TIMEOUT` / `ERR_AI_RESPONSE_INVALID`), release the credit. The client learns of the failure via `GET /analyses/:id`. |
 | AWS S3 | Resume file storage | HTTPS. Auth: IAM role (ECS task role). Bucket: `surfingbear-resumes-{env}`. | Timeout: `EXTERNAL_TIMEOUT` (K-39). On failure: return 502. Files are immutable (never overwritten). Lifecycle policy deletes objects tagged `retention-expiry` after 90 days. |
 | Razorpay | Subscription and payment processing | HTTPS REST. Auth: Basic auth (`RAZORPAY_KEY_ID:RAZORPAY_KEY_SECRET`). Webhook: HMAC-SHA256 signature verification using `WEBHOOK_SECRET`. | Timeout: `EXTERNAL_TIMEOUT` (K-39). Webhook delivery: Razorpay retries for 24 h. Idempotent processing: store `razorpay_event_id`, skip duplicates. On Razorpay downtime: subscription creation fails with `ERR_PAYMENT_SERVICE_UNAVAILABLE` (502). Existing active subscriptions continue (status cached in Redis). |
 
@@ -540,6 +552,7 @@ erDiagram
         string mime_type
         int file_size_bytes
         timestamp created_at
+        timestamp deleted_at
         timestamp expires_at
     }
 
@@ -551,6 +564,10 @@ erDiagram
         string experience_level
         string status
         int attempts
+        int manual_retries
+        boolean credit_reserved
+        string reserved_month
+        timestamp heartbeat_at
         int overall_score
         jsonb missing_skills
         string error_code
@@ -628,6 +645,7 @@ Purpose: Stores metadata about uploaded resume files. The actual file is in S3.
 | mime_type | varchar(100) | NO | — | — | `application/pdf` or `application/vnd.openxmlformats-officedocument.wordprocessingml.document`. CHECK constraint limits to these two values. |
 | file_size_bytes | integer | NO | — | — | CHECK: `file_size_bytes > 0 AND file_size_bytes <= MAX_FILE_SIZE` (K-01 in bytes; the migration interpolates the constant). |
 | created_at | timestamptz | NO | IDX | `now()` | |
+| deleted_at | timestamptz | YES | IDX | NULL | Soft-delete marker set by API-004 (FR-010). Every query filters `deleted_at IS NULL`. Rows with a value are finished by the `resume-cleanup` job or the daily sweep (object deleted, then row hard-deleted). |
 | expires_at | timestamptz | YES | IDX | — | `created_at + RETENTION_DAYS` (K-07) for free users; `NULL` while the owner is Pro; `current_period_end + RETENTION_DAYS` once Pro ends. Written only by the rules in NFR-006 / CMP-008. Indexed for the retention sweep. |
 
 #### TBL-002 `analyses`
@@ -640,15 +658,19 @@ Purpose: One row per resume analysis run. Links a resume to its analysis results
 | user_id | uuid | NO | IDX | — | Denormalized from resume for faster queries. Indexed for "my analyses" list. |
 | job_role_id | uuid | NO | FK → job_roles.id | — | ON DELETE RESTRICT (cannot delete a role that has analyses). |
 | experience_level | varchar(10) | NO | — | — | CHECK: `experience_level IN ('entry', 'mid', 'senior', 'lead')`. |
-| status | varchar(20) | NO | IDX | `'pending'` | CHECK: `status IN ('pending', 'processing', 'completed', 'failed')`. Lifecycle (D-01): `pending` (enqueued) → `processing` (worker picked it up) → `completed` \| `failed`. Retry: `failed` → `pending`. Indexed for filtering. |
-| attempts | smallint | NO | — | `0` | Number of worker attempts so far (incremented when the worker starts a job). Max 2 per enqueue; retries via API-010 increase it further. |
-| started_at | timestamptz | YES | — | NULL | Set when the worker transitions the row to `processing`. `started_at - created_at` = queue wait time (NFR-001). |
-| error_code | varchar(50) | YES | — | NULL | One of the codes in §6.3 (`ERR_TEXT_EXTRACTION_FAILED`, `ERR_AI_SERVICE_UNAVAILABLE`). Populated only when status = `failed`; returned to the client by API-007. |
+| status | varchar(20) | NO | IDX | `'pending'` | CHECK: `status IN ('pending', 'processing', 'completed', 'failed')`. State machine (D-01, owned by CMP-010): `pending` (enqueued) → `processing` (worker attempt started) → `completed` \| `failed`; `processing` → `failed` also by the stalled-job sweep (K-30); `failed` → `pending` only via API-010. No other transition exists. Indexed for filtering. |
+| attempts | smallint | NO | — | `0` | Worker attempts started so far, across all enqueues. **Incremented by the Worker only** (attempt start); API-010 never writes it. |
+| manual_retries | smallint | NO | — | `0` | Number of API-010 calls. CHECK: `manual_retries <= MAX_MANUAL_RETRIES` (K-31). |
+| credit_reserved | boolean | NO | — | `false` | `true` while a free-tier credit is held for this row (FR-007 AC 2). Set at enqueue (API-005/010) for free users; set `false` by the single component that releases it. Admins / Pro users: always `false`. |
+| reserved_month | char(7) | YES | — | NULL | `YYYY-MM` (UTC) of the Redis usage key the credit was taken from, so a release after a month boundary decrements the right key and the DB fallback count matches. |
+| heartbeat_at | timestamptz | YES | — | NULL | Written by the Worker at attempt start, after text extraction and after the AI reply. Stalled-job sweep fails `processing` rows with `heartbeat_at < now() - JOB_STALL_TIMEOUT` (K-30). |
+| started_at | timestamptz | YES | — | NULL | Set on the first attempt of the current enqueue (`coalesce(started_at, now())`); reset to NULL by API-010. `started_at - created_at` = queue wait time (NFR-001). |
+| error_code | varchar(50) | YES | — | NULL | One of the resource-level codes in §6.3 (`ERR_TEXT_EXTRACTION_FAILED`, `ERR_AI_SERVICE_UNAVAILABLE`, `ERR_AI_RESPONSE_INVALID`, `ERR_ANALYSIS_TIMEOUT`). Populated only when status = `failed`; cleared by API-010; returned by API-007. |
 | overall_score | smallint | YES | — | NULL | Range 0–100. NULL until analysis completes. CHECK: `overall_score >= 0 AND overall_score <= 100`. |
 | missing_skills | jsonb | YES | — | NULL | Array of `{ "name": "...", "reason": "..." }`. NULL until analysis completes. Stored as JSONB for flexible querying. |
 | error_message | text | YES | — | NULL | Populated only when status = `failed`. Contains a safe error description (no internal details). |
 | created_at | timestamptz | NO | IDX | `now()` | Indexed for sorting by date. |
-| completed_at | timestamptz | YES | — | NULL | Set when status transitions to `completed` or `failed`. |
+| completed_at | timestamptz | YES | — | NULL | Set when status transitions to `completed` or `failed`; reset to NULL by API-010. |
 
 #### TBL-003 `dimension_scores`
 Purpose: Per-dimension breakdown of an analysis score. Always 7 rows per completed analysis.
@@ -742,11 +764,15 @@ Purpose: Records every payment event from Razorpay. Immutable audit log.
 | resumes | `idx_resumes_user_id` | `user_id` | Filter resumes by user for "my resumes" list. |
 | resumes | `idx_resumes_expires_at` | `expires_at` | Retention cron job queries `WHERE expires_at < now()`. |
 | resumes | `idx_resumes_created_at` | `created_at` | Sort by upload date. |
+| resumes | `idx_resumes_deleted_at` | `deleted_at` (partial: `WHERE deleted_at IS NOT NULL`) | Daily sweep finds soft-deleted rows whose object is still in S3 (FR-010 AC 4). |
 | analyses | `idx_analyses_user_id_created_at` | `user_id, created_at DESC` | "My analyses" list sorted by date. Compound index covers both filter and sort. |
 | analyses | `idx_analyses_resume_id` | `resume_id` | FK lookup and cascade delete. |
 | analyses | `idx_analyses_status` | `status` | Filter by status. |
+| analyses | `idx_analyses_stalled` | `heartbeat_at` (partial: `WHERE status = 'processing'`) | Stalled-job sweep every minute (CMP-010). |
+| analyses | `idx_analyses_credit_month` | `user_id, reserved_month` (partial: `WHERE credit_reserved`) | Redis-down fallback count for FR-007. |
 | dimension_scores | `idx_dimension_scores_analysis_id` | `analysis_id` | Join to fetch scores for an analysis. |
 | rewrite_suggestions | `idx_rewrite_suggestions_analysis_id` | `analysis_id` | Join to fetch suggestions for an analysis. |
+| rewrite_suggestions | `uq_rewrite_suggestions_order` | `analysis_id, sort_order` (unique) | One position per suggestion; free-tier slice is deterministic (TBL-004). |
 | subscriptions | `idx_subscriptions_user_id` | `user_id` | Look up user's subscription. |
 | subscriptions | `idx_subscriptions_current_period_end` | `current_period_end` | Expiry check cron. |
 | subscriptions | `idx_subscriptions_razorpay_sub_id` | `razorpay_subscription_id` | Webhook lookup by Razorpay ID. |
@@ -856,6 +882,8 @@ LIMIT 1;
 | 400 | ERR_FILE_TOO_LARGE | File exceeds `MAX_FILE_SIZE` (K-01). |
 | 400 | ERR_EMPTY_FILE | File is 0 bytes. |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 413 | ERR_PAYLOAD_TOO_LARGE | Whole request above `MAX_REQUEST_BODY` (K-02); the handler never runs. A file between K-01 and K-02 gets ERR-004 instead. |
+| 502 | ERR_STORAGE_UNAVAILABLE | `PutObject` failed; the row inserted for it is deleted again (Flow 1). |
 
 ---
 
@@ -882,12 +910,15 @@ LIMIT 1;
       "fileSize": 245760,
       "mimeType": "application/pdf",
       "uploadedAt": "2026-10-22T10:30:00.000Z",
-      "analysisCount": 2
+      "analysisCount": 2,
+      "expiresAt": "2027-01-20T10:30:00.000Z"
     }
   ],
   "meta": { "page": 1, "limit": 10, "total": 3, "totalPages": 1 }
 }
 ```
+
+`analysisCount` = analyses of this resume in status `completed`. `expiresAt` = `resumes.expires_at` (NULL for Pro users, NFR-006). Soft-deleted resumes are never listed.
 
 **Errors**
 
@@ -921,7 +952,7 @@ LIMIT 1;
 }
 ```
 
-The `downloadUrl` is a presigned S3 URL valid for `PRESIGNED_URL_TTL` (K-16).
+The `downloadUrl` is a presigned S3 URL valid for `PRESIGNED_URL_TTL` (K-16). Presigning is local (no S3 round trip); only a mis-configured credential makes it fail (502 `ERR_STORAGE_UNAVAILABLE`).
 
 **Errors**
 
@@ -933,7 +964,7 @@ The `downloadUrl` is a presigned S3 URL valid for `PRESIGNED_URL_TTL` (K-16).
 ---
 
 #### API-004 `DELETE /api/v1/resumes/:id`
-- **Purpose:** Delete a resume and all associated analyses, scores, and suggestions. S3 file deleted async.
+- **Purpose:** Delete a resume and all associated analyses, scores, and suggestions (FR-010): one transaction releases in-flight credits, hard-deletes the analyses and soft-deletes the resume; the S3 object is removed by the `resume-cleanup` job or, failing that, by the daily sweep within `ERASURE_SLA` (K-08). Pending or processing analyses do not block deletion.
 - **Auth / role:** `user` (own only), `admin` (any)
 - **Implements:** FR-010
 
@@ -1157,7 +1188,7 @@ The **Analysis resource** shown under API-005, in whichever state the row is in.
 }
 ```
 
-`used` counts analyses reserved this month (pending + processing + completed; failed ones are released). `tier` and `proUntil` come from §5.5. For Pro users: `"limit": null` (unlimited), `"tier": "pro"`, `"proUntil": "<current_period_end>"`.
+`used` counts analyses reserved this month (pending + processing + completed; failed ones are released) — i.e. the Redis counter, or its DB fallback (FR-007 AC 5). `tier` and `proUntil` come from §5.5. For Pro users and admins: `"limit": null` (unlimited), `"tier": "pro"`, `"proUntil": "<current_period_end>"` (`null` for admins), and `used` = count of this month's non-failed analyses from the DB (informational only).
 
 **Errors**
 
@@ -1189,7 +1220,7 @@ The **Analysis resource** shown under API-005, in whichever state the row is in.
 }
 ```
 
-The row's `status` is reset to `pending`, `error_code`/`error_message` are cleared, and a new job is added to the `analysis` queue. The client polls `pollUrl` as in API-005.
+For a free user a credit is reserved first exactly as in API-005 (FR-007 AC 2). Then the row's `status` is reset to `pending`, `error_code` / `error_message` / `started_at` / `completed_at` / `heartbeat_at` are cleared, `manual_retries` is incremented, and a new job is added to the `analysis` queue. `attempts` is left to the Worker. The client polls `pollUrl` as in API-005. The sample above shows `attempts: 2` because the first enqueue used both BullMQ attempts.
 
 **Errors**
 
@@ -1198,6 +1229,7 @@ The row's `status` is reset to `pending`, `error_code`/`error_message` are clear
 | 400 | ERR_ANALYSIS_NOT_FAILED | Analysis status is not `failed` (including `pending`/`processing`). |
 | 400 | ERR_RETRY_LIMIT_REACHED | `MAX_MANUAL_RETRIES` (K-31) already used, or the failure is `ERR_TEXT_EXTRACTION_FAILED` (deterministic; re-upload instead). |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 403 | ERR_MONTHLY_LIMIT_REACHED | Free user and the monthly limit (K-03) is reached at retry time. |
 | 404 | ERR_ANALYSIS_NOT_FOUND | Analysis ID does not exist or is not owned by the caller (§6.1). |
 | 429 | ERR_RATE_LIMITED | `RATE_LIMIT_ANALYSIS` (K-25) exceeded. |
 | 503 | ERR_SERVICE_UNAVAILABLE | Redis/BullMQ unavailable so the job could not be enqueued; status stays `failed`. |
