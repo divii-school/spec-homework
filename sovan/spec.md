@@ -26,7 +26,7 @@ Rules every Divii / Hanriver project must follow. Each rule has an ID and must b
 | CR-009 | Security — rate limiting | Global rate limit: `RATE_LIMIT_USER` (K-23) per user (keyed by `userId` from JWT). Unauthenticated requests: `RATE_LIMIT_ANON` (K-24) per IP. Analysis endpoints (`POST /analyses`, `POST /analyses/:id/retry`): `RATE_LIMIT_ANALYSIS` (K-25) per user, because each job costs money. Limits enforced via `@nestjs/throttler` backed by Redis. Exceeded → `429 Too Many Requests`. | Load test in staging. |
 | CR-010 | Security — data at rest | All resume files in S3 are encrypted with AES-256 (SSE-S3). The PostgreSQL database uses volume-level encryption (AWS RDS encryption). Redis is configured with `requirepass` and TLS in staging/prod. | Infrastructure review + AWS config audit. |
 | CR-011 | Security — data in transit | All traffic uses HTTPS (TLS 1.2+). Internal service-to-service calls (API ↔ S3, API ↔ OpenAI, API ↔ Redis) use TLS. HTTP requests are redirected to HTTPS via the load balancer. | SSL Labs scan ≥ A rating. |
-| CR-012 | Privacy — DPDP Act | Resumes contain personal data (name, email, phone, address, work history). Under India's DPDP Act 2023: (a) resumes are processed only for the stated purpose (analysis); (b) users can request deletion of their data at any time via `DELETE /resumes/:id`; (c) deleted data is hard-deleted from S3 and the database within `ERASURE_SLA` (K-08) (FR-010 AC 4 guarantees it without depending on Redis); (d) data retention: free users' resumes are auto-deleted `RETENTION_DAYS` (K-07) after upload; Pro users' resumes are retained while the subscription is active and deleted `RETENTION_DAYS` after the subscription ends (owner of the rule: NFR-006 / CMP-008); (e) no resume data is shared with third parties except the AI provider (OpenAI) for analysis; (f) the AI analysis prompt instructs the model not to store or learn from the data; (g) **full erasure** (FR-018, API-020): resumes and analyses are removed as in FR-010; `subscriptions`, `payments` and `webhook_events` are **financial records kept 7 years** (Indian tax retention) with `user_id` replaced by `sha256(user_id)` so they no longer identify the person; an `active`/`pending` subscription is cancelled at Razorpay immediately, without refund of the running period. | Annual DPDP compliance audit + automated retention job test. |
+| CR-012 | Privacy — DPDP Act | Resumes contain personal data (name, email, phone, address, work history). Under India's DPDP Act 2023: (a) resumes are processed only for the stated purpose (analysis); (b) users can request deletion of their data at any time via `DELETE /resumes/:id`; (c) deleted data is hard-deleted from S3 and the database within `ERASURE_SLA` (K-08) (FR-010 AC 4 guarantees it without depending on Redis); (d) data retention: free users' resumes are auto-deleted `RETENTION_DAYS` (K-07) after upload; Pro users' resumes are retained while the subscription is active and deleted `RETENTION_DAYS` after the subscription ends (owner of the rule: NFR-006 / CMP-008); (e) no resume data is shared with third parties except the AI provider (OpenAI) for analysis; (f) the AI analysis prompt instructs the model not to store or learn from the data; (g) **full erasure** (FR-018, API-020): resumes and analyses are removed as in FR-010; `subscriptions`, `payments` and `webhook_events` are **financial records kept 7 years** (Indian tax retention) with `user_id` set to NULL, `user_hash = sha256(user_id)` and PII keys in stored payloads redacted, so they no longer identify the person; an `active`/`pending` subscription is cancelled at Razorpay immediately, without refund of the running period. | Annual DPDP compliance audit + automated retention job test. |
 | CR-013 | i18n | All API responses are in English. All dates are stored as ISO-8601 UTC in the database and returned as ISO-8601 UTC in API responses. The frontend converts to the user's local timezone. Currency amounts are stored as integers in paise (1 ₹ = 100 paise) to avoid floating-point errors. Currency display format: `₹X.XX` (INR, 2 decimal places). | Code review: no hardcoded timezone offsets in backend. |
 | CR-014 | Environments | Four environments: `local` (developer laptop, Docker Compose, mock OpenAI), `dev` (shared, real AWS, OpenAI sandbox key, seeded test data), `staging` (mirrors prod infra, production OpenAI key with low limits, used for QA and build test), `prod` (production). Env-specific config: `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `S3_BUCKET`, `ALLOWED_ORIGINS`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_PLAN_ID` (the Resume Pro plan created once per environment in the Razorpay dashboard, `PRO_PRICE` K-20), `WEBHOOK_SECRET`, `PLATFORM_JWKS_URL`, `PLATFORM_LOGIN_URL` (§1.3). | Deploy pipeline enforces env-specific secrets via AWS Parameter Store. |
 | CR-015 | Deployment | CI/CD via GitHub Actions. Pipeline: lint → test → build → deploy. Deployment to dev: auto on push to `develop`. Deployment to staging: auto on push to `release/*`. Deployment to prod: manual approval after staging QA passes. Rollback: re-deploy the previous Docker image tag. Zero-downtime deploys via rolling update (ECS Fargate, minimum healthy 50%). Database migrations run before deploy via `typeorm migration:run` in a one-off task. | Deployment runbook + pipeline config. |
@@ -237,8 +237,8 @@ Frontend (Next.js) is a separate repository; this spec covers the backend and fi
 | FR-014 | Score comparison | Pro users can compare scores across their analysis history. The comparison shows dimension scores between any two selected analyses side by side. | Should | 1. `GET /analyses/compare?ids=<id1>,<id2>` returns both analyses' dimension scores side by side. 2. Only completed analyses can be compared. 3. Maximum 2 analyses per comparison request. 4. Only the owner of both analyses, or an admin, can compare them; an analysis owned by someone else is answered 404 (§6.1 ownership rule). 5. The endpoint is Pro-gated: a free user (tier per §5.5) receives `ERR_PRO_REQUIRED` (403) before any analysis lookup happens. |
 | FR-015 | List job roles | Any authenticated user can fetch the list of available job roles. | Must | 1. `GET /job-roles` returns `[{ "id": "<uuid>", "name": "<string>", "slug": "<string>" }]`. 2. Results are cached in Redis for `CACHE_TTL` (K-17). |
 | FR-016 | Admin: add job role | An admin can add a new job role. | Could | 1. `POST /job-roles` with `{ "name": "..." }` creates a new role. Slug is auto-generated from name. 2. A name that already exists case-insensitively after trimming, or whose generated slug collides with an existing slug, returns `ERR_DUPLICATE_JOB_ROLE` (409). 3. Slug = lowercase, non-alphanumerics collapsed to single `-`, trimmed of `-`, max 100 chars. |
-| FR-018 | Erase a user's data (DPDP request) | The platform (or an admin on a user's written request) erases everything this module holds about a user: resumes, analyses, cached tier and usage counters; financial records are pseudonymised, not deleted (CR-012 g). | Must | 1. `DELETE /users/:userId/data` (API-020, admin only) returns 202 and is idempotent. 2. Every live resume of the user is processed exactly like FR-010 (soft delete, cleanup job, sweep guarantee within `ERASURE_SLA` K-08). 3. An `active` or `pending` subscription is cancelled at Razorpay immediately (`cancel_at_cycle_end = 0`); `cancelled`/`halted` rows are left to expire. 4. `subscriptions`, `payments`, `webhook_events` rows of the user get `user_id = sha256(user_id)` and `erased_at = now()`; they are never returned by any API again. 5. Redis keys `user_tier:{userId}` and `usage:{userId}:*` are deleted. 6. The platform owns the account itself; this endpoint does not touch it. |
-| FR-017 | Retry failed analysis | A user can retry a failed analysis without uploading the resume again and without consuming an additional analysis credit. | Should | 1. `POST /analyses/:id/retry` re-enqueues the same analysis row on the `analysis` queue (CMP-010): for a free user it first reserves a credit exactly like API-005 (FR-007 AC 2; may answer `ERR_MONTHLY_LIMIT_REACHED`), then sets status `pending`, clears `error_code` / `error_message` / `started_at` / `completed_at` / `heartbeat_at`, increments `manual_retries` and returns `202`. `attempts` is owned by the Worker and not touched here. Because the failed attempt's credit was released, the user never pays twice for one successful analysis. 2. Only analyses with status `failed` can be retried; anything else returns `ERR_ANALYSIS_NOT_FAILED` (400). 3. At most `MAX_MANUAL_RETRIES` (K-31) per analysis, and never when `error_code` is `ERR_TEXT_EXTRACTION_FAILED` (the same file would fail again; the user re-uploads instead): both return `ERR_RETRY_LIMIT_REACHED` (400). |
+| FR-018 | Erase a user's data (DPDP request) | The platform (or an admin on a user's written request) erases everything this module holds about a user: resumes, analyses, cached tier and usage counters; financial records are pseudonymised, not deleted (CR-012 g). | Must | 1. `DELETE /users/:userId/data` (API-020, admin only) returns 202 and is idempotent. 2. Every live resume of the user is processed exactly like FR-010 (soft delete, cleanup job, sweep guarantee within `ERASURE_SLA` K-08). 3. Every live subscription row (`LIVE_STATUSES`, §5.6) is cancelled at Razorpay immediately (`cancel_at_cycle_end = 0`, which also kills an open `created` checkout) and set to `expired` with `current_period_end = LEAST(current_period_end, now())`. 4. Financial rows are pseudonymised, not deleted (CR-012 g): `subscriptions` of the user get `user_id = NULL`, `user_hash = sha256(user_id)`, `erased_at = now()`; their `payments` (via `subscription_id`) get `erased_at`; their `webhook_events` (via `razorpay_subscription_id` of those subscriptions) get `erased_at` and the PII keys inside `payload` (`payment.entity.email`, `payment.entity.contact`, `customer_*`, `subscription.entity.notes`) replaced by `"[erased]"`. None of these rows is returned by any API again. 5. Redis keys `user_tier:{userId}` and `usage:{userId}:*` are deleted. 6. The platform owns the account itself; this endpoint does not touch it. |
+| FR-017 | Retry failed analysis | A user can retry a failed analysis without uploading the resume again and without paying twice (the failed attempt's credit was released; the retry reserves one). | Should | 1. `POST /analyses/:id/retry` re-enqueues the same analysis row on the `analysis` queue (CMP-010): for a free user it first reserves a credit exactly like API-005 (FR-007 AC 2; may answer `ERR_MONTHLY_LIMIT_REACHED`), then sets status `pending`, clears `error_code` / `error_message` / `started_at` / `completed_at` / `heartbeat_at`, increments `manual_retries` and returns `202`. `attempts` is owned by the Worker and not touched here. Because the failed attempt's credit was released, the user never pays twice for one successful analysis. 2. Only analyses with status `failed` can be retried; anything else returns `ERR_ANALYSIS_NOT_FAILED` (400). 3. At most `MAX_MANUAL_RETRIES` (K-31) per analysis, and never when `error_code` is `ERR_TEXT_EXTRACTION_FAILED` (the same file would fail again; the user re-uploads instead): both return `ERR_RETRY_LIMIT_REACHED` (400). |
 
 ### 3.2 Non-functional requirements
 
@@ -710,7 +710,7 @@ Purpose: Stores metadata about uploaded resume files. The actual file is in S3.
 | id | uuid | NO | PK | `gen_random_uuid()` | |
 | user_id | uuid | NO | IDX | — | User from JWT. Not an FK (user table is in the platform DB). Indexed for "my resumes" queries. |
 | file_name | varchar(255) | NO | — | — | Original file name as uploaded. Max 255 chars. |
-| s3_key | varchar(512) | NO | UQ | — | Full S3 object key. Unique to prevent duplicates. Format: `resumes/{userId}/{resumeId}/{fileName}`. |
+| s3_key | varchar(512) | NO | UQ | — | Full S3 object key. Unique to prevent duplicates. Format: `resumes/{userId}/{resumeId}/{safeName}` — `safeName` as defined in FR-001 AC 5 (sanitised, ≤ 100 chars); the original name lives in `file_name`. |
 | mime_type | varchar(100) | NO | — | — | `application/pdf` or `application/vnd.openxmlformats-officedocument.wordprocessingml.document`. CHECK constraint limits to these two values. |
 | file_size_bytes | integer | NO | — | — | CHECK: `file_size_bytes > 0 AND file_size_bytes <= MAX_FILE_SIZE` (K-01 in bytes; the migration interpolates the constant). |
 | created_at | timestamptz | NO | IDX | `now()` | |
@@ -800,7 +800,8 @@ Purpose: Tracks Resume Pro subscriptions linked to Razorpay. One active subscrip
 | Column | Type | Null | Key | Default | Constraint / note |
 |---|---|---|---|---|---|
 | id | uuid | NO | PK | `gen_random_uuid()` | |
-| user_id | uuid | NO | IDX | — | Indexed. Partial unique index: `CREATE UNIQUE INDEX uq_subscriptions_user_live ON subscriptions(user_id) WHERE status IN ('created', 'active', 'pending', 'cancelled')` — at most one non-terminal subscription per user; `created` rows stop blocking after K-29 because the sweep expires them (§5.6). |
+| user_id | uuid | YES | IDX | — | Platform user id. **NULL only after FR-018 erasure** (then `user_hash` identifies the person's rows without identifying the person). Partial unique index: `CREATE UNIQUE INDEX uq_subscriptions_user_live ON subscriptions(user_id) WHERE status IN (<LIVE_STATUSES>) AND erased_at IS NULL` — at most one live subscription per user (`LIVE_STATUSES` defined once in §5.6: `created, active, pending, cancelled, halted`); `created` rows stop blocking after K-29 and `halted` rows after the next sweep (§5.6). |
+| user_hash | char(64) | YES | IDX | NULL | `sha256(user_id)` written by FR-018 together with `user_id = NULL`; lets an auditor group one erased person's financial rows. |
 | razorpay_subscription_id | varchar(50) | NO | UQ | — | Razorpay's subscription ID (e.g., `sub_xxxxx`). Unique. |
 | razorpay_plan_id | varchar(50) | NO | — | — | Razorpay plan ID (e.g., `plan_xxxxx`), taken from `RAZORPAY_PLAN_ID` (CR-014). The Pro plan: `PRO_PRICE` (K-20). |
 | status | varchar(20) | NO | IDX | `'created'` | CHECK: `status IN ('created', 'active', 'pending', 'cancelled', 'halted', 'expired')`. `created` = awaiting first payment (dies after K-29). `active` = paid. `pending` = renewal charge failed, Razorpay retrying, Pro continues for K-28. `cancelled` = cancelled by user / Razorpay / plan completed, access until period end. `halted` = retries exhausted, Pro ended. `expired` = terminal. Transitions only per §5.6. |
@@ -809,7 +810,7 @@ Purpose: Tracks Resume Pro subscriptions linked to Razorpay. One active subscrip
 | cancel_at_period_end | boolean | NO | — | `false` | `true` if user has cancelled but period hasn't ended yet. |
 | razorpay_customer_id | varchar(50) | NO | — | — | Razorpay customer (`cust_xxxxx`), created once per user and reused on re-subscribe. |
 | last_event_at | timestamptz | YES | — | NULL | `created_at` of the newest **applied** webhook event (§5.6 stale check). |
-| erased_at | timestamptz | YES | — | NULL | Set by FR-018; `user_id` then holds `sha256(user_id)` and the row is invisible to every API. |
+| erased_at | timestamptz | YES | — | NULL | Set by FR-018 together with `user_id = NULL`, `user_hash`; the row is invisible to every API (all queries add `erased_at IS NULL`). |
 | created_at | timestamptz | NO | — | `now()` | |
 | updated_at | timestamptz | NO | — | `now()` | Updated on every status change. |
 
@@ -841,6 +842,7 @@ Purpose: One row per Razorpay webhook delivery — the idempotency key for **eve
 | event_type | varchar(60) | NO | IDX | — | e.g. `subscription.charged`. |
 | razorpay_subscription_id | varchar(50) | YES | IDX | NULL | `payload.subscription.entity.id` when present. Not an FK (unknown ids are stored too). |
 | event_created_at | timestamptz | NO | — | — | `payload.created_at` (Unix seconds → timestamptz). Compared with `subscriptions.last_event_at`. |
+| erased_at | timestamptz | YES | — | NULL | Set by FR-018 when the owning subscription is erased; `payload` PII keys are redacted at the same time. |
 | received_at | timestamptz | NO | — | `now()` | |
 | outcome | varchar(30) | NO | — | — | CHECK: `outcome IN ('applied', 'ignored_stale', 'ignored_unhandled', 'unknown_subscription')`. |
 | payload | jsonb | NO | — | — | Full event body for audit / replay. |
@@ -921,6 +923,8 @@ LIMIT 1;
 
 ### 5.6 Subscription lifecycle and webhook rules (FR-011 – FR-013, decision D-04)
 
+**Status sets** (the only definitions): `LIVE_STATUSES = ('created', 'active', 'pending', 'cancelled', 'halted')` — rows that still matter and block a new checkout; `TERMINAL = ('expired')`. API-015 returns the newest `LIVE_STATUSES` row; the TBL-006 partial unique index uses the same set.
+
 **Status machine of TBL-006** — every allowed transition and who makes it. Anything not listed is rejected and logged at `warn`.
 
 | From | To | Trigger | Side effects |
@@ -930,12 +934,13 @@ LIMIT 1;
 | `created` | `expired` | sweep, row older than K-29 | Razorpay `cancel` best-effort; user may subscribe again |
 | `active` | `pending` | `subscription.pending` | failed payment upserted with `status = failed`; Pro continues for K-28 (§5.5) |
 | `pending` | `active` | `subscription.activated` / `subscription.charged` | period end = `GREATEST(current, payload.current_end)`, payment upsert, `DEL user_tier` |
-| `pending` | `halted` | `subscription.halted`, or sweep after `current_period_end + K-28` | Pro ends; `DEL user_tier`; NFR-006 downgrade rule |
+| `pending` | `halted` | `subscription.halted`, or sweep after `current_period_end + K-28` | Pro ends; `DEL user_tier`; the NFR-006 downgrade is applied by the **next sweep** (the webhook handler never writes `expires_at`) |
 | `halted` | `active` | `subscription.activated` (user paid manually in Razorpay's hosted page) | as `created → active` |
+| `active` | `active` | `subscription.charged` / `subscription.activated` (renewal) | `current_period_start = payload.current_start`, `current_period_end = GREATEST(current, payload.current_end)`, payment upsert, `DEL user_tier` |
 | `active` / `pending` | `cancelled` | API-016 (sets it locally **in the request**) or `subscription.cancelled` (idempotent) | `cancel_at_period_end = true`; `current_period_end` unchanged; Pro continues until then |
 | `active` | `cancelled` | `subscription.completed` (plan's `total_count` reached) | same as cancelled; Pro until period end |
-| `cancelled` / `halted` | `expired` | sweep, `current_period_end < now()` | NFR-006 downgrade rule, `DEL user_tier` |
-| any live status | `cancelled` immediately | FR-018 erasure | Razorpay `cancel` with `cancel_at_cycle_end = 0`; rows pseudonymised |
+| `cancelled` / `halted` | `expired` | sweep (`cancelled`: `current_period_end < now()`; `halted`: on the next sweep run regardless of period end — the grace already passed) | NFR-006 downgrade rule, `DEL user_tier` |
+| any `LIVE_STATUSES` row | `expired` immediately | FR-018 erasure | Razorpay `cancel` with `cancel_at_cycle_end = 0` (kills an open checkout too); `current_period_end = LEAST(current_period_end, now())`; rows pseudonymised |
 
 **Webhook handling (API-018), in this order for every delivery:**
 1. Verify `X-Razorpay-Signature` on the raw body → else 400, nothing stored.
@@ -950,7 +955,7 @@ LIMIT 1;
 |---|---|
 | `subscription.authenticated` | no state change (first charge follows); `last_event_at` updated |
 | `subscription.activated` | `created`/`pending`/`halted` → `active`; period from `current_start` / `current_end` |
-| `subscription.charged` | upsert payment (`captured`); `current_period_end = GREATEST(current, payload.current_end)`; `pending`/`halted` → `active` |
+| `subscription.charged` | upsert payment (`captured`); `current_period_start = payload.current_start`, `current_period_end = GREATEST(current, payload.current_end)`; `created`/`pending`/`halted` → `active`, `active` stays `active` |
 | `subscription.pending` | `active` → `pending`; upsert the failed payment if the payload carries one |
 | `subscription.halted` | `pending` → `halted` |
 | `subscription.cancelled` | → `cancelled` (no-op if already cancelled by API-016) |
@@ -980,7 +985,7 @@ LIMIT 1;
 - **Async operations (D-01):** `POST /analyses` and `POST /analyses/:id/retry` return `202 Accepted` with `{ "id", "status": "pending", "pollUrl" }`. The client polls `pollUrl` (= `GET /analyses/:id`) every `POLL_INTERVAL` (K-15) until `status` is `completed` or `failed`. Failures of the background job are reported in that resource (`status: "failed"`, `errorCode`, `errorMessage`), never as an HTTP error of the original POST.
 - **Pro gating (D-03):** Pro-only endpoints carry `ProGuard` and return `ERR_PRO_REQUIRED` (403) for free users before any other validation. Currently: API-011 only. Admins pass the guard (§5.5).
 - **Ownership rule (no ID probing):** a resource that exists but belongs to another user is answered **404 with that resource's not-found code** (`ERR_RESUME_NOT_FOUND`, `ERR_ANALYSIS_NOT_FOUND`, `ERR_SUBSCRIPTION_NOT_FOUND`), exactly as if it did not exist. `ERR_FORBIDDEN` (403) is used **only** for role failures (a non-admin calling an admin endpoint). Admins read any resume or analysis by id; subscriptions are always own-only.
-- **Errors every endpoint may return (not repeated in the per-endpoint tables):** 400 `ERR_VALIDATION` (pipe failure, see mapping), 401 `ERR_UNAUTHORIZED` (every endpoint except API-018 and API-019), 413 `ERR_PAYLOAD_TOO_LARGE` (body above K-02), 429 `ERR_RATE_LIMITED`, 500 `ERR_INTERNAL`, 502 `ERR_STORAGE_UNAVAILABLE` (endpoints that touch S3: API-001, API-003, API-004), 503 `ERR_SERVICE_UNAVAILABLE` (Redis, BullMQ or PostgreSQL unreachable). Per-endpoint tables list only the codes specific to that endpoint.
+- **Errors every endpoint may return (not repeated in the per-endpoint tables):** 400 `ERR_VALIDATION` (pipe failure, see mapping), 401 `ERR_UNAUTHORIZED` (every endpoint except API-018 and API-019), 413 `ERR_PAYLOAD_TOO_LARGE` (body above K-02), 429 `ERR_RATE_LIMITED`, 500 `ERR_INTERNAL`, 502 `ERR_STORAGE_UNAVAILABLE` (endpoints that touch S3 synchronously: API-001, API-003), 503 `ERR_SERVICE_UNAVAILABLE` (Redis, BullMQ or PostgreSQL unreachable). Per-endpoint tables list only the codes specific to that endpoint.
 - **Validation → error code mapping:** a specific code wins over the generic one. `experienceLevel` outside the enum → `ERR_INVALID_EXPERIENCE_LEVEL`; `ids` on API-011 not exactly 2 UUIDs → `ERR_INVALID_COMPARISON`; file MIME / size / empty → ERR-003 / ERR-004 / ERR-005. Everything else the pipe rejects (missing field, wrong type, malformed UUID in body, query or path, unknown field) → `ERR_VALIDATION` with `details: [{ "field": "<name>", "constraint": "<rule>" }]` (max `ERROR_DETAILS_MAX`, K-34). A well-formed `jobRoleId` that matches no role → `ERR_INVALID_JOB_ROLE` (service lookup); a well-formed `resumeId` that is unknown or not owned → `ERR_RESUME_NOT_FOUND`.
 - **Rate-limit scope:** `RATE_LIMIT_USER` (K-23) on every JWT endpoint; `RATE_LIMIT_ANALYSIS` (K-25) additionally on API-005 and API-010; `RATE_LIMIT_ANON` (K-24) on unauthenticated requests. API-018 and API-019 are **exempt** from throttling (Razorpay re-delivers in bursts; monitors poll every minute); API-018 is protected by its signature instead.
 - **Route order:** the static routes `/analyses/usage` (API-009) and `/analyses/compare` (API-011) are declared before `/analyses/:id` in `AnalysesController`; otherwise `ParseUuidPipe` on `:id` would answer them with `ERR_VALIDATION`.
@@ -1336,7 +1341,7 @@ The **Analysis resource** shown under API-005, in whichever state the row is in.
 ---
 
 #### API-010 `POST /api/v1/analyses/:id/retry`
-- **Purpose:** Retry a failed analysis by re-enqueueing it (D-01). No new credit is reserved.
+- **Purpose:** Retry a failed analysis by re-enqueueing it (D-01). For a free-tier **owner** a credit is reserved again (FR-007 AC 2) — the failed attempt's credit was released, so a successful analysis still costs exactly one credit.
 - **Auth / role:** `user` (own), `admin` (any)
 - **Implements:** FR-017
 
@@ -1525,7 +1530,7 @@ Invalidates Redis cache key `job_roles:list`.
 ---
 
 #### API-015 `GET /api/v1/subscriptions/me`
-- **Purpose:** Get the current user's newest non-terminal subscription (`created`, `active`, `pending`, `cancelled`, `halted`), or `null` when every row is `expired` or none exists.
+- **Purpose:** Get the current user's newest `LIVE_STATUSES` row (§5.6: `created`, `active`, `pending`, `cancelled`, `halted`), or `null` when every row is `expired` or none exists.
 - **Auth / role:** `user`, `admin`
 - **Implements:** FR-013
 
@@ -1566,7 +1571,7 @@ Invalidates Redis cache key `job_roles:list`.
 
 | Field | In | Type | Required | Validation |
 |---|---|---|---|---|
-| id | path | uuid | Yes | Valid UUID. Must be an `active` subscription owned by the caller. |
+| id | path | uuid | Yes | Valid UUID. Must be an `active` or `pending` subscription owned by the caller (§5.6). |
 
 **Response 200**
 
@@ -1584,7 +1589,7 @@ Invalidates Redis cache key `job_roles:list`.
 
 | HTTP | Error code | When |
 |---|---|---|
-| 400 | ERR_SUBSCRIPTION_NOT_ACTIVE | Subscription is not in `active` status (already cancelling, `pending`, `halted`, `expired` or `created`). |
+| 400 | ERR_SUBSCRIPTION_NOT_ACTIVE | Subscription is not `active` or `pending` (already `cancelled`, `halted`, `expired`, or an unpaid `created` checkout). |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
 | 404 | ERR_SUBSCRIPTION_NOT_FOUND | Subscription ID does not exist or is not owned by the caller (§6.1). |
 | 502 | ERR_PAYMENT_SERVICE_UNAVAILABLE | Razorpay cancel call failed; local status unchanged, the user may retry. |
@@ -1719,7 +1724,7 @@ In one transaction: FR-010 steps for every live resume, Razorpay cancel (`cancel
 | ID | Code | HTTP | Message | When it happens |
 |---|---|---|---|---|
 | ERR-001 | ERR_UNAUTHORIZED | 401 | Authentication required. | Missing, expired, or invalid JWT. |
-| ERR-002 | ERR_FORBIDDEN | 403 | You do not have permission to perform this action. | User lacks the required role or does not own the resource. |
+| ERR-002 | ERR_FORBIDDEN | 403 | You do not have permission to perform this action. | Caller lacks the required role (`admin` endpoint called by a `user`). Ownership mismatches are **404**, never 403 (§6.1). |
 | ERR-003 | ERR_INVALID_FILE_TYPE | 400 | Only PDF and DOCX files are accepted. | Upload: detected type is neither PDF nor DOCX, declared and detected types differ, or the DOCX ZIP lacks `word/document.xml` (FR-001 AC 6). |
 | ERR-004 | ERR_FILE_TOO_LARGE | 400 | File exceeds the {MAX_FILE_SIZE} limit. | Upload: file larger than `MAX_FILE_SIZE` (K-01). Message interpolates the constant. |
 | ERR-005 | ERR_EMPTY_FILE | 400 | File is empty. | Upload: 0-byte file. |
@@ -1737,14 +1742,14 @@ In one transaction: FR-010 steps for every live resume, Razorpay cancel (`cancel
 | ERR-017 | ERR_DUPLICATE_JOB_ROLE | 409 | A job role with this name already exists. | Admin tried to create a duplicate job role. |
 | ERR-018 | ERR_SUBSCRIPTION_ALREADY_ACTIVE | 409 | You already have an active subscription. | User tried to subscribe while already subscribed. |
 | ERR-019 | ERR_SUBSCRIPTION_NOT_FOUND | 404 | Subscription not found. | Subscription ID does not exist. |
-| ERR-020 | ERR_SUBSCRIPTION_NOT_ACTIVE | 400 | Subscription is not active. | Cancel requested for non-active subscription. |
+| ERR-020 | ERR_SUBSCRIPTION_NOT_ACTIVE | 400 | Subscription cannot be cancelled in its current state. | API-016 on a row that is not `active` or `pending` (already `cancelled`, `halted`, `expired`, or unpaid `created`). |
 | ERR-021 | ERR_PAYMENT_SERVICE_UNAVAILABLE | 502 | Payment service is temporarily unavailable. | Razorpay API failed. |
 | ERR-022 | ERR_INVALID_WEBHOOK_SIGNATURE | 400 | Invalid webhook signature. | Razorpay webhook HMAC verification failed. |
 | ERR-023 | ERR_INVALID_COMPARISON | 400 | Provide exactly 2 completed analysis IDs to compare. | Compare endpoint: wrong number of IDs or non-completed analysis. |
 | ERR-024 | ERR_INTERNAL | 500 | Internal server error. | Unexpected error. No internal details leaked. (v1.3: the 503 dependency case moved to ERR-026.) |
 | ERR-025 | ERR_PRO_REQUIRED | 403 | This feature requires Resume Pro. Upgrade to compare analyses. | Free user called a Pro-gated endpoint (API-011). Raised by `ProGuard` (§5.5). |
 | ERR-026 | ERR_SERVICE_UNAVAILABLE | 503 | Service temporarily unavailable. Please retry in a moment. | Redis, BullMQ or PostgreSQL unreachable (enqueue refused, counter or query failed). Any endpoint (§6.1). |
-| ERR-027 | ERR_STORAGE_UNAVAILABLE | 502 | File storage is temporarily unavailable. | S3 `PutObject`, presign or `DeleteObject` failed or exceeded `EXTERNAL_TIMEOUT` (K-39). API-001, API-003, API-004. |
+| ERR-027 | ERR_STORAGE_UNAVAILABLE | 502 | File storage is temporarily unavailable. | S3 `PutObject` or presign failed or exceeded `EXTERNAL_TIMEOUT` (K-39). API-001, API-003 only; deletes are asynchronous (FR-010). |
 | ERR-028 | ERR_AI_RESPONSE_INVALID | — (resource-level, D-01) | The analysis service returned an unusable result. Please retry. | Worker: AI JSON failed schema validation on every attempt (CMP-005 validation rules). `errorCode` on the resource; retryable via API-010. |
 | ERR-029 | ERR_ANALYSIS_TIMEOUT | — (resource-level, D-01) | The analysis took too long and was stopped. Please retry. | Worker abort at `AI_TIMEOUT` (K-09) on the last attempt, or the stalled-job sweep found the row in `processing` for more than `JOB_STALL_TIMEOUT` (K-30). Retryable via API-010. |
 | ERR-030 | ERR_RETRY_LIMIT_REACHED | 400 | This analysis cannot be retried again. | API-010: `MAX_MANUAL_RETRIES` (K-31) used, or the failure is `ERR_TEXT_EXTRACTION_FAILED`. |
@@ -1777,7 +1782,7 @@ Every FR and NFR must appear here at least once. No empty cells — write `—` 
 | FR-015 List job roles | CMP-001, CMP-003 | TBL-005 job_roles | API-012 | AC: list returned, cached `CACHE_TTL` (K-17) in Redis. |
 | FR-016 Admin add job role | CMP-001 | TBL-005 job_roles | API-013 | AC: admin creates role, slug auto-generated, duplicate → 409, cache invalidated. |
 | FR-018 Erase a user's data | CMP-001, CMP-004, CMP-007, CMP-008, CMP-010 | TBL-001 (soft delete), TBL-002/003/004 (cascade), TBL-006/007/008 (pseudonymised) | API-020 (202) | AC: idempotent; every live resume follows FR-010; active/pending subscription cancelled at Razorpay immediately; financial rows carry `sha256(user_id)` + `erased_at` and vanish from API-015/017; Redis keys gone. |
-| FR-017 Retry failed analysis | CMP-001, CMP-005, CMP-010 | TBL-002 (status → pending, attempts), TBL-003, TBL-004 | API-010 (202) | AC: only failed can retry, no extra credit reserved, returns 202 and re-enqueues. Non-failed → 400. |
+| FR-017 Retry failed analysis | CMP-001, CMP-005, CMP-010 | TBL-002 (status → pending, attempts), TBL-003, TBL-004 | API-010 (202) | AC: only failed can retry; credit re-reserved for a free owner (net one credit per successful analysis); max K-31 retries; extraction failures not retryable; returns 202 and re-enqueues. Non-failed → 400. |
 | NFR-001 Analysis latency | CMP-005, CMP-010 | TBL-002 (`created_at`, `started_at`, `completed_at`) | API-005, API-007 | APM + BullMQ timings: enqueue→terminal p95 < K-12; queue wait p95 < K-14; POST p95 < K-13 in staging load test. |
 | NFR-002 API latency | CMP-001, CMP-006 | — (runtime metric) | All JSON APIs; API-001 (post-upload processing); API-008 | APM + `durationMs` logs: targets as stated in NFR-002. |
 | NFR-003 Availability | CMP-009, CMP-001 | — (infra) | API-019 | Uptime monitor: 99.5% monthly on /health. |
