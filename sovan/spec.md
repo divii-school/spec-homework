@@ -20,15 +20,15 @@ Rules every Divii / Hanriver project must follow. Each rule has an ID and must b
 | CR-003 | Roles and permissions | Two roles exist: `user` (default) and `admin`. The role is read from `roles[]` in the JWT. See permission matrix below. | Role-based guard on every endpoint; automated tests for each forbidden combination. |
 | CR-004 | Logging | Logs are structured JSON, one object per line. Required fields: `timestamp` (ISO-8601 UTC), `level` (debug / info / warn / error), `requestId` (UUID, set via `X-Request-Id` header or auto-generated), `userId` (from JWT, or `anonymous`), `method`, `path`, `statusCode`, `durationMs`, `message`. Personal data (email, phone, resume content, file bytes) is **never** logged. File names are logged only as a hash (`SHA-256(filename)`). | Code review + log sample review + grep for PII patterns in CI. |
 | CR-005 | Error handling | Every API error response uses exactly this shape: `{ "statusCode": <number>, "error": "<ERR_CODE>", "message": "<human-readable>", "requestId": "<uuid>" }`. Internal errors (5xx) never leak stack traces or internal paths; they return `"message": "Internal server error"`. 4xx errors return a specific message. | Automated test: trigger each error code and assert shape. |
-| CR-006 | Security — secrets | All secrets (`DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `PLATFORM_JWKS_URL`, `WEBHOOK_SECRET`) are stored in environment variables, never in code or config files committed to git. `.env` is in `.gitignore`. | CI check: no secrets in code. |
+| CR-006 | Security — secrets | All secrets (`DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_PLAN_ID`, `PLATFORM_JWKS_URL`, `WEBHOOK_SECRET`) are stored in environment variables, never in code or config files committed to git. `.env` is in `.gitignore`. | CI check: no secrets in code. |
 | CR-007 | Security — CORS | CORS is enforced **in the API** (NestJS `enableCors`), not at the ALB (CMP-009 forwards `OPTIONS` untouched). Allowed origins: only those listed in `ALLOWED_ORIGINS` env var (comma-separated). Credentials: `true`. Allowed methods: `GET, POST, PUT, PATCH, DELETE, OPTIONS`. Allowed headers: `Authorization, Content-Type, X-Request-Id`. Max-age: `86400`. | Automated test: request from unlisted origin → no CORS headers. |
 | CR-008 | Security — input validation | Every request body, query parameter and path parameter is validated with `class-validator` decorators before the handler runs. Validation pipe is global with `whitelist: true` (strips unknown fields) and `forbidNonWhitelisted: true` (rejects unknown fields with 400). File uploads are validated for MIME type and size before being read. **Exception:** API-018 (Razorpay webhook) is excluded from the global pipe and reads the raw body (`rawBody: true` at bootstrap) so the signature can be verified; its payload is validated per event type inside the handler (§5.6). Pipe failures map to error codes per §6.1. | Code review: every DTO has decorators. CI: test with extra / missing fields. |
 | CR-009 | Security — rate limiting | Global rate limit: `RATE_LIMIT_USER` (K-23) per user (keyed by `userId` from JWT). Unauthenticated requests: `RATE_LIMIT_ANON` (K-24) per IP. Analysis endpoints (`POST /analyses`, `POST /analyses/:id/retry`): `RATE_LIMIT_ANALYSIS` (K-25) per user, because each job costs money. Limits enforced via `@nestjs/throttler` backed by Redis. Exceeded → `429 Too Many Requests`. | Load test in staging. |
 | CR-010 | Security — data at rest | All resume files in S3 are encrypted with AES-256 (SSE-S3). The PostgreSQL database uses volume-level encryption (AWS RDS encryption). Redis is configured with `requirepass` and TLS in staging/prod. | Infrastructure review + AWS config audit. |
 | CR-011 | Security — data in transit | All traffic uses HTTPS (TLS 1.2+). Internal service-to-service calls (API ↔ S3, API ↔ OpenAI, API ↔ Redis) use TLS. HTTP requests are redirected to HTTPS via the load balancer. | SSL Labs scan ≥ A rating. |
-| CR-012 | Privacy — DPDP Act | Resumes contain personal data (name, email, phone, address, work history). Under India's DPDP Act 2023: (a) resumes are processed only for the stated purpose (analysis); (b) users can request deletion of their data at any time via `DELETE /resumes/:id`; (c) deleted data is hard-deleted from S3 and the database within `ERASURE_SLA` (K-08) (FR-010 AC 4 guarantees it without depending on Redis); (d) data retention: free users' resumes are auto-deleted `RETENTION_DAYS` (K-07) after upload; Pro users' resumes are retained while the subscription is active and deleted `RETENTION_DAYS` after the subscription ends (owner of the rule: NFR-006 / CMP-008); (e) no resume data is shared with third parties except the AI provider (OpenAI) for analysis; (f) the AI analysis prompt instructs the model not to store or learn from the data. | Annual DPDP compliance audit + automated retention job test. |
+| CR-012 | Privacy — DPDP Act | Resumes contain personal data (name, email, phone, address, work history). Under India's DPDP Act 2023: (a) resumes are processed only for the stated purpose (analysis); (b) users can request deletion of their data at any time via `DELETE /resumes/:id`; (c) deleted data is hard-deleted from S3 and the database within `ERASURE_SLA` (K-08) (FR-010 AC 4 guarantees it without depending on Redis); (d) data retention: free users' resumes are auto-deleted `RETENTION_DAYS` (K-07) after upload; Pro users' resumes are retained while the subscription is active and deleted `RETENTION_DAYS` after the subscription ends (owner of the rule: NFR-006 / CMP-008); (e) no resume data is shared with third parties except the AI provider (OpenAI) for analysis; (f) the AI analysis prompt instructs the model not to store or learn from the data; (g) **full erasure** (FR-018, API-020): resumes and analyses are removed as in FR-010; `subscriptions`, `payments` and `webhook_events` are **financial records kept 7 years** (Indian tax retention) with `user_id` replaced by `sha256(user_id)` so they no longer identify the person; an `active`/`pending` subscription is cancelled at Razorpay immediately, without refund of the running period. | Annual DPDP compliance audit + automated retention job test. |
 | CR-013 | i18n | All API responses are in English. All dates are stored as ISO-8601 UTC in the database and returned as ISO-8601 UTC in API responses. The frontend converts to the user's local timezone. Currency amounts are stored as integers in paise (1 ₹ = 100 paise) to avoid floating-point errors. Currency display format: `₹X.XX` (INR, 2 decimal places). | Code review: no hardcoded timezone offsets in backend. |
-| CR-014 | Environments | Four environments: `local` (developer laptop, Docker Compose, mock OpenAI), `dev` (shared, real AWS, OpenAI sandbox key, seeded test data), `staging` (mirrors prod infra, production OpenAI key with low limits, used for QA and build test), `prod` (production). Env-specific config: `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `S3_BUCKET`, `ALLOWED_ORIGINS`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`. | Deploy pipeline enforces env-specific secrets via AWS Parameter Store. |
+| CR-014 | Environments | Four environments: `local` (developer laptop, Docker Compose, mock OpenAI), `dev` (shared, real AWS, OpenAI sandbox key, seeded test data), `staging` (mirrors prod infra, production OpenAI key with low limits, used for QA and build test), `prod` (production). Env-specific config: `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `S3_BUCKET`, `ALLOWED_ORIGINS`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_PLAN_ID` (the Resume Pro plan created once per environment in the Razorpay dashboard, `PRO_PRICE` K-20), `WEBHOOK_SECRET`, `PLATFORM_JWKS_URL`, `PLATFORM_LOGIN_URL` (§1.3). | Deploy pipeline enforces env-specific secrets via AWS Parameter Store. |
 | CR-015 | Deployment | CI/CD via GitHub Actions. Pipeline: lint → test → build → deploy. Deployment to dev: auto on push to `develop`. Deployment to staging: auto on push to `release/*`. Deployment to prod: manual approval after staging QA passes. Rollback: re-deploy the previous Docker image tag. Zero-downtime deploys via rolling update (ECS Fargate, minimum healthy 50%). Database migrations run before deploy via `typeorm migration:run` in a one-off task. | Deployment runbook + pipeline config. |
 
 ### 1.2 Roles and permissions
@@ -198,12 +198,13 @@ Frontend (Next.js) is a separate repository and out of scope for this backend sp
 | FR-008 | Download analysis as PDF | A user can download any of their own completed analyses as a PDF. The PDF contains: overall score, dimension scores as a radar chart, missing skills, rewrite suggestions (all for Pro, the first `FREE_VISIBLE_SUGGESTIONS` for free, K-04), and a timestamp. | Must | 1. `GET /analyses/:id/pdf` returns `Content-Type: application/pdf`. 2. The PDF file size is below `PDF_MAX_SIZE` (K-26). 3. If the analysis status is not `completed`, the endpoint returns `ERR_ANALYSIS_NOT_READY` (400). 4. The PDF includes the SurfingBear logo, the user's name, and the analysis date. |
 | FR-009 | View analysis history | A user can view a list of their past analyses, paginated, sorted by creation date descending. Each list item shows: overall score, job role, experience level, status, and created date. | Should | 1. `GET /analyses` returns a paginated list. 2. Page size: default `PAGE_DEFAULT` (K-21), max `PAGE_MAX` (K-22). 3. Filterable by `status` (pending, processing, completed, failed) and `jobRoleId`. 4. Each item includes `id`, `resumeId`, `jobRole`, `experienceLevel`, `overallScore`, `status`, `createdAt`. |
 | FR-010 | Delete resume and associated data | A user can delete their own resume. Deleting a resume also deletes the S3 file and all associated analyses, dimension scores, and rewrite suggestions. This supports the DPDP Act right to erasure. | Must | 1. `DELETE /resumes/:id` returns 204. 2. In one DB transaction the API releases the credit of every `pending`/`processing` analysis of the resume (FR-007 AC 2), hard-deletes those analyses (cascade to scores and suggestions) and sets `resumes.deleted_at = now()` (soft delete, TBL-001); every read filters `deleted_at IS NULL`, so the resume and its analyses are gone from the API immediately. 3. After commit the API enqueues a `resume-cleanup` job (CMP-010, `CLEANUP_ATTEMPTS` / `CLEANUP_BACKOFF`, K-33) that calls S3 `DeleteObject` and then hard-deletes the `resumes` row. 4. **Guarantee within `ERASURE_SLA` (K-08):** if the enqueue fails or every job attempt fails, the retention sweep (CMP-008, daily) picks up any row with `deleted_at < now()`, deletes the object and the row itself; no path depends on Redis being up. 5. A Worker that loads an `analysis` job whose row no longer exists ends the job as completed with result `skipped`; nothing is written. 6. Attempting to access a deleted resume or its analyses returns 404. |
-| FR-011 | Resume Pro subscription | A user can subscribe to Resume Pro for `PRO_PRICE` (K-20) via Razorpay. Pro benefits: unlimited analyses, all rewrite suggestions visible, analysis history with score comparison. The subscription auto-renews monthly. Users can cancel anytime; Pro access continues until the end of the paid period. Free users are unchanged. | Must | 1. `POST /subscriptions` creates a Razorpay subscription and returns the `subscriptionId` and `paymentLink`. 2. After successful payment (webhook), the user's derived `tier` (§5.5: computed from TBL-006, cached in Redis `user_tier:{userId}`) becomes `pro`. 3. Pro users bypass the `FREE_MONTHLY_LIMIT` check (K-03). 4. Pro users see all rewrite suggestions (not just the first `FREE_VISIBLE_SUGGESTIONS`, K-04). 5. Cancellation via `POST /subscriptions/:id/cancel` sets `cancelAtPeriodEnd: true`; Pro access remains until `currentPeriodEnd`. 6. After `currentPeriodEnd` the tier reverts to `free` automatically (the derivation rule compares `current_period_end` to `now()`; the daily sweep in CMP-008 marks the row `expired`). 7. Pro-only endpoints (`GET /analyses/compare`) are protected by `ProGuard` and return `ERR_PRO_REQUIRED` (403) for free users. |
-| FR-012 | Razorpay payment integration | The system integrates with Razorpay Subscriptions API. Payment lifecycle: create subscription → user pays on Razorpay checkout → webhook confirms payment → activate Pro. Razorpay webhooks are verified using the `WEBHOOK_SECRET`. | Must | 1. Webhook signature is verified using HMAC-SHA256 with `WEBHOOK_SECRET`; invalid signatures return 400. 2. Webhook events handled: `subscription.activated`, `subscription.charged`, `subscription.cancelled`, `subscription.halted`, `payment.failed`. 3. Each webhook is idempotent (duplicate delivery does not create duplicate records). 4. Payment records are stored with Razorpay `paymentId`, `amount` (in paise), `status`, `method`. |
-| FR-013 | Subscription management | A user can view their subscription status, payment history, and cancel their subscription. | Should | 1. `GET /subscriptions/me` returns current subscription or `null`. 2. `GET /subscriptions/me/payments` returns payment history, paginated. 3. `POST /subscriptions/:id/cancel` cancels at period end. 4. Re-subscribing after cancellation creates a new subscription. |
+| FR-011 | Resume Pro subscription | A user can subscribe to Resume Pro for `PRO_PRICE` (K-20) via Razorpay. Pro benefits: unlimited analyses, all rewrite suggestions visible, analysis history with score comparison. The subscription auto-renews monthly. Users can cancel anytime; Pro access continues until the end of the paid period. Free users are unchanged. | Must | 1. `POST /subscriptions` creates a Razorpay subscription and returns the `subscriptionId` and `paymentLink`. 2. After successful payment (webhook), the user's derived `tier` (§5.5: computed from TBL-006, cached in Redis `user_tier:{userId}`) becomes `pro`. 3. Pro users bypass the `FREE_MONTHLY_LIMIT` check (K-03). 4. Pro users see all rewrite suggestions (not just the first `FREE_VISIBLE_SUGGESTIONS`, K-04). 5. Cancellation via `POST /subscriptions/:id/cancel` calls Razorpay (`cancel_at_cycle_end = 1`) and sets the local row to `status = 'cancelled'`, `cancel_at_period_end = true` in the same request; Pro access remains until `currentPeriodEnd` (§5.6). 6. After `currentPeriodEnd` the tier reverts to `free` automatically (the derivation rule compares `current_period_end` to `now()`; the daily sweep in CMP-008 marks the row `expired`). A failed renewal keeps Pro for `RENEWAL_GRACE` (K-28) while Razorpay retries (status `pending`); `halted` ends it at once. 7. Pro-only endpoints (`GET /analyses/compare`) are protected by `ProGuard` and return `ERR_PRO_REQUIRED` (403) for free users. |
+| FR-012 | Razorpay payment integration | The system integrates with Razorpay Subscriptions API. Payment lifecycle: create subscription → user pays on Razorpay checkout → webhook confirms payment → activate Pro. Razorpay webhooks are verified using the `WEBHOOK_SECRET`. | Must | 1. Webhook signature is verified with HMAC-SHA256 of the **raw body** and `WEBHOOK_SECRET` against the `X-Razorpay-Signature` header; invalid → 400 `ERR_INVALID_WEBHOOK_SIGNATURE`, nothing stored. 2. Every delivery is recorded in TBL-008 `webhook_events` keyed by the `x-razorpay-event-id` header (unique per event per Razorpay docs); a duplicate id is answered 200 without re-applying (idempotency covers **all** event types, not only payments). 3. Events are applied per the table in §5.6: `subscription.authenticated`, `.activated`, `.charged`, `.pending`, `.halted`, `.cancelled`, `.completed`, `refund.processed`; every other type (`subscription.updated/paused/resumed`, `payment.*`, `refund.created`, …) is stored with outcome `ignored_unhandled` and answered 200. 4. **Ordering:** Razorpay does not guarantee order. Each event carries `created_at`; an event older than the subscription's `last_event_at` is stored as `ignored_stale` and not applied, except that its payment entity is still upserted (payments are facts, not state). `current_period_end` only ever moves forward (`GREATEST(current, payload.current_end)`). 5. Payment records are upserted by `razorpay_payment_id` with `amount_paise`, `status`, `method`, `paid_at`; the first payment arrives in both `activated` and `charged`, which is why it is an upsert, never two inserts. 6. A webhook for an unknown `razorpay_subscription_id` is stored with outcome `unknown_subscription`, logged at `warn`, answered 200. 7. The handler finishes in < 5 s and does no outbound calls; Razorpay re-delivers on non-2xx, so a DB failure is answered 500 on purpose to get the retry. |
+| FR-013 | Subscription management | A user can view their subscription status, payment history, and cancel their subscription. | Should | 1. `GET /subscriptions/me` returns current subscription or `null`. 2. `GET /subscriptions/me/payments` returns payment history, paginated. 3. `POST /subscriptions/:id/cancel` cancels at period end (§5.6). 4. Re-subscribing is possible only once no row is in `created` (fresh, < K-29), `active`, `pending` or `cancelled`-before-period-end state; until then API-014 returns the existing checkout (fresh `created`) or 409. Un-cancelling a cancelled subscription is **not supported** in v1 (assumption A-08): the user re-subscribes after the period ends and a new row is created. |
 | FR-014 | Score comparison | Pro users can compare scores across their analysis history. The comparison shows dimension scores between any two selected analyses side by side. | Should | 1. `GET /analyses/compare?ids=<id1>,<id2>` returns both analyses' dimension scores side by side. 2. Only completed analyses can be compared. 3. Maximum 2 analyses per comparison request. 4. Only the owner of both analyses, or an admin, can compare them; an analysis owned by someone else is answered 404 (§6.1 ownership rule). 5. The endpoint is Pro-gated: a free user (tier per §5.5) receives `ERR_PRO_REQUIRED` (403) before any analysis lookup happens. |
 | FR-015 | List job roles | Any authenticated user can fetch the list of available job roles. | Must | 1. `GET /job-roles` returns `[{ "id": "<uuid>", "name": "<string>", "slug": "<string>" }]`. 2. Results are cached in Redis for `CACHE_TTL` (K-17). |
 | FR-016 | Admin: add job role | An admin can add a new job role. | Could | 1. `POST /job-roles` with `{ "name": "..." }` creates a new role. Slug is auto-generated from name. 2. Duplicate names return `ERR_DUPLICATE_JOB_ROLE` (409). |
+| FR-018 | Erase a user's data (DPDP request) | The platform (or an admin on a user's written request) erases everything this module holds about a user: resumes, analyses, cached tier and usage counters; financial records are pseudonymised, not deleted (CR-012 g). | Must | 1. `DELETE /users/:userId/data` (API-020, admin only) returns 202 and is idempotent. 2. Every live resume of the user is processed exactly like FR-010 (soft delete, cleanup job, sweep guarantee within `ERASURE_SLA` K-08). 3. An `active` or `pending` subscription is cancelled at Razorpay immediately (`cancel_at_cycle_end = 0`); `cancelled`/`halted` rows are left to expire. 4. `subscriptions`, `payments`, `webhook_events` rows of the user get `user_id = sha256(user_id)` and `erased_at = now()`; they are never returned by any API again. 5. Redis keys `user_tier:{userId}` and `usage:{userId}:*` are deleted. 6. The platform owns the account itself; this endpoint does not touch it. |
 | FR-017 | Retry failed analysis | A user can retry a failed analysis without uploading the resume again and without consuming an additional analysis credit. | Should | 1. `POST /analyses/:id/retry` re-enqueues the same analysis row on the `analysis` queue (CMP-010): for a free user it first reserves a credit exactly like API-005 (FR-007 AC 2; may answer `ERR_MONTHLY_LIMIT_REACHED`), then sets status `pending`, clears `error_code` / `error_message` / `started_at` / `completed_at` / `heartbeat_at`, increments `manual_retries` and returns `202`. `attempts` is owned by the Worker and not touched here. Because the failed attempt's credit was released, the user never pays twice for one successful analysis. 2. Only analyses with status `failed` can be retried; anything else returns `ERR_ANALYSIS_NOT_FAILED` (400). 3. At most `MAX_MANUAL_RETRIES` (K-31) per analysis, and never when `error_code` is `ERR_TEXT_EXTRACTION_FAILED` (the same file would fail again; the user re-uploads instead): both return `ERR_RETRY_LIMIT_REACHED` (400). |
 
 ### 3.2 Non-functional requirements
@@ -346,8 +347,8 @@ The API never calls OpenAI directly: every analysis runs in the Worker. The Work
 | CMP-004 | S3 File Storage | Stores uploaded resume files. Files are encrypted at rest. **Upload goes through the API** (multipart, decision D-02) so the API can check size and magic bytes before `PutObject`; **download** uses a presigned GET URL (`PRESIGNED_URL_TTL`, K-16) so file bytes do not stream through the API. | AWS S3 with SSE-S3 encryption. Chosen because: (a) durable (99.999999999%), (b) presigned download URLs keep file bytes off the API server, (c) `DeleteObject` is cheap and idempotent, so the module can own retention itself (NFR-006) instead of relying on bucket lifecycle rules that cannot see the user's tier. |
 | CMP-005 | AI Analysis Service | Extracts text from resumes, constructs prompts from the dimension catalogue (K-40), calls OpenAI GPT-4o with an `AbortController` signal that fires at `AI_TIMEOUT` (K-09), validates the JSON against the schema in FR-004 AC 8 (truncating over-long lists, rejecting bad shapes), assigns `sort_order` (TBL-004) and computes `overall_score` as the sum of dimension scores. Runs inside the Analysis Worker (CMP-010), never in the API request path. | OpenAI GPT-4o API via `openai` npm package (v4.x). Chosen because: (a) GPT-4o balances quality and cost for text analysis, (b) structured JSON output mode reduces parsing errors, (c) extensive documentation and npm SDK. |
 | CMP-006 | PDF Generator | Renders analysis results into a styled HTML template and converts to PDF. | Puppeteer 22.x with Handlebars 4.x templates. Chosen because: (a) pixel-perfect PDF output matching the web design, (b) supports charts via inline SVG, (c) headless Chrome is well-maintained. |
-| CMP-007 | Razorpay Integration | Manages subscription creation, webhook processing, and payment recording. | Razorpay Node.js SDK (`razorpay` npm). Chosen because: (a) specified in the requirement, (b) native subscription support, (c) INR support with no forex. |
-| CMP-008 | Scheduler | Runs in the Worker process only (never in the API). Daily at `SWEEP_TIME` (K-27): (a) **retention** (NFR-006): applies the downgrade rule to users whose Pro ended since the previous run, soft-deletes resumes with `expires_at < now()`, then finishes every soft-deleted row (this run's and any left over from FR-010) — release in-flight credits, hard-delete analyses, S3 `DeleteObject`, hard-delete the row; a row whose `DeleteObject` fails stays soft-deleted and is retried next run; (b) **subscription expiry sweep** — `UPDATE subscriptions SET status = 'expired' WHERE status IN ('cancelled', 'halted') AND current_period_end < now()`, and `active` rows whose `current_period_end < now() - RENEWAL_GRACE` (K-28), then `DEL user_tier:{userId}` for each affected user. | `@nestjs/schedule` (cron) with a Redis `SET NX` leader lock (TTL 10 min) so only one worker instance runs the job. Chosen because: (a) built into NestJS, (b) the lock makes it safe with 2+ worker tasks. |
+| CMP-007 | Razorpay Integration | Creates the Razorpay customer (once per user) and subscription, cancels subscriptions, verifies and records every webhook in TBL-008, applies the state machine of §5.6, upserts payments and refunds, invalidates the tier cache, nulls `expires_at` on activation (NFR-006). | Razorpay Node.js SDK (`razorpay` npm). Chosen because: (a) specified in the requirement, (b) native subscription support, (c) INR support with no forex. |
+| CMP-008 | Scheduler | Runs in the Worker process only (never in the API). Daily at `SWEEP_TIME` (K-27): (a) **retention** (NFR-006): applies the downgrade rule to users whose Pro ended since the previous run, soft-deletes resumes with `expires_at < now()`, then finishes every soft-deleted row (this run's and any left over from FR-010) — release in-flight credits, hard-delete analyses, S3 `DeleteObject`, hard-delete the row; a row whose `DeleteObject` fails stays soft-deleted and is retried next run; (b) **subscription sweep** (§5.6, in this order): (1) `created` rows older than `CHECKOUT_TTL` (K-29) → `expired`, and Razorpay `cancel` is called best-effort so the stale checkout link dies too; (2) `cancelled` or `completed` rows with `current_period_end < now()` → `expired`; (3) `pending` rows with `current_period_end + RENEWAL_GRACE (K-28) < now()` → `halted` (safety net if the `subscription.halted` webhook never arrived); (4) `halted` rows → `expired` once `current_period_end < now()`; (5) `active` rows with `current_period_end + RENEWAL_GRACE < now()` and no newer event → `halted` (missed webhooks); then for every user whose rows changed: `DEL user_tier:{userId}` and, if the user no longer derives `pro`, the NFR-006 downgrade rule. | `@nestjs/schedule` (cron) with a Redis `SET NX` leader lock (TTL 10 min) so only one worker instance runs the job. Chosen because: (a) built into NestJS, (b) the lock makes it safe with 2+ worker tasks. |
 | CMP-009 | Load Balancer | Terminates TLS, enforces `MAX_REQUEST_BODY` (K-02), routes to healthy API instances (target-group health check = API-019, 503 = unhealthy). Forwards `OPTIONS` untouched; CORS lives in the API (CR-007). | AWS ALB. Chosen because: (a) native ECS integration, (b) built-in health checks, (c) TLS termination. |
 | CMP-010 | Analysis Queue + Worker | Decouples the expensive OpenAI call from the HTTP request (decision D-01). Two queues on Redis: `analysis` (jobs: `{ analysisId }`, `AI_ATTEMPTS` / `AI_BACKOFF` (K-10 / K-11), concurrency `WORKER_CONCURRENCY` (K-37) per worker task, `removeOnComplete: 1000`, `removeOnFail: FAILED_JOB_RETENTION` (K-18)) and `resume-cleanup` (jobs: `{ s3Key }`, `CLEANUP_ATTEMPTS` / `CLEANUP_BACKOFF`, K-33). The Worker is a separate ECS service (same image, `PROCESS_ROLE=worker`, min 2 / max 5 tasks × `WORKER_CONCURRENCY` (K-37) = 20–50 parallel jobs, scaled out when `analysis` waiting-count > 10, so `MAX_CONCURRENT_ANALYSES` (K-35) is reachable, NFR-001) that runs CMP-005 and owns the `analyses` state machine: `pending → processing → completed \| failed`, plus `failed → pending` via API-010. **Timeouts and stalls (BullMQ 5 has no per-job timeout):** (a) the processor aborts the OpenAI call itself at K-09 (CMP-005) and throws, so BullMQ retries or fails the job; (b) the processor writes `heartbeat_at` on attempt start, after text extraction and after the AI reply; (c) BullMQ `stalledInterval` 30 s / `maxStalledCount` 1 re-queues a job whose worker died once, then fails it; (d) a `QueueEvents` listener in the Worker handles the final `failed` event for any reason (handler exception, stall, abort) by setting the row `failed` with the matching `error_code` and releasing the credit if `credit_reserved`; (e) the **stalled-job sweep** (every minute, Redis `SET NX` lock) runs `UPDATE analyses SET status='failed', error_code='ERR_ANALYSIS_TIMEOUT', completed_at=now() WHERE status='processing' AND heartbeat_at < now() - JOB_STALL_TIMEOUT` (K-30) and releases those credits — this covers a Redis loss where no event can arrive. **Enqueue failure** (API-005/010): the `queue.add` error is caught; the API deletes the `pending` row it just inserted (API-005) or leaves the row `failed` (API-010), releases the credit and answers 503 `ERR_SERVICE_UNAVAILABLE`. | BullMQ 5.x (`@nestjs/bullmq`). Chosen because: (a) runs on the Redis we already have, no SQS/RabbitMQ to operate, (b) per-job retries, backoff, timeouts and locks are built in, (c) NestJS integration via decorators (`@Processor`, `@InjectQueue`), (d) Bull Board gives a free admin UI in dev/staging. |
 
@@ -455,16 +456,26 @@ sequenceDiagram
     participant R as Redis
 
     U->>A: POST /subscriptions
-    A->>RP: Create subscription (plan_id, customer)
-    RP-->>A: { subscriptionId, short_url }
-    A->>DB: INSERT INTO subscriptions (status=created)
+    A->>DB: SELECT newest subscription row of user
+    alt created row younger than CHECKOUT_TTL (K-29)
+        A-->>U: 200 same { subscriptionId, paymentLink } (no new checkout)
+    else active / pending / cancelled-not-ended
+        A-->>U: 409 ERR_SUBSCRIPTION_ALREADY_ACTIVE
+    end
+    A->>RP: Create customer if the user has none (razorpay_customer_id)
+    A->>RP: Create subscription (plan_id = RAZORPAY_PLAN_ID, customer_id, total_count 120, expire_by = now + K-29)
+    RP-->>A: { id, short_url }
+    A->>DB: INSERT INTO subscriptions (status=created, razorpay ids)
     A-->>U: 200 { subscriptionId, paymentLink }
-    Note over U,RP: User completes payment on Razorpay Checkout
-    RP->>A: POST /webhooks/razorpay (subscription.activated)
-    A->>A: Verify HMAC-SHA256 signature
-    A->>DB: UPDATE subscriptions SET status=active, current_period_start/end
-    A->>DB: INSERT INTO payments
-    A->>R: DEL user_tier:{userId} (invalidate cache — next read re-derives tier from DB, see 5.5)
+    Note over U,RP: User completes payment on Razorpay Checkout (or abandons: sweep expires the row after K-29)
+    RP->>A: POST /webhooks/razorpay (subscription.activated, header x-razorpay-event-id)
+    A->>A: Verify HMAC-SHA256 of raw body
+    A->>DB: INSERT INTO webhook_events (event id UQ) — duplicate → 200 and stop
+    A->>DB: stale check: event created_at < subscriptions.last_event_at → outcome ignored_stale
+    A->>DB: UPDATE subscriptions SET status=active, current_period_start/end, last_event_at
+    A->>DB: UPSERT payments (razorpay_payment_id)
+    A->>DB: UPDATE resumes SET expires_at = NULL (NFR-006 upgrade rule)
+    A->>R: DEL user_tier:{userId}
     A-->>RP: 200 OK
 ```
 
@@ -481,8 +492,8 @@ sequenceDiagram
     U->>G: request with JWT
     G->>R: GET user_tier:{userId}
     alt cache miss
-        G->>DB: SELECT status, current_period_end FROM subscriptions WHERE user_id=? AND status IN ('active','cancelled') ORDER BY current_period_end DESC LIMIT 1
-        G->>G: tier = (row exists AND current_period_end > now()) ? pro : free
+        G->>DB: SELECT status, current_period_end FROM subscriptions WHERE user_id=? AND status IN ('active','cancelled','pending') ORDER BY current_period_end DESC LIMIT 1
+        G->>G: tier = row exists AND current_period_end + (status = pending ? RENEWAL_GRACE : 0) > now() ? pro : free
         G->>R: SET user_tier:{userId} = tier EX min(current_period_end - now(), CACHE_TTL K-17)
     end
     alt tier = free
@@ -497,7 +508,7 @@ sequenceDiagram
 |---|---|---|---|
 | OpenAI GPT-4o | Resume analysis (scoring, skills, suggestions) | HTTPS REST. Auth: `Authorization: Bearer <OPENAI_API_KEY>`. Model: `gpt-4o`. Response format: `json_object`. Max tokens: 4096. Temperature: 0.2 (low variance for consistent scoring). | Called only from the Worker (CMP-010). Timeout: `AI_TIMEOUT` (K-09). Retry: per `AI_ATTEMPTS` / `AI_BACKOFF` (K-10 / K-11) on 5xx or timeout. HTTP 429 is retried exactly like 5xx (same K-10 / K-11 policy, honouring `Retry-After` when it is ≤ K-11, otherwise K-11). On final failure: set analysis status to `failed`, `error_code = ERR_AI_SERVICE_UNAVAILABLE` (or `ERR_ANALYSIS_TIMEOUT` / `ERR_AI_RESPONSE_INVALID`), release the credit. The client learns of the failure via `GET /analyses/:id`. |
 | AWS S3 | Resume file storage | HTTPS. Auth: IAM role (ECS task role). Bucket: `surfingbear-resumes-{env}`. | Timeout: `EXTERNAL_TIMEOUT` (K-39). On failure: return 502. Files are immutable (never overwritten). **No bucket lifecycle rule**: deletion happens only through FR-010 / NFR-006 (the `resume-cleanup` job and the daily sweep), because a lifecycle rule cannot know whether the owner is Pro. Bucket versioning off. |
-| Razorpay | Subscription and payment processing | HTTPS REST. Auth: Basic auth (`RAZORPAY_KEY_ID:RAZORPAY_KEY_SECRET`). Webhook: HMAC-SHA256 signature verification using `WEBHOOK_SECRET`. | Timeout: `EXTERNAL_TIMEOUT` (K-39). Webhook delivery: Razorpay retries for 24 h. Idempotent processing: store `razorpay_event_id`, skip duplicates. On Razorpay downtime: subscription creation fails with `ERR_PAYMENT_SERVICE_UNAVAILABLE` (502). Existing active subscriptions continue (status cached in Redis). |
+| Razorpay | Subscription and payment processing | HTTPS REST. Auth: Basic auth (`RAZORPAY_KEY_ID:RAZORPAY_KEY_SECRET`). Webhook: HMAC-SHA256 signature verification using `WEBHOOK_SECRET`. | Timeout: `EXTERNAL_TIMEOUT` (K-39). Webhook delivery: Razorpay re-delivers until it gets a 2xx (the retry window is not published — checked 2026-10-30 — so the design assumes duplicates and late arrivals, §5.6). Idempotency: `x-razorpay-event-id` → TBL-008. On Razorpay downtime: API-014 / API-016 fail with `ERR_PAYMENT_SERVICE_UNAVAILABLE` (502) and change nothing locally. Existing subscriptions keep working (tier derived from TBL-006). |
 
 ### 4.5 Tech stack and reasons
 
@@ -528,6 +539,7 @@ Decisions a builder would otherwise have to guess. Each is referenced from the s
 |---|---|---|---|---|
 | D-01 | Sync or async analysis | **Async.** `POST /analyses` → 202 + poll `GET /analyses/:id`. Jobs on BullMQ `analysis` queue, processed by a separate Worker service (CMP-010). | Synchronous inline call returning 200 after 10–60 s. | Keeps the API under `ENQUEUE_P95` (K-13), survives `ALB_IDLE_TIMEOUT` (K-38), retries live in one place, horizontal scaling of workers independent of API, credit reservation is race-free. Polling is acceptable because real-time notifications are out of scope (§3.3). |
 | D-02 | Upload path | **Multipart through the API**, API writes to S3 with `PutObject`. Presigned URLs for download only. | Presigned S3 PUT from the browser. | Files are at most `MAX_FILE_SIZE` (K-01); the API must read magic bytes (FR-001 AC 6) and enforce MIME/size before the object exists. One code path, one error catalogue. |
+| D-04 | Subscription state source | **Local state machine fed by webhooks, cross-checked by a daily sweep** (§5.6): every delivery stored in TBL-008, stale events ignored by `created_at`, period end only moves forward, grace K-28 for `pending`, checkout TTL K-29. | Treat Razorpay as the only source and call its API on every request; or apply webhooks blindly in arrival order. | API calls per request are slow and fail when Razorpay is down; blind application lets a late `pending` overwrite a newer `activated`. A recorded, ordered, idempotent log is cheap and auditable. |
 | D-03 | Where Pro status lives | **Derived from `subscriptions` (TBL-006)** at read time, cached in Redis `user_tier:{userId}`; no `tier` column, no user table in this module. Gated via `ProGuard` → `ERR_PRO_REQUIRED` (403). Expiry by comparing `current_period_end` to `now()`, plus a daily sweep (CMP-008). See §5.5. | A `users.tier` column updated by webhooks and cron. | The platform owns the user table (CR-001), so we cannot add a column there. A derived value cannot drift from the subscription record, and a cache miss is one indexed query. |
 
 ---
@@ -613,6 +625,9 @@ erDiagram
         timestamp current_period_start
         timestamp current_period_end
         boolean cancel_at_period_end
+        string razorpay_customer_id
+        timestamp last_event_at
+        timestamp erased_at
         timestamp created_at
         timestamp updated_at
     }
@@ -627,7 +642,20 @@ erDiagram
         string status
         string method
         timestamp paid_at
+        timestamp refunded_at
+        timestamp erased_at
         timestamp created_at
+    }
+
+    WEBHOOK_EVENTS {
+        uuid id PK
+        string razorpay_event_id
+        string event_type
+        string razorpay_subscription_id
+        timestamp event_created_at
+        timestamp received_at
+        string outcome
+        jsonb payload
     }
 ```
 
@@ -731,31 +759,50 @@ Purpose: Tracks Resume Pro subscriptions linked to Razorpay. One active subscrip
 | Column | Type | Null | Key | Default | Constraint / note |
 |---|---|---|---|---|---|
 | id | uuid | NO | PK | `gen_random_uuid()` | |
-| user_id | uuid | NO | IDX | — | Indexed. Partial unique index: `CREATE UNIQUE INDEX uq_subscriptions_user_active ON subscriptions(user_id) WHERE status IN ('created', 'active')` — ensures at most one active/created subscription per user. |
+| user_id | uuid | NO | IDX | — | Indexed. Partial unique index: `CREATE UNIQUE INDEX uq_subscriptions_user_live ON subscriptions(user_id) WHERE status IN ('created', 'active', 'pending', 'cancelled')` — at most one non-terminal subscription per user; `created` rows stop blocking after K-29 because the sweep expires them (§5.6). |
 | razorpay_subscription_id | varchar(50) | NO | UQ | — | Razorpay's subscription ID (e.g., `sub_xxxxx`). Unique. |
 | razorpay_plan_id | varchar(50) | NO | — | — | Razorpay plan ID (e.g., `plan_xxxxx`), taken from `RAZORPAY_PLAN_ID` (CR-014). The Pro plan: `PRO_PRICE` (K-20). |
-| status | varchar(20) | NO | IDX | `'created'` | CHECK: `status IN ('created', 'active', 'cancelled', 'halted', 'expired')`. `created` = awaiting first payment. `active` = paid and active. `cancelled` = user cancelled, access until period end. `halted` = payment failed. `expired` = past period end after cancel/halt. |
+| status | varchar(20) | NO | IDX | `'created'` | CHECK: `status IN ('created', 'active', 'pending', 'cancelled', 'halted', 'expired')`. `created` = awaiting first payment (dies after K-29). `active` = paid. `pending` = renewal charge failed, Razorpay retrying, Pro continues for K-28. `cancelled` = cancelled by user / Razorpay / plan completed, access until period end. `halted` = retries exhausted, Pro ended. `expired` = terminal. Transitions only per §5.6. |
 | current_period_start | timestamptz | YES | — | NULL | Start of the current billing period. Set on activation. |
 | current_period_end | timestamptz | YES | IDX | NULL | End of the current billing period. Indexed for expiry checks. |
 | cancel_at_period_end | boolean | NO | — | `false` | `true` if user has cancelled but period hasn't ended yet. |
+| razorpay_customer_id | varchar(50) | NO | — | — | Razorpay customer (`cust_xxxxx`), created once per user and reused on re-subscribe. |
+| last_event_at | timestamptz | YES | — | NULL | `created_at` of the newest **applied** webhook event (§5.6 stale check). |
+| erased_at | timestamptz | YES | — | NULL | Set by FR-018; `user_id` then holds `sha256(user_id)` and the row is invisible to every API. |
 | created_at | timestamptz | NO | — | `now()` | |
 | updated_at | timestamptz | NO | — | `now()` | Updated on every status change. |
 
 #### TBL-007 `payments`
-Purpose: Records every payment event from Razorpay. Immutable audit log.
+Purpose: Records every Razorpay payment. Append-only, keyed by `razorpay_payment_id` (upsert, never two rows for one payment); the only in-place change allowed is `status → refunded` with `refunded_at` (§5.6).
 
 | Column | Type | Null | Key | Default | Constraint / note |
 |---|---|---|---|---|---|
 | id | uuid | NO | PK | `gen_random_uuid()` | |
 | subscription_id | uuid | NO | FK → subscriptions.id | — | ON DELETE RESTRICT (never delete subscriptions that have payments). |
 | razorpay_payment_id | varchar(50) | NO | UQ | — | Razorpay's payment ID (e.g., `pay_xxxxx`). Unique. |
-| razorpay_event_id | varchar(100) | YES | UQ | — | Razorpay webhook event ID. Unique (nullable for manual entries). Used for idempotency. |
+| razorpay_event_id | varchar(100) | YES | — | — | Event that first created this row (for audit). Idempotency moved to TBL-008 in v1.3; the old unique constraint is dropped because `activated` and `charged` can both carry the same payment. |
 | amount_paise | integer | NO | — | — | Amount in paise (29900 = ₹299.00). CHECK: `amount_paise > 0`. |
 | currency | varchar(3) | NO | — | `'INR'` | ISO 4217. Always `INR` for now. |
-| status | varchar(20) | NO | — | — | CHECK: `status IN ('captured', 'failed', 'refunded')`. |
+| status | varchar(20) | NO | — | — | CHECK: `status IN ('captured', 'failed', 'refunded')`. `captured` from `subscription.activated/charged`; `failed` from `subscription.pending`; `refunded` from `refund.processed`. |
 | method | varchar(30) | YES | — | NULL | Payment method: `card`, `upi`, `netbanking`, `wallet`, etc. From Razorpay. |
 | paid_at | timestamptz | YES | — | NULL | Timestamp of successful capture. NULL if failed. |
+| refunded_at | timestamptz | YES | — | NULL | Set with `status = refunded` (§5.6). |
+| erased_at | timestamptz | YES | — | NULL | Set by FR-018 together with the parent subscription. |
 | created_at | timestamptz | NO | — | `now()` | |
+
+#### TBL-008 `webhook_events`
+Purpose: One row per Razorpay webhook delivery — the idempotency key for **every** event type and the audit trail for ordering decisions (§5.6). Kept 7 years with the other financial records (CR-012 g).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | `gen_random_uuid()` | |
+| razorpay_event_id | varchar(100) | NO | UQ | — | Value of the `x-razorpay-event-id` header. A unique violation means a duplicate delivery → 200, stop. |
+| event_type | varchar(60) | NO | IDX | — | e.g. `subscription.charged`. |
+| razorpay_subscription_id | varchar(50) | YES | IDX | NULL | `payload.subscription.entity.id` when present. Not an FK (unknown ids are stored too). |
+| event_created_at | timestamptz | NO | — | — | `payload.created_at` (Unix seconds → timestamptz). Compared with `subscriptions.last_event_at`. |
+| received_at | timestamptz | NO | — | `now()` | |
+| outcome | varchar(30) | NO | — | — | CHECK: `outcome IN ('applied', 'ignored_stale', 'ignored_unhandled', 'unknown_subscription')`. |
+| payload | jsonb | NO | — | — | Full event body for audit / replay. |
 
 ### 5.3 Indexes
 
@@ -777,6 +824,8 @@ Purpose: Records every payment event from Razorpay. Immutable audit log.
 | subscriptions | `idx_subscriptions_current_period_end` | `current_period_end` | Expiry check cron. |
 | subscriptions | `idx_subscriptions_razorpay_sub_id` | `razorpay_subscription_id` | Webhook lookup by Razorpay ID. |
 | payments | `idx_payments_subscription_id` | `subscription_id` | Payment history for a subscription. |
+| subscriptions | `idx_subscriptions_status_period` | `status, current_period_end` | Daily sweep steps (§5.6). |
+| webhook_events | `idx_webhook_events_sub` | `razorpay_subscription_id, event_created_at` | Audit view per subscription; stale-check support. |
 
 ### 5.4 Relationships and delete rules
 
@@ -787,6 +836,7 @@ Purpose: Records every payment event from Razorpay. Immutable audit log.
 | dimension_scores.analysis_id | analyses.id | Many-to-one | CASCADE — deleting an analysis deletes its scores. |
 | rewrite_suggestions.analysis_id | analyses.id | Many-to-one | CASCADE — deleting an analysis deletes its suggestions. |
 | payments.subscription_id | subscriptions.id | Many-to-one | RESTRICT — cannot delete a subscription that has payments. |
+| webhook_events | (none) | — | Stand-alone audit table; links to subscriptions by Razorpay id only, so unknown ids can be stored. Never deleted by the application (7-year retention, CR-012 g). |
 
 ### 5.5 Entitlement (Pro status) rules — decision D-03
 
@@ -797,24 +847,25 @@ Purpose: Records every payment event from Razorpay. Immutable audit log.
 ```sql
 SELECT status, current_period_end
 FROM subscriptions
-WHERE user_id = $1 AND status IN ('active', 'cancelled')
+WHERE user_id = $1 AND status IN ('active', 'cancelled', 'pending')
 ORDER BY current_period_end DESC
 LIMIT 1;
 ```
 
-| Row found | Condition | Tier |
-|---|---|---|
-| no | — | `free` |
-| yes | `current_period_end > now()` | `pro` |
-| yes | `current_period_end <= now()` | `free` (row will be marked `expired` by the daily sweep; the tier is already correct before that) |
+| Row found | Status | Condition | Tier |
+|---|---|---|---|
+| no | — | — | `free` |
+| yes | `active`, `cancelled` | `current_period_end > now()` | `pro` |
+| yes | `pending` (renewal failed, Razorpay retrying) | `current_period_end + RENEWAL_GRACE (K-28) > now()` | `pro` — the grace period |
+| yes | any of the three | condition false | `free` (the sweep will mark the row `expired` / `halted`; the tier is already correct before that) |
 
 **Admin rule:** a JWT whose `roles[]` contains `admin` (CR-003) is treated as tier `pro` at every enforcement point below and passes `ProGuard`; admins' own subscription rows are not consulted. **Mid-request rule:** the tier is read once per request (API-007/008 at response time), so a Pro user whose period ends between two polls sees the free view from the next poll on; this is intended.
 
-`created` (unpaid) and `halted` (payment failed) rows never grant Pro. `cancelled` grants Pro until `current_period_end` (requirement: access continues to the end of the paid month).
+`created` (unpaid), `halted` (retries exhausted) and `expired` rows never grant Pro. `cancelled` grants Pro until `current_period_end` (requirement: access continues to the end of the paid month). `pending` grants Pro for `RENEWAL_GRACE` (K-28) past the period end so a slow eNACH debit does not lock a paying user out.
 
 **Cache:** Redis key `user_tier:{userId}` with value `pro` or `free`, TTL = `min(current_period_end - now(), CACHE_TTL)` for `pro`, `CACHE_TTL` (K-17) for `free`. Invalidated (`DEL`) by: every Razorpay webhook event for that user (API-018), `POST /subscriptions/:id/cancel` (API-016) and the daily sweep (CMP-008). Redis unavailable → derive from DB on every call (slower, still correct).
 
-**Expiry:** two mechanisms, both needed. (1) The derivation compares `current_period_end` to `now()`, so access ends on time even if no job runs. (2) CMP-008 runs daily at 02:00 UTC and sets `status = 'expired'` on `cancelled`/`halted` rows past `current_period_end`, and on `active` rows more than 3 days past it (Razorpay retries a failed renewal for up to 3 days before sending `subscription.halted`). `subscription.charged` extends `current_period_end` by one month.
+**Expiry:** two mechanisms, both needed. (1) The derivation above compares `current_period_end` (plus K-28 for `pending`) to `now()`, so access ends on time even if no job runs and no webhook arrives. (2) The daily sweep (CMP-008 b, §5.6) moves rows to their terminal status (`expired`, `halted`), invalidates the cache and applies the NFR-006 downgrade rule. Webhooks (API-018) are the third, fastest signal but never the only one.
 
 **Where it is enforced:**
 
@@ -826,6 +877,51 @@ LIMIT 1;
 | Retention (NFR-006) | Flow 1 at upload (free → `created_at + K-07`, pro → NULL); API-018 on activation (→ NULL); CMP-008 at Pro end (→ `current_period_end + K-07`) | `RETENTION_DAYS` (K-07) from upload |
 
 `ProGuard` runs after `JwtAuthGuard` and before pipes; it reads the tier via `EntitlementService` (Flow 4). Analysis history (FR-009) stays available to free users because the brief says free users keep what they have today.
+
+### 5.6 Subscription lifecycle and webhook rules (FR-011 – FR-013, decision D-04)
+
+**Status machine of TBL-006** — every allowed transition and who makes it. Anything not listed is rejected and logged at `warn`.
+
+| From | To | Trigger | Side effects |
+|---|---|---|---|
+| — | `created` | API-014 | Razorpay customer + subscription created, `expire_by = now + CHECKOUT_TTL` (K-29) |
+| `created` | `active` | `subscription.activated` (or `subscription.charged` arriving first) | period dates from payload, payment upsert, `expires_at = NULL` on resumes (NFR-006), `DEL user_tier` |
+| `created` | `expired` | sweep, row older than K-29 | Razorpay `cancel` best-effort; user may subscribe again |
+| `active` | `pending` | `subscription.pending` | failed payment upserted with `status = failed`; Pro continues for K-28 (§5.5) |
+| `pending` | `active` | `subscription.activated` / `subscription.charged` | period end = `GREATEST(current, payload.current_end)`, payment upsert, `DEL user_tier` |
+| `pending` | `halted` | `subscription.halted`, or sweep after `current_period_end + K-28` | Pro ends; `DEL user_tier`; NFR-006 downgrade rule |
+| `halted` | `active` | `subscription.activated` (user paid manually in Razorpay's hosted page) | as `created → active` |
+| `active` / `pending` | `cancelled` | API-016 (sets it locally **in the request**) or `subscription.cancelled` (idempotent) | `cancel_at_period_end = true`; `current_period_end` unchanged; Pro continues until then |
+| `active` | `cancelled` | `subscription.completed` (plan's `total_count` reached) | same as cancelled; Pro until period end |
+| `cancelled` / `halted` | `expired` | sweep, `current_period_end < now()` | NFR-006 downgrade rule, `DEL user_tier` |
+| any live status | `cancelled` immediately | FR-018 erasure | Razorpay `cancel` with `cancel_at_cycle_end = 0`; rows pseudonymised |
+
+**Webhook handling (API-018), in this order for every delivery:**
+1. Verify `X-Razorpay-Signature` on the raw body → else 400, nothing stored.
+2. `INSERT INTO webhook_events (razorpay_event_id, …)` — on unique violation answer 200 immediately (duplicate delivery).
+3. Look up the subscription by `payload.subscription.entity.id`; none → `outcome = unknown_subscription`, 200.
+4. Stale check: `payload.created_at < subscriptions.last_event_at` → `outcome = ignored_stale`; still upsert the payment entity if present; 200.
+5. Apply the transition from the table above; if the (from, event) pair is not listed → `outcome = ignored_unhandled`; 200.
+6. Set `last_event_at = payload.created_at`, write `outcome = applied`, `DEL user_tier:{userId}`, 200.
+7. Any DB error → 500 so Razorpay re-delivers; the event row is in the same transaction and rolls back with it.
+
+| Event | Applied as |
+|---|---|
+| `subscription.authenticated` | no state change (first charge follows); `last_event_at` updated |
+| `subscription.activated` | `created`/`pending`/`halted` → `active`; period from `current_start` / `current_end` |
+| `subscription.charged` | upsert payment (`captured`); `current_period_end = GREATEST(current, payload.current_end)`; `pending`/`halted` → `active` |
+| `subscription.pending` | `active` → `pending`; upsert the failed payment if the payload carries one |
+| `subscription.halted` | `pending` → `halted` |
+| `subscription.cancelled` | → `cancelled` (no-op if already cancelled by API-016) |
+| `subscription.completed` | → `cancelled` at period end |
+| `refund.processed` | payment by `payload.refund.entity.payment_id` → `status = refunded`, `refunded_at`; **no tier change** (an admin decides manually; assumption A-09) |
+| `payment.failed`, `payment.captured`, `payment.authorized`, `refund.created`, `subscription.updated/paused/resumed`, anything else | `ignored_unhandled`, 200 (subscription state comes from the `subscription.*` events, which carry the payment entity) |
+
+**Checkout rules (API-014):** at most one row per user in a non-terminal state (partial unique index on TBL-006). A fresh `created` row (< K-29) is returned again instead of creating a second checkout; `active`, `pending`, or `cancelled` before period end → 409 `ERR_SUBSCRIPTION_ALREADY_ACTIVE`. Razorpay subscription parameters: `plan_id = RAZORPAY_PLAN_ID`, `customer_id` (created once per user, stored in `razorpay_customer_id`), `total_count = 120` (Razorpay requires a count; 10 years of monthly cycles, renewed by a new subscription when reached — `subscription.completed`), `expire_by = now + K-29`, `customer_notify = 1`.
+
+**Cancel rules (API-016):** Razorpay `POST /subscriptions/:id/cancel` with `cancel_at_cycle_end = 1`; on success the local row becomes `cancelled` + `cancel_at_period_end = true` in the same request (the later `subscription.cancelled` webhook is a no-op); on Razorpay failure → 502 `ERR_PAYMENT_SERVICE_UNAVAILABLE` and no local change. Un-cancel is not supported (A-08).
+
+**Grace (K-28):** chosen as 120 h because eNACH / UPI-autopay debits can take up to 2 working days and a weekend plus a public holiday exceeds 72 h; the sweep's `pending → halted` step is only a safety net behind Razorpay's own `subscription.halted`.
 
 ---
 
@@ -1360,7 +1456,7 @@ Invalidates Redis cache key `job_roles:list`.
 ---
 
 #### API-014 `POST /api/v1/subscriptions`
-- **Purpose:** Create a Resume Pro subscription via Razorpay.
+- **Purpose:** Create a Resume Pro subscription via Razorpay (Flow 3, §5.6 checkout rules). Returns the existing checkout again if a fresh `created` row (< K-29) exists.
 - **Auth / role:** `user`, `admin`
 - **Implements:** FR-011, FR-012
 
@@ -1382,13 +1478,13 @@ Invalidates Redis cache key `job_roles:list`.
 | HTTP | Error code | When |
 |---|---|---|
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
-| 409 | ERR_SUBSCRIPTION_ALREADY_ACTIVE | User already has an active subscription. |
-| 502 | ERR_PAYMENT_SERVICE_UNAVAILABLE | Razorpay API failed. |
+| 409 | ERR_SUBSCRIPTION_ALREADY_ACTIVE | User has a subscription in `active`, `pending`, or `cancelled` before its period end (§5.6). A fresh `created` row is **not** a 409: the same 200 body is returned. |
+| 502 | ERR_PAYMENT_SERVICE_UNAVAILABLE | Razorpay customer or subscription call failed or exceeded K-39; nothing stored. |
 
 ---
 
 #### API-015 `GET /api/v1/subscriptions/me`
-- **Purpose:** Get the current user's active subscription, or null.
+- **Purpose:** Get the current user's newest non-terminal subscription (`created`, `active`, `pending`, `cancelled`, `halted`), or `null` when every row is `expired` or none exists.
 - **Auth / role:** `user`, `admin`
 - **Implements:** FR-013
 
@@ -1404,11 +1500,13 @@ Invalidates Redis cache key `job_roles:list`.
   "currentPeriodStart": "2026-10-22T00:00:00.000Z",
   "currentPeriodEnd": "2026-11-22T00:00:00.000Z",
   "cancelAtPeriodEnd": false,
+  "graceUntil": null,
+  "paymentLink": null,
   "createdAt": "2026-10-22T10:40:00.000Z"
 }
 ```
 
-Returns `null` (with 200 status) if no active subscription.
+`graceUntil` = `currentPeriodEnd + RENEWAL_GRACE` (K-28) while `status` is `pending`, else `null`. `paymentLink` is set only while `status` is `created` (the open checkout). Returns `null` (with 200 status) when there is no non-terminal subscription.
 
 **Errors**
 
@@ -1419,7 +1517,7 @@ Returns `null` (with 200 status) if no active subscription.
 ---
 
 #### API-016 `POST /api/v1/subscriptions/:id/cancel`
-- **Purpose:** Cancel subscription at the end of the current billing period.
+- **Purpose:** Cancel the subscription at the end of the current billing period: Razorpay is called first (`cancel_at_cycle_end = 1`), then the local row becomes `cancelled` in the same request (§5.6 cancel rules).
 - **Auth / role:** `user`, `admin` (own subscription only)
 - **Implements:** FR-013
 
@@ -1434,7 +1532,7 @@ Returns `null` (with 200 status) if no active subscription.
 ```json
 {
   "id": "a7b89012-3456-7890-abcd-ef1234567890",
-  "status": "active",
+  "status": "cancelled",
   "cancelAtPeriodEnd": true,
   "currentPeriodEnd": "2026-11-22T00:00:00.000Z",
   "message": "Your Pro access will continue until 2026-11-22. After that, your account will revert to the free tier."
@@ -1448,11 +1546,12 @@ Returns `null` (with 200 status) if no active subscription.
 | 400 | ERR_SUBSCRIPTION_NOT_ACTIVE | Subscription is not in `active` status (already cancelling, `pending`, `halted`, `expired` or `created`). |
 | 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
 | 404 | ERR_SUBSCRIPTION_NOT_FOUND | Subscription ID does not exist or is not owned by the caller (§6.1). |
+| 502 | ERR_PAYMENT_SERVICE_UNAVAILABLE | Razorpay cancel call failed; local status unchanged, the user may retry. |
 
 ---
 
 #### API-017 `GET /api/v1/subscriptions/me/payments`
-- **Purpose:** List payment history for the current user's subscription.
+- **Purpose:** List payment history across **all** of the current user's subscriptions (past and present), newest first; refunded payments included with `status = refunded` and `refundedAt`.
 - **Auth / role:** `user`, `admin`
 - **Implements:** FR-013
 
@@ -1475,7 +1574,9 @@ Returns `null` (with 200 status) if no active subscription.
       "currency": "INR",
       "status": "captured",
       "method": "upi",
-      "paidAt": "2026-10-22T10:42:00.000Z"
+      "paidAt": "2026-10-22T10:42:00.000Z",
+      "refundedAt": null,
+      "subscriptionId": "a7b89012-3456-7890-abcd-ef1234567890"
     }
   ],
   "meta": { "page": 1, "limit": 10, "total": 1, "totalPages": 1 }
@@ -1508,18 +1609,42 @@ Returns `null` (with 200 status) if no active subscription.
 { "status": "ok" }
 ```
 
-Handled events (every one ends with `DEL user_tier:{userId}` so the derived tier is re-read, §5.5):
-- `subscription.activated` → Set subscription status to `active`, set `current_period_start`/`current_period_end` from the payload, create payment record.
-- `subscription.charged` → Create payment record, extend `current_period_end` to the payload's `current_end`.
-- `subscription.cancelled` → Set subscription status to `cancelled` (Pro continues until `current_period_end`).
-- `subscription.halted` → Set subscription status to `halted` (payment failure; Pro ends immediately).
-- `payment.failed` → Create payment record with status `failed`.
+Processing order, event table, stale and duplicate rules: **§5.6** (single source). Summary: verify signature → insert TBL-008 row (duplicate id → 200) → unknown subscription → 200 → stale → 200 → apply transition → `last_event_at`, `DEL user_tier:{userId}` → 200. Headers read: `X-Razorpay-Signature`, `x-razorpay-event-id` (missing event id → 400 `ERR_INVALID_WEBHOOK_SIGNATURE`, treated as a malformed delivery). The endpoint is exempt from rate limiting and from the global `ValidationPipe` (CR-008, §6.1). Always 200 for a verified, stored event, even when ignored; 500 only on a DB failure so Razorpay re-delivers.
 
 **Errors**
 
 | HTTP | Error code | When |
 |---|---|---|
-| 400 | ERR_INVALID_WEBHOOK_SIGNATURE | HMAC verification failed. |
+| 400 | ERR_INVALID_WEBHOOK_SIGNATURE | HMAC verification failed, or `x-razorpay-event-id` header missing. Nothing stored. |
+| 500 | ERR_INTERNAL | Database failure while storing / applying the event; Razorpay will re-deliver. |
+
+---
+
+#### API-020 `DELETE /api/v1/users/:userId/data`
+- **Purpose:** Erase everything this module holds about a user (FR-018, CR-012 g). Admin only; called by the platform's account-deletion flow or by an admin on a written DPDP request.
+- **Auth / role:** `admin` only
+- **Implements:** FR-018
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| userId | path | uuid | Yes | Valid UUID (the platform's user id; it need not exist in this DB — the call is idempotent). |
+
+**Response 202 Accepted**
+
+```json
+{ "userId": "7f3c…", "resumesQueued": 3, "subscriptionCancelled": true, "financialRowsPseudonymised": 14 }
+```
+
+In one transaction: FR-010 steps for every live resume, Razorpay cancel (`cancel_at_cycle_end = 0`) for an `active`/`pending` row (failure → the row is still pseudonymised and a `warn` log asks an admin to cancel manually; the response then has `"subscriptionCancelled": false`), `user_id = sha256(user_id)` + `erased_at` on `subscriptions`, `payments`, `webhook_events`, then `DEL user_tier:{userId}`, `usage:{userId}:*`. S3 objects follow within `ERASURE_SLA` (K-08) via the cleanup job / sweep.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 401 | ERR_UNAUTHORIZED | Missing or invalid JWT. |
+| 403 | ERR_FORBIDDEN | Caller is not admin. |
 
 ---
 
@@ -1604,12 +1729,13 @@ Every FR and NFR must appear here at least once. No empty cells — write `—` 
 | FR-008 Download analysis PDF | CMP-001, CMP-006 | TBL-002, TBL-003, TBL-004 (read) | API-008 | AC: PDF returned, below `PDF_MAX_SIZE` (K-26), includes score + chart + suggestions. Non-completed → 400. |
 | FR-009 View analysis history | CMP-001 | TBL-002 analyses | API-006 | AC: paginated, sorted by date desc, filterable by status and role. |
 | FR-010 Delete resume | CMP-001, CMP-004, CMP-010 (`resume-cleanup` queue) | TBL-001 resumes (cascade to TBL-002, TBL-003, TBL-004) | API-004 | AC: 204 returned. S3 deleted within `ERASURE_SLA` (K-08) (job retries per K-33). Associated analyses cascade-deleted. 404 after. |
-| FR-011 Resume Pro subscription | CMP-001, CMP-003 (`user_tier` cache), CMP-007, CMP-008 (expiry sweep) | TBL-006 subscriptions (source of truth, §5.5 D-03), TBL-007 payments | API-014, API-015, API-016, API-018, API-011 (gated), API-009 (`tier`, `proUntil`) | AC: tier derived from subscriptions; Pro bypasses limit; all suggestions visible; compare gated (ERR-025); cancel keeps Pro until period end; tier reverts automatically after `current_period_end` (test with clock skew). |
-| FR-012 Razorpay integration | CMP-007 | TBL-006 subscriptions, TBL-007 payments | API-014, API-018 | AC: webhook signature verified, events idempotent, payment records created. |
-| FR-013 Subscription management | CMP-001, CMP-007 | TBL-006, TBL-007 | API-015, API-016, API-017 | AC: view status, cancel, payment history. Re-subscribe after cancel. |
+| FR-011 Resume Pro subscription | CMP-001, CMP-003 (`user_tier` cache), CMP-007, CMP-008 (sweep, §5.6) | TBL-006 subscriptions (source of truth, §5.5 D-03, state machine §5.6 D-04), TBL-007 payments, TBL-008 webhook_events | API-014, API-015, API-016, API-018, API-011 (gated), API-009 (`tier`, `proUntil`) | AC: tier derived from subscriptions; Pro bypasses limit; all suggestions visible; compare gated (ERR-025); cancel keeps Pro until period end; tier reverts automatically after `current_period_end` (test with clock skew). |
+| FR-012 Razorpay integration | CMP-007, CMP-008 (sweep safety nets) | TBL-006 subscriptions, TBL-007 payments, TBL-008 webhook_events | API-014, API-016, API-018 | AC: signature on raw body; duplicate event id → 200 no re-apply (all types); stale event ignored, payment still upserted; `activated` + `charged` for one payment → one row; `pending` → grace K-28; `created` older than K-29 → expired + Razorpay cancel; unknown subscription → 200 logged; refund → `refunded`, no tier change. Integration tests with recorded Razorpay payloads delivered out of order and twice. |
+| FR-013 Subscription management | CMP-001, CMP-007 | TBL-006, TBL-007 | API-015, API-016, API-017 | AC: `/me` returns newest non-terminal row with `graceUntil` / `paymentLink`; cancel calls Razorpay then sets `cancelled` locally, 502 leaves state unchanged; payments across all subscriptions; re-subscribe only after terminal state, fresh checkout returned again, 409 otherwise. |
 | FR-014 Score comparison | CMP-001 (`ProGuard`), CMP-003 | TBL-002, TBL-003, TBL-006 (entitlement) | API-011 | AC: free user → 403 ERR_PRO_REQUIRED; Pro user: 2 completed analyses compared side by side; only owner can compare. |
 | FR-015 List job roles | CMP-001, CMP-003 | TBL-005 job_roles | API-012 | AC: list returned, cached `CACHE_TTL` (K-17) in Redis. |
 | FR-016 Admin add job role | CMP-001 | TBL-005 job_roles | API-013 | AC: admin creates role, slug auto-generated, duplicate → 409, cache invalidated. |
+| FR-018 Erase a user's data | CMP-001, CMP-004, CMP-007, CMP-008, CMP-010 | TBL-001 (soft delete), TBL-002/003/004 (cascade), TBL-006/007/008 (pseudonymised) | API-020 (202) | AC: idempotent; every live resume follows FR-010; active/pending subscription cancelled at Razorpay immediately; financial rows carry `sha256(user_id)` + `erased_at` and vanish from API-015/017; Redis keys gone. |
 | FR-017 Retry failed analysis | CMP-001, CMP-005, CMP-010 | TBL-002 (status → pending, attempts), TBL-003, TBL-004 | API-010 (202) | AC: only failed can retry, no extra credit reserved, returns 202 and re-enqueues. Non-failed → 400. |
 | NFR-001 Analysis latency | CMP-005, CMP-010 | TBL-002 (`created_at`, `started_at`, `completed_at`) | API-005, API-007 | APM + BullMQ timings: enqueue→terminal p95 < K-12; queue wait p95 < K-14; POST p95 < K-13 in staging load test. |
 | NFR-002 API latency | CMP-001 | — (runtime metric) | All CRUD APIs | APM: p95 < 200ms for CRUD, < 500ms for PDF. |
