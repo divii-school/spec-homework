@@ -245,7 +245,7 @@ Retention (CR-022). All periods are in §3.4:
 |---|---|---|---|
 | CR-035 | CI | Every pull request runs GitHub Actions workflow `ci.yml`: backend `./mvnw -B verify` (Spotless check, Checkstyle, unit tests, Testcontainers integration tests, JaCoCo gate, dependency-check), frontend `npm ci && npm run lint && npm run typecheck && npm test && npm run build`, and `gitleaks`. A PR cannot be merged unless every job is green (branch protection on `main`). | Branch protection settings; workflow file. |
 | CR-036 | CD | A merge to `main` builds Docker images `ro-backend:<git-sha>` and `ro-frontend:<git-sha>`, pushes them to Amazon ECR, and deploys them to `dev` automatically. Pushing a tag `vMAJOR.MINOR.PATCH` deploys **the same image digests** to `staging`. `prod` deploys the staging digests after a manual approval in the GitHub environment `prod` (approver: tech lead or engineering manager). | Workflow `cd.yml`; ECS task definitions reference digests. |
-| CR-037 | Release | Deployments are rolling with zero downtime: ECS `minimumHealthyPercent=100`, `maximumPercent=200`; a task receives traffic only after `GET /actuator/health/readiness` returns 200. On shutdown the backend stops claiming analyses, finishes or releases in-flight work within 30 s (`server.shutdown=graceful`, `spring.lifecycle.timeout-per-shutdown-phase=30s`); unfinished analyses are picked up again via the lease (FR-019). | Staging deploy during a load test shows no 5xx. |
+| CR-037 | Release | Deployments are rolling with zero downtime: ECS `minimumHealthyPercent=100`, `maximumPercent=200`; a task receives traffic only after `GET /actuator/health/readiness` returns 200. On shutdown the backend stops claiming analyses, finishes or releases in-flight work within `SHUTDOWN_TIMEOUT` (`server.shutdown=graceful`, `spring.lifecycle.timeout-per-shutdown-phase`); unfinished analyses are picked up again via the lease (FR-019). | Staging deploy during a load test shows no 5xx. |
 | CR-038 | Database changes | Schema changes are Flyway migrations in `backend/src/main/resources/db/migration`, applied at application start (`spring.flyway.enabled=true`; `spring.jpa.hibernate.ddl-auto=validate`). A migration must keep the previous application version working (expand/contract): columns are added nullable or with a default, and a column is dropped only one release after the code stopped using it. | Code review checklist; CI boots the previous release image against the new schema in the `migration-compat` job. |
 | CR-039 | Rollback | Rollback = redeploy the previous ECS task-definition revision (`cd.yml` job `rollback`, input: target environment). It must complete within 15 minutes. Migrations are never rolled back; because of CR-038 the previous version runs on the new schema. | Rollback drill in `staging` before go-live, timed. |
 
@@ -447,7 +447,7 @@ Priorities: **Must** = needed for go-live; **Should** = planned for go-live, may
 | FR-016 | Analysis history | The user sees all their analyses. | Must | 1. API-008 returns the caller's analyses sorted by `createdAt` descending then `id` descending, paginated (§6.1). 2. Optional filter `status` (one of the four statuses). 3. Each item is an `AnalysisSummary` (§6.1): `id`, `status`, `failureCode`, `resume {id, filename}` (`id` is null after the resume expired), `jobRole {id, name}`, `experienceLevel`, `overallScore`, `scoreBand`, `createdAt`, `completedAt`; no suggestion text. 4. *(v1.1)* The list is available to **both** plans with the same content and retention (`ANALYSIS_RETENTION`). Resume Pro's "analysis history" (Round 2 item 3) is met by this list plus FR-031; the list is **not** restricted to Pro, because FREE users already have it and must stay exactly as they are (A-13). 5. *(v1.1)* For a PRO user the `/history` screen additionally lets them pick two `COMPLETED` rows and open the comparison (FR-031, §4.7); for a FREE user the screen is unchanged. |
 | FR-017 | Delete an analysis | The user deletes one analysis. | Must | 1. API-011 deletes the analysis and its child rows and returns `204`. 2. `QUEUED` or `PROCESSING` → `409 ANALYSIS_IN_PROGRESS`. 3. Missing or not owned → `404 RESOURCE_NOT_FOUND`. 4. No quota is given back. |
 | FR-018 | Download PDF report | The user downloads a completed analysis as a PDF. | Must | 1. API-010 returns `200`, `Content-Type: application/pdf`, `Content-Disposition: attachment; filename="surfingbear-resume-analysis-<yyyyMMdd>-<first 8 chars of id>.pdf"` (date = `createdAt` in `Asia/Kolkata`). 2. Status not `COMPLETED` → `409 ANALYSIS_NOT_COMPLETED` (ERR-026). 3. Content and layout follow §4.8; a FREE user's report contains only visible suggestions plus the locked-count notice; a PRO user's report (plan of FR-025 at download time) contains all suggestions. 4. The PDF is generated on each request and never stored. 5. A report for an analysis with 10 suggestions is generated in under 3 s at p95 (NFR-004). |
-| FR-019 | Failure handling | AI errors, timeouts and crashes never leave an analysis stuck and never cost the user quota. | Must | 1. AI call failures map to failure codes per §4.4: provider unavailable / rate-limited / timeout after the SDK retry → `AI_UNAVAILABLE` (ERR-031); invalid output twice → `AI_INVALID_RESPONSE` (ERR-032); `stop_reason = refusal` → `AI_REFUSED` (ERR-034), not retried; processing past `PROCESSING_DEADLINE` → `PROCESSING_TIMEOUT` (ERR-033). 2. While the circuit breaker (§4.4) is open, analyses fail at once with `AI_UNAVAILABLE`. 3. A lease that expires (worker crash) makes the analysis claimable again; on the claim that would be attempt `MAX_ATTEMPTS + 1`, it is set `FAILED` / `PROCESSING_TIMEOUT` instead. 4. A `QUEUED` analysis older than `MAX_QUEUE_AGE` is set `FAILED` / `PROCESSING_TIMEOUT` when the claimer sees it. 5. Every transition to `FAILED` gives the quota unit back (FR-009 criterion 5) and sets `completed_at`. 6. No analysis stays in `QUEUED` or `PROCESSING` longer than `MAX_QUEUE_AGE + MAX_ATTEMPTS × LEASE_DURATION` (26 minutes) (NFR-011). |
+| FR-019 | Failure handling | AI errors, timeouts and crashes never leave an analysis stuck and never cost the user quota. | Must | 1. AI call failures map to failure codes per §4.4: provider unavailable / rate-limited / timeout after the SDK retry → `AI_UNAVAILABLE` (ERR-031); invalid output twice → `AI_INVALID_RESPONSE` (ERR-032); `stop_reason = refusal` → `AI_REFUSED` (ERR-034), not retried; processing past `PROCESSING_DEADLINE` → `PROCESSING_TIMEOUT` (ERR-033). 2. While the circuit breaker (§4.4) is open, analyses fail at once with `AI_UNAVAILABLE`. 3. A lease that expires (worker crash) makes the analysis claimable again; on the claim that would be attempt `MAX_ATTEMPTS + 1`, it is set `FAILED` / `PROCESSING_TIMEOUT` instead. 4. A `QUEUED` analysis older than `MAX_QUEUE_AGE` is set `FAILED` / `PROCESSING_TIMEOUT` when the claimer sees it. 5. Every transition to `FAILED` gives the quota unit back (FR-009 criterion 5) and sets `completed_at`. 6. No analysis stays in `QUEUED` or `PROCESSING` longer than `MAX_ANALYSIS_LIFETIME` (NFR-011). |
 | FR-020 | Export my data | The user downloads everything the Module holds about them. | Must | 1. API-012 returns `200`, `Content-Type: application/json`, `Content-Disposition: attachment; filename="surfingbear-resume-optimizer-data-<yyyyMMdd>.json"`. 2. The body contains `exportedAt`, `userId`, `consents[]`, `resumes[]` (all fields including `textRedacted`), `analyses[]` (all fields, all dimensions, both skill lists and **all** suggestions regardless of plan) and `usage[]` (all TBL-007 rows), and since v1.1 `subscriptions[]` (all TBL-013 rows of the user, each with its `payments[]` from TBL-014), with the shapes in §6.2 API-012. 3. Writes audit event `DATA_EXPORTED`. 4. Rate-limited by bucket `export` (CR-020). |
 | FR-021 | Erase my data | The user deletes all their data and withdraws consent in one action. | Must | 1. API-013 requires body `{"confirm":"DELETE_MY_DATA"}`; anything else → `400 VALIDATION_FAILED`. 2. In one transaction: delete all the user's TBL-003 rows (children cascade) **including** `QUEUED`/`PROCESSING` ones, delete all TBL-002 rows, set `withdrawn_at = now` on every active TBL-001 row, insert one TBL-010 row with the counts, and write audit event `DATA_ERASED`. 3. Returns `200` with `erasureId`, `deletedResumeCount`, `deletedAnalysisCount`, `completedAt`. 4. A worker processing an erased analysis discards its result (FR-010 criterion 5). 5. Afterwards API-001 shows `consent.accepted = false`; uploads need a new consent. 6. TBL-007 usage rows are kept (FR-009 criterion 7). 6a. *(v1.1)* TBL-013 subscriptions and TBL-014 payments are kept (CR-042), and erasure does **not** cancel the subscription: a Pro user stays Pro until `paid_through` and keeps being charged until they cancel (FR-029). Before the user confirms, the `/privacy` dialog shows "Your Resume Pro subscription and payment records are not deleted. To stop payments, cancel Resume Pro first." (key `privacy.erasePro`) when API-001 returns `plan = PRO` or API-018 returns an open subscription. 7. Completes within 10 s for a user holding `MAX_STORED_RESUMES` resumes and 300 analyses (NFR-009). |
 | FR-022 | Automatic retention | Data is deleted automatically when its retention period ends. | Must | 1. `RetentionJob` runs at minute 15 of every hour (`cron = "0 15 * * * *"`, zone UTC), guarded by ShedLock so only one instance runs it (`lockAtMostFor = 50m`). 2. It deletes, in batches of 500 rows per transaction: analyses with `expires_at <= now` that are not `QUEUED`/`PROCESSING`; resumes with `expires_at <= now` that have no `QUEUED`/`PROCESSING` analysis (their remaining analyses keep `resume_id = NULL` via `ON DELETE SET NULL`); consents withdrawn more than `AUDIT_RETENTION` ago; TBL-010 and TBL-011 rows older than `AUDIT_RETENTION`; TBL-007 rows whose period ended more than 13 months ago; *(v1.1)* TBL-013 rows with `ended_at <= now − PAYMENT_RETENTION` (their TBL-014 rows cascade); TBL-013 rows that were never paid (`paid_through IS NULL`, so no TBL-014 rows and no accounting record) and are `ENDED` with `ended_at <= now − 7 days` (in practice expired checkouts); TBL-015 rows with `received_at <= now − WEBHOOK_EVENT_RETENTION`. 3. It logs one `INFO` line with the deleted counts per table, and `ERROR` (plus metric `ro_retention_failures_total`) on failure; the next run retries. 4. Data is never kept more than 1 hour 15 minutes past its expiry (NFR-008). |
@@ -476,7 +476,7 @@ Priorities: **Must** = needed for go-live; **Should** = planned for go-live, may
 | NFR-008 | Privacy | No personal data in logs; redaction before AI; retention on time | Canary test finds 0 occurrences (CR-010); 100% of the patterns in `PiiRedactorTest` redacted; no row exists more than 1 h 15 min after its `expires_at` | `NoPersonalDataInLogsIT`, `PiiRedactorTest`, `RetentionJobIT`; weekly prod query `SELECT count(*) FROM resumes WHERE expires_at < now() - interval '75 minutes'` = 0 |
 | NFR-009 | Privacy | Erasure speed and completeness | API-013 completes in ≤ 10 s for 20 resumes + 300 analyses; after it, 0 rows with that `user_id` remain in TBL-002…006 and active TBL-001; backups age out within 7 days | `DataErasureIT` with that data volume |
 | NFR-010 | Observability | Metrics, logs and alerts | 100% of requests carry `X-Request-Id` (CR-011); the metrics in §4.9 exist; the alerts in §4.9 fire within 5 minutes of their condition | `ObservabilityIT` asserts metric names on `/actuator/prometheus`; alert test in staging by injecting AI failures via WireMock |
-| NFR-011 | Reliability | No analysis is stuck; crashes recover | 0 analyses in `QUEUED`/`PROCESSING` older than 26 minutes; after killing a backend task mid-analysis, the analysis reaches a terminal state within `LEASE_DURATION + 60 s` | `WorkerRecoveryIT` (kill simulated by expiring the lease); prod alert `ro_analysis_stuck` |
+| NFR-011 | Reliability | No analysis is stuck; crashes recover | 0 analyses in `QUEUED`/`PROCESSING` older than `MAX_ANALYSIS_LIFETIME`; after killing one backend task mid-analysis while another task has a free worker slot, the analysis reaches a terminal state within `CRASH_RECOVERY_BOUND` of the kill | `WorkerRecoveryIT` (kill simulated by expiring the lease); prod alert `ro_analysis_stuck` |
 | NFR-012 | Backup and recovery | Database recovery | RPO ≤ 5 minutes (RDS point-in-time recovery), RTO ≤ 4 hours | Restore drill in staging every 6 months, timed |
 | NFR-013 | Cost | AI cost per completed analysis; *(v1.1)* AI cost per Resume Pro subscriber | Average ≤ US$ 0.15 per completed analysis per month, computed from `ro_ai_tokens_total` × the model's per-token price. Since v1.1 also: average AI cost of `PRO` analyses (`plan_at_creation = 'PRO'`) per paying subscriber per month ≤ ₹100, i.e. about 40% of the ₹253 net of 18% GST (A-14). Exceeding it is a product decision (price or plan change), **not** an automatic cap, because Resume Pro promises unlimited analyses | Monthly cost review; alert if the 7-day average per analysis exceeds US$ 0.20; alert if the 30-day AI cost per Pro subscriber exceeds ₹150 (§4.9) |
 | NFR-014 | Maintainability | Code quality gates | Line coverage ≥ 80% on the class set in §2.5; 0 ArchUnit violations; 0 Checkstyle errors | CI (`./mvnw verify`) |
@@ -561,12 +561,19 @@ The single source for every number used in more than one place. Property names a
 | `AI_REQUEST_TIMEOUT` | 75 s per HTTP attempt | `ro.ai.request-timeout` | §4.4 |
 | `AI_SDK_MAX_RETRIES` | 1 (so at most 2 HTTP attempts per call) | `ro.ai.max-retries` | §4.4 |
 | `AI_INVALID_OUTPUT_RETRIES` | 1 | `ro.ai.invalid-output-retries` | FR-010, §4.6.5 |
-| `PROCESSING_DEADLINE` | 300 s per attempt | `ro.analysis.processing-deadline` | FR-019 |
-| `LEASE_DURATION` | 330 s | `ro.analysis.lease-duration` | FR-019, §4.6.5 |
+| `AI_BACKOFF_ALLOWANCE` *(v1.2)* | 15 s per AI call: time allowed for the SDK's wait before its retry. The Anthropic Java SDK documents only "a short exponential backoff" and may follow a `retry-after` from the API, so a longer wait is possible; it then ends as `PROCESSING_TIMEOUT` (§4.6.5) | `ro.ai.backoff-allowance` | `AI_CALL_BUDGET` |
+| `AI_CALL_BUDGET` *(v1.2)* | **derived**: `(AI_SDK_MAX_RETRIES + 1) × AI_REQUEST_TIMEOUT + AI_BACKOFF_ALLOWANCE` = 2 × 75 s + 15 s = 165 s for one AI call including its SDK retry | — | §4.5, §4.6.5 |
+| `PROCESSING_DEADLINE` *(changed in v1.2; was 300 s, a property)* | **derived**: `(AI_INVALID_OUTPUT_RETRIES + 1) × AI_CALL_BUDGET` = 330 s per attempt, measured from the claim. v1.1's 300 s equalled the two calls without any backoff, so an invalid-output retry could end as `PROCESSING_TIMEOUT` instead of `AI_INVALID_RESPONSE` | — | FR-019, §4.6.5 |
+| `LEASE_MARGIN` *(v1.2)* | 30 s: time to cancel a task at its deadline and commit the `FAILED` update before the lease can be taken | `ro.analysis.lease-margin` | `LEASE_DURATION` |
+| `LEASE_DURATION` *(changed in v1.2; was 330 s, a property)* | **derived**: `PROCESSING_DEADLINE + LEASE_MARGIN` = 360 s, so a live task always finalises before its lease can be claimed by another worker | — | FR-019, §4.6.5 |
 | `MAX_ATTEMPTS` | 2 | **fixed** *(v1.2; was a property)*: DB CHECK `ck_analyses_attempt_count` | FR-019, §4.6.5, TBL-003 |
 | `MAX_QUEUE_AGE` | 900 s | `ro.analysis.max-queue-age` | FR-019 |
 | `WORKER_POLL_INTERVAL` | 1 s | `ro.worker.poll-interval` | §4.6.5 |
 | `WORKER_CONCURRENCY` | 4 per backend task | `ro.worker.concurrency` | FR-010, NFR-006 |
+| `MAX_ANALYSIS_LIFETIME` *(v1.2)* | **derived**: `MAX_QUEUE_AGE + MAX_ATTEMPTS × (LEASE_DURATION + WORKER_POLL_INTERVAL)` = 900 + 2 × 361 = 1,622 s (about 27 minutes; v1.1 said 26 minutes from the old lease and without the poll delay). Longest time from creation to a terminal state while a worker slot frees up within each lease | — | FR-019 criterion 6, NFR-011, §4.9 `ro_analysis_stuck` |
+| `CRASH_RECOVERY_BOUND` *(v1.2)* | **derived**: `2 × LEASE_DURATION + WORKER_POLL_INTERVAL` = 721 s. Kill right after a claim: the lease runs out (`LEASE_DURATION`), the next poll claims it again (`WORKER_POLL_INTERVAL`), and the new attempt ends within `PROCESSING_DEADLINE + LEASE_MARGIN` = `LEASE_DURATION`. v1.1's `LEASE_DURATION + 60 s` left out the second attempt | — | NFR-011 |
+| `SHUTDOWN_TIMEOUT` *(v1.2)* | 30 s | `spring.lifecycle.timeout-per-shutdown-phase` | CR-037 |
+| `SHUTDOWN_RELEASE_AFTER` *(v1.2)* | 25 s: on shutdown, tasks still running after this are cancelled and released, leaving 5 s of `SHUTDOWN_TIMEOUT` for the release updates | `ro.worker.shutdown-release-after` | §4.6.5 |
 | `CIRCUIT_BREAKER` | sliding window 20 calls, opens at ≥ 50% failures, stays open 60 s, 3 trial calls when half-open | `resilience4j.circuitbreaker.instances.anthropic.*` | §4.4, FR-019 |
 | `RESUME_RETENTION` | 30 days | `ro.retention.resume` | CR-022, FR-004, FR-022 |
 | `ANALYSIS_RETENTION` | 180 days | `ro.retention.analysis` | CR-022, FR-022 |
@@ -793,13 +800,13 @@ sequenceDiagram
   participant AI as AI client (CMP-011)
   participant X as Anthropic API
   participant V as Scoring (CMP-012)
-  loop every 1 s
-    W->>DB: fail stale (queue age > 900 s, attempts used up) + refund quota
-    W->>DB: claim up to N free slots (FOR UPDATE SKIP LOCKED), lease 330 s
+  loop every WORKER_POLL_INTERVAL
+    W->>DB: fail stale (queue age > MAX_QUEUE_AGE, attempts used up) + refund quota
+    W->>DB: claim up to N free slots (FOR UPDATE SKIP LOCKED), lease LEASE_DURATION
   end
   W->>DB: load resume text, job role + skills
   W->>AI: analyse(prompt)
-  AI->>X: POST /v1/messages (structured output, timeout 75 s, 1 SDK retry)
+  AI->>X: POST /v1/messages (structured output, timeout AI_REQUEST_TIMEOUT, AI_SDK_MAX_RETRIES SDK retry)
   alt provider error / timeout / circuit open
     X-->>AI: 429 / 5xx / timeout
     AI-->>W: AiFailure(AI_UNAVAILABLE)
@@ -810,13 +817,15 @@ sequenceDiagram
   else JSON returned
     AI-->>W: output
     W->>V: validate(output)
-    alt rule V1 fails
+    alt rule V1 fails and at least AI_CALL_BUDGET is left before the deadline
       W->>AI: analyse(prompt) again (once)
       AI-->>W: output 2
       W->>V: validate(output 2)
       opt still invalid
         W->>DB: FAILED AI_INVALID_RESPONSE + refund quota
       end
+    else rule V1 fails with less than AI_CALL_BUDGET left
+      W->>DB: FAILED AI_INVALID_RESPONSE + refund quota (no second call)
     end
     V-->>W: dimensions, overall score, skills, kept suggestions
     W->>DB: one transaction: UPDATE analyses SET COMPLETED … WHERE status='PROCESSING' AND locked_by=me
@@ -826,7 +835,7 @@ sequenceDiagram
       W->>DB: INSERT dimension, skill, suggestion rows, COMMIT
     end
   end
-  Note over W: If the whole attempt exceeds 300 s, the task is interrupted and the analysis is set FAILED PROCESSING_TIMEOUT with a refund.
+  Note over W: If the whole attempt exceeds PROCESSING_DEADLINE, the task is interrupted and the analysis is set FAILED PROCESSING_TIMEOUT with a refund.
 ```
 
 #### 4.3.4 Crash recovery (FR-019 criterion 3)
@@ -837,14 +846,14 @@ sequenceDiagram
   participant W1 as Worker on task A
   participant W2 as Worker on task B
   participant DB as PostgreSQL
-  W1->>DB: claim analysis X (attempt 1, locked_until = t+330 s)
+  W1->>DB: claim analysis X (attempt 1, locked_until = t + LEASE_DURATION)
   Note over W1: task A crashes
-  W2->>DB: poll at t+331 s: X is PROCESSING with locked_until < now, attempt_count 1 < 2
+  W2->>DB: next poll after t + LEASE_DURATION: X is PROCESSING with locked_until < now, attempt_count 1 < MAX_ATTEMPTS
   W2->>DB: claim X (attempt 2, locked_by = B)
   alt attempt 2 finishes
     W2->>DB: COMPLETED or FAILED
   else task B also crashes
-    W2->>DB: (next poll by any worker) attempt_count 2 >= 2 → FAILED PROCESSING_TIMEOUT + refund
+    W2->>DB: (next poll by any worker) attempt_count 2 >= MAX_ATTEMPTS → FAILED PROCESSING_TIMEOUT + refund
   end
 ```
 
@@ -1105,7 +1114,7 @@ The user is `PRO` in any state as long as FR-025's `access_until` is in the futu
 | System | Purpose | Protocol / auth | Failure handling |
 |---|---|---|---|
 | SurfingBear Platform auth (CMP-021) | Verify user tokens | HTTPS `GET` of the JWKS at `ro.auth.jwks-uri` by Spring's `NimbusJwtDecoder`; keys cached 10 minutes; no credentials needed | If the JWKS cannot be fetched and no cached key matches the token's `kid`, the request gets `401 UNAUTHENTICATED` and an `ERROR` log `jwks_unavailable` (rate-limited to 1/min). Cached keys keep working while the JWKS endpoint is down. |
-| Anthropic Claude API (CMP-022) | Score the resume, find present skills, suggest rewrites | HTTPS `POST https://api.anthropic.com/v1/messages` through `AnthropicOkHttpClient` built with `.apiKey(RO_AI_API_KEY)`, `.timeout(Duration.ofSeconds(75))` (`AI_REQUEST_TIMEOUT`), `.maxRetries(1)` (`AI_SDK_MAX_RETRIES`; the SDK retries 408, 409, 429, 5xx and connection errors with backoff) | After the SDK's retry: `RateLimitException`, `InternalServerException`, overloaded (529), timeouts and I/O errors → `AI_UNAVAILABLE`. `BadRequestException`, `AuthenticationException`, `PermissionDeniedException`, `NotFoundException` → `AI_UNAVAILABLE` plus an `ERROR` log `ai_configuration_error` (a person must fix the key, model or request). `stop_reason = refusal` → `AI_REFUSED`. `stop_reason = max_tokens` or unparseable JSON → treated as invalid output (§4.6.5). Circuit breaker `anthropic` (`CIRCUIT_BREAKER`) counts `AI_UNAVAILABLE` outcomes; while open, calls fail immediately with `AI_UNAVAILABLE`. |
+| Anthropic Claude API (CMP-022) | Score the resume, find present skills, suggest rewrites | HTTPS `POST https://api.anthropic.com/v1/messages` through `AnthropicOkHttpClient` built with `.apiKey(RO_AI_API_KEY)`, `.timeout(AI_REQUEST_TIMEOUT)`, `.maxRetries(AI_SDK_MAX_RETRIES)` (the SDK default is 2; the SDK retries 408, 409, 429, 5xx and connection errors with backoff) | After the SDK's retry: `RateLimitException`, `InternalServerException`, overloaded (529), timeouts and I/O errors → `AI_UNAVAILABLE`. `BadRequestException`, `AuthenticationException`, `PermissionDeniedException`, `NotFoundException` → `AI_UNAVAILABLE` plus an `ERROR` log `ai_configuration_error` (a person must fix the key, model or request). `stop_reason = refusal` → `AI_REFUSED`. `stop_reason = max_tokens` or unparseable JSON → treated as invalid output (§4.6.5). Circuit breaker `anthropic` (`CIRCUIT_BREAKER`) counts `AI_UNAVAILABLE` outcomes; while open, calls fail immediately with `AI_UNAVAILABLE`. |
 | PostgreSQL (CMP-019) | Data and queue | JDBC over TLS, HikariCP pool 20 connections per task, user `ro_app` (DML only) for the app and `ro_migrator` (DDL) for Flyway | Connection failure on a request → `503 SERVICE_UNAVAILABLE`; readiness probe fails so the ALB stops routing to the task. The worker skips a poll when the database is unavailable and logs `WARN`. |
 | Redis (CMP-020) | Rate-limit counters | TLS, AUTH token, Lettuce, command timeout 200 ms | Fail-open (CR-020): the request proceeds, `WARN` at most once per minute, metric `ro_ratelimit_redis_errors_total`. |
 | Razorpay (CMP-030) *(v1.1)* | Sell and renew Resume Pro | **Outbound** (CMP-027): HTTPS to `https://api.razorpay.com/v1` with HTTP Basic auth `RAZORPAY_KEY_ID:RO_RAZORPAY_KEY_SECRET`, JSON, timeouts `RAZORPAY_TIMEOUT`, calls listed in §4.6.7. **Inbound**: webhooks to API-022, signed with the webhook secret; events subscribed in the dashboard (v1.2: nine, per §1.7 "Razorpay per environment"): `subscription.authenticated`, `subscription.activated`, `subscription.charged`, `subscription.pending`, `subscription.halted`, `subscription.cancelled`, `subscription.completed`, `subscription.paused`, `subscription.resumed`. Razorpay delivers at least once, in no guaranteed order, waits 5 s for a 2xx, retries for 24 h and then disables the webhook (FR-028 criterion 9). **Browser**: Razorpay Checkout script, opened with the key id and the `razorpaySubscriptionId` from API-019. | No automatic retry of outbound calls (creating or cancelling twice is worse than failing once). A failed call on a user request → `502 PAYMENT_PROVIDER_UNAVAILABLE`, nothing changed, the user retries; in the job (FR-032) the row is skipped and retried 10 minutes later. Metric `ro_billing_provider_errors_total{operation}`. Razorpay down does **not** affect existing Pro users: entitlement is read from our database only (FR-025). Lost webhooks are covered by API-020 and FR-032. Start-up: `fetchPlan(RAZORPAY_PLAN_ID)`; if the plan's amount ≠ `PRO_PRICE_PAISE`, currency ≠ `INR`, period ≠ `monthly` or interval ≠ 1, the application refuses to start; if Razorpay is unreachable at start-up, it logs `ERROR billing_plan_unchecked` and starts, and the reconciliation job repeats the check on each run until it succeeds (FR-032 group d); a mismatch found there logs `ERROR billing_plan_mismatch` and makes API-019 answer `502 PAYMENT_PROVIDER_UNAVAILABLE` until fixed, so nobody is sold the wrong price. |
@@ -1121,7 +1130,7 @@ The user is `PRO` in any state as long as FR-025's `access_until` is in the futu
 | PDF parsing | Apache PDFBox 3.0.x | Pure Java, Apache-licensed, gives text plus page and image counts and clear exceptions for encrypted files. |
 | DOCX parsing | Apache POI 5.4.x (`XWPFDocument`) | Reads body, tables, headers, pictures, and has built-in zip-bomb limits (CR-019). |
 | AI provider | Anthropic Claude, model `AI_MODEL` (`claude-opus-5-5`), effort `medium`, structured JSON output | The task is rubric scoring plus careful rewriting that must quote the resume exactly; structured output guarantees schema-valid JSON so the validator only has to check meaning. `medium` effort keeps p95 under the 60 s target (NFR-003) and cost under NFR-013. The model is a property, so it can be changed after an NFR-017 eval run without a code change. |
-| Resilience | Resilience4j 2.x circuit breaker | Stops sending traffic to a failing provider and lets users get an immediate, honest `AI_UNAVAILABLE` instead of waiting 150 s per analysis. |
+| Resilience | Resilience4j 2.x circuit breaker | Stops sending traffic to a failing provider and lets users get an immediate, honest `AI_UNAVAILABLE` instead of waiting up to `AI_CALL_BUDGET` per call. |
 | Database | PostgreSQL 16 (RDS Multi-AZ in prod) | Relational data with strict constraints (quota, one-in-progress, idempotency) that must hold under concurrency — enforced by row locks, partial unique indexes and `CHECK`s. `FOR UPDATE SKIP LOCKED` makes it a safe job queue, so no broker is needed for ~300 jobs/hour. |
 | Schema migrations | Flyway 10.x | Versioned SQL that matches §5 exactly; `ddl-auto=validate` makes the app refuse to start if entities and schema disagree. |
 | Cache / shared counters | Redis 7 (ElastiCache) | Rate limits must be shared by all backend tasks and expire on their own; `INCR` + `EXPIRE` does that in one round trip. Redis holds nothing that would be lost harmfully if it were flushed. |
@@ -1348,7 +1357,7 @@ All SQL below binds `:now` from the injected `Clock`; the database's `now()` is 
 **Each claimed analysis** is submitted to `analysis-pool`; the poller waits on it with a deadline of `PROCESSING_DEADLINE` from the claim. The task:
 1. Loads the resume's `text_redacted` and signals and the job role with its skills. If the analysis or its resume no longer exists, the task ends without calling the AI and finalises `FAILED` / `PROCESSING_TIMEOUT` with the guarded update below. (The retention job never removes a resume with an in-progress analysis, so this happens only after erasure or resume deletion, where the guarded update affects 0 rows and nothing is written.)
 2. Calls the AI (§4.6.4). Failures map as in §4.4.
-3. Validates (rules below). If rule V1 fails, or the JSON could not be parsed, or `stop_reason = max_tokens`, it calls the AI once more (`AI_INVALID_OUTPUT_RETRIES`); a second failure → `AI_INVALID_RESPONSE`.
+3. Validates (rules below). If rule V1 fails, or the JSON could not be parsed, or `stop_reason = max_tokens`, it calls the AI once more (`AI_INVALID_OUTPUT_RETRIES`); a second failure → `AI_INVALID_RESPONSE`. *(v1.2)* The second call is made only if at least `AI_CALL_BUDGET` is left before the deadline; otherwise the task finalises `FAILED` / `AI_INVALID_RESPONSE` at once, so invalid output always ends as `AI_INVALID_RESPONSE` and never as `PROCESSING_TIMEOUT`.
 4. Finalises (one transaction). On success:
    ```sql
    UPDATE analyses SET status = 'COMPLETED', overall_score = :overallScore, completed_at = :now,
@@ -1366,7 +1375,7 @@ All SQL below binds `:now` from the injected `Clock`; the database's `now()` is 
 
 If the deadline passes, the poller cancels the task (`future.cancel(true)`, which interrupts the HTTP call) and finalises `FAILED` / `PROCESSING_TIMEOUT` with the same guarded update.
 
-**Graceful shutdown:** claiming stops at once; tasks still running after 25 s are cancelled and their analyses released with `UPDATE analyses SET status = 'QUEUED', locked_by = NULL, locked_until = NULL, attempt_count = attempt_count - 1 WHERE id = :id AND locked_by = :me` (a deploy does not use up an attempt).
+**Graceful shutdown:** claiming stops at once; tasks still running after `SHUTDOWN_RELEASE_AFTER` are cancelled and their analyses released with `UPDATE analyses SET status = 'QUEUED', locked_by = NULL, locked_until = NULL, attempt_count = attempt_count - 1 WHERE id = :id AND locked_by = :me` (a deploy does not use up an attempt).
 
 **Validation rules** (CMP-012, `AiOutputValidator`):
 
@@ -1502,7 +1511,7 @@ Metrics (Micrometer, exposed at `/actuator/prometheus` on management port 8081):
 | `ro_analysis_total` | counter | `status` (`COMPLETED`, `FAILED`), `failure_code` | Terminal analyses |
 | `ro_analysis_duration_seconds` | timer (histogram) | `status` | From `created_at` to `completed_at` (NFR-003) |
 | `ro_analysis_queue_depth` | gauge | — | `count(*) WHERE status = 'QUEUED'`, sampled every 15 s |
-| `ro_analysis_stuck` | gauge | — | Count of `QUEUED`/`PROCESSING` older than 26 minutes (NFR-011) |
+| `ro_analysis_stuck` | gauge | — | Count of `QUEUED`/`PROCESSING` older than `MAX_ANALYSIS_LIFETIME` (NFR-011) |
 | `ro_ai_call_duration_seconds` | timer | `outcome` (`ok`, `unavailable`, `invalid`, `refused`) | Per AI call |
 | `ro_ai_tokens_total` | counter | `direction` (`input`, `output`), `model` | Cost tracking (NFR-013) |
 | `ro_ai_circuit_state` | gauge | `state` | Resilience4j state |
