@@ -3,9 +3,9 @@
 | Field | Value |
 |---|---|
 | Author | Sandip Kumar Mondal |
-| Version | v1.1 |
-| Last updated | 2026-10-19 |
-| Status | Review (Round 1 submission) |
+| Version | v1.4 |
+| Last updated | 2026-10-30 |
+| Status | Final (Round 2 submission + coordinator feedback applied) |
 
 > **How to read this document**
 > - Section order and numbering follow the standard template. IDs are permanent: never renumbered or reused. A removed item is marked **Deprecated** and its row is kept.
@@ -41,7 +41,7 @@ Rules every Divii / Hanriver project must follow. Each rule has an ID and must b
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-002 | Authentication | A module that lives inside a larger platform MUST NOT implement its own sign-up or login. It verifies the platform's session token (JWT, RS256) against the platform's published JWKS and trusts only the claims `sub`, `plan`, `exp`, `iat`, `iss`, `aud`. Token verification happens in one guard; no handler reads the token itself. | Code review: exactly one auth guard; integration test with a token signed by an unknown key is rejected with 401. |
+| CR-002 | Authentication | A module that lives inside a larger platform MUST NOT implement its own sign-up or login. It verifies the platform's session token (JWT, RS256) against the platform's published JWKS and trusts only the claims `sub`, `role`, `exp`, `iat`, `iss`, `aud`. Token verification happens in one guard; no handler reads the token itself. (v1.2: a `plan` claim, if the platform sends one, is ignored — the user's plan comes from this module's own subscription record, FR-034.) | Code review: exactly one auth guard; integration test with a token signed by an unknown key is rejected with 401. |
 | CR-003 | Authentication | Access tokens are short-lived (≤ 30 min). The JWKS is cached (Redis, 10 min TTL) and refreshed on an unknown `kid`. Clock skew tolerance is 60 s. Tokens are never stored server-side and never logged. | Test: expired token → 401 `ERR-002`; log sample contains no `Authorization` values. |
 | CR-004 | Authentication | Browser clients send the token as `Authorization: Bearer` from memory, or the platform's `httpOnly; Secure; SameSite=Lax` session cookie. Tokens MUST NOT be placed in `localStorage` or URL query strings. | Code review of the web API client; Playwright test asserts no token in `localStorage`. |
 | CR-005 | Authentication | Service-to-service and background callers (workers, schedulers) run with a service identity (internal network + per-service secret), never with a user's token. | Config review; worker has no JWT dependency. |
@@ -56,19 +56,23 @@ Rules every Divii / Hanriver project must follow. Each rule has an ID and must b
 
 **Role × permission table (Resume Optimizer)**
 
-Roles come from the platform token claim `role` (`[A-01]` — see §3.3): `user` (any logged-in SurfingBear member, plan `free` or `premium` from claim `plan`) and `admin` (SurfingBear ops staff). `system` is the worker's service identity.
+Roles come from the platform token claim `role` (`[A-01]` — see §3.3): `user` (any logged-in SurfingBear member) and `admin` (SurfingBear ops staff). `system` is the worker's service identity. A user's **plan** is `free` or `pro` ("Resume Pro"), derived from this module's subscription record (FR-034, BR-017; since v1.2).
 
-| Permission | `user` (free) | `user` (premium) | `admin` | `system` |
+| Permission | `user` (free) | `user` (pro) | `admin` | `system` |
 |---|---|---|---|---|
 | List job roles and levels | Yes | Yes | Yes | — |
 | Record consent | Own | Own | — | — |
-| Upload resume | Own, within quota | Own, within fair-use cap | No | — |
+| Upload resume | Own, within quota | Own, unlimited | No | — |
 | Start analysis | Own, within quota | Own | No | — |
 | Read analysis result | Own, free view (partial suggestions) | Own, full view | Any (metadata + audit only, no resume text) | Read/write all (pipeline) |
 | Download PDF report | Own, free view | Own, full view | No | Generate |
 | Delete own resume / analysis / all data | Own | Own | Any user's data on request (audited) | Purge jobs |
 | View usage and quota | Own | Own | Any user | — |
 | View audit log | No | No | Yes | Write |
+| Subscribe to Resume Pro (checkout) | Own | No (already Pro) | No | — |
+| View / cancel own subscription | Own (none) | Own | Any user (view only) | Expire job |
+| Compare two analyses | No | Own | No | — |
+| Receive payment webhooks | — | — | — | Razorpay (signature-verified, API-024) |
 
 ### 1.3 Logging
 
@@ -194,6 +198,7 @@ resume-optimizer/
 │   │   │   │   ├── queue/{queue.module.ts, queues.ts}
 │   │   │   │   ├── storage/{storage.port.ts, s3-storage.adapter.ts}
 │   │   │   │   ├── ai/{ai.port.ts, anthropic.adapter.ts, prompts/, schemas/}
+│   │   │   │   ├── payments/{payment.port.ts, razorpay.adapter.ts}        # v1.2 (CMP-011)
 │   │   │   │   └── pdf/{pdf-renderer.ts, templates/}
 │   │   │   └── modules/
 │   │   │       ├── roles/            # job roles + levels catalogue
@@ -201,7 +206,8 @@ resume-optimizer/
 │   │   │       ├── resumes/          # upload, validation, storage, parsing
 │   │   │       ├── analyses/         # orchestration, scoring, results, gating
 │   │   │       ├── reports/          # PDF generation + download
-│   │   │       ├── usage/            # quota + plan entitlements
+│   │   │       ├── usage/            # quota counters
+│   │   │       ├── billing/          # v1.2: subscriptions, checkout, webhooks, EntitlementService (FR-031..FR-034)
 │   │   │       ├── privacy/          # deletion requests, purge, data export
 │   │   │       ├── admin/
 │   │   │       ├── audit/
@@ -214,8 +220,10 @@ resume-optimizer/
 │       │   └── resume-optimizer/
 │       │       ├── page.tsx                      # upload + role picker (SCR-001)
 │       │       ├── analyses/page.tsx             # history (SCR-003)
-│       │       └── analyses/[id]/page.tsx        # result (SCR-002)
-│       ├── src/sections/{upload, analysis, history, privacy}/
+│       │       ├── analyses/[id]/page.tsx        # result (SCR-002)
+│       │       ├── analyses/compare/page.tsx     # v1.2 comparison (SCR-003)
+│       │       └── plan/page.tsx                 # v1.2 Resume Pro plan & billing (SCR-005)
+│       ├── src/sections/{upload, analysis, history, privacy, billing}/   # billing: v1.2
 │       ├── src/components/           # shared UI
 │       ├── src/services/             # api-client.ts + one service per API module
 │       ├── src/hooks/, src/utils/, src/types/, src/locales/
@@ -226,7 +234,7 @@ resume-optimizer/
 
 Layering rules:
 - Backend: **Controller → Service → Repository (Prisma)**. Controllers hold no business logic; services hold no HTTP concerns; Prisma calls live in services or repositories, never in controllers.
-- External systems are reached only through a **port interface** in `infra/` (`StoragePort`, `AiPort`) with one adapter each; services depend on the port. This is the "well-defined backend boundary" for the AI provider.
+- External systems are reached only through a **port interface** in `infra/` (`StoragePort`, `AiPort`, and since v1.2 `PaymentPort`) with one adapter each; services depend on the port. This is the "well-defined backend boundary" for the AI and payment providers.
 - Frontend: Server Components first; Client Components only for hooks, events and local state. All HTTP goes through `src/services/*`; components never call `fetch` directly.
 - Validation is defined once: every request payload has a Zod schema in `@resume/shared`; the API derives its DTO from the same field list; the web form reuses the Zod schema.
 
@@ -265,6 +273,8 @@ Test conventions: every `BR-` business rule in §3.3.3 has at least one test nam
 
 **Confirmed product input (from `BRIEF.md`, verbatim scope):** users upload a resume (PDF or DOCX) · choose a target job role and experience level · the system reads the resume · AI scores it out of 100 on several ATS dimensions · lists missing skills for that role · suggests rewrites for weak lines · free users get a limited number of analyses per month and see only some suggestions · users can download the analysis as a PDF · users are already logged in through the main SurfingBear platform (no sign-up/login here) · resumes contain personal data and must be handled under India's DPDP Act.
 
+**Round 2 confirmed input (coordinator, 2026-10-22, verbatim scope):** SurfingBear adds a paid plan **Resume Pro**: monthly subscription of ₹299 paid through Razorpay · Pro users get unlimited analyses and see all rewrite suggestions · Pro users get an analysis history (list of past analyses) and a score comparison between two analyses · a user can cancel at any time and Pro access continues until the end of the paid month · free users stay exactly as they are today. Implemented in v1.2 as FR-031–FR-037; superseded v1.0 items are marked Deprecated, never renumbered.
+
 Everything else below is engineering design. Where a requirement rests on an assumption, the assumption ID `[A-nn]` is cited and defined in §3.3.2.
 
 ### 3.1 Functional requirements
@@ -272,14 +282,14 @@ Everything else below is engineering design. Where a requirement rests on an ass
 | ID | Title | Description | Priority | Acceptance criteria |
 |---|---|---|---|---|
 | FR-001 | List job roles and experience levels | Any logged-in user can fetch the catalogue of target roles (`job_roles`, TBL-001) and the fixed experience levels `entry, mid, senior, lead` `[A-05]`. | Must | 1. `GET` returns only roles with `is_active = true`, sorted by `family` then `title`. 2. Each role carries `id, slug, title, family`. 3. Levels are returned with their year bands (`entry 0–2`, `mid 2–5`, `senior 5–10`, `lead 10+`). 4. Response is cacheable for 10 min (`Cache-Control: private, max-age=600`). |
-| FR-002 | Show plan and quota | A user can see their plan (`free`/`premium`, from the platform token `[A-01]`), analyses used and remaining in the current period, and when the period resets. | Must | 1. Free: `limit = FREE_MONTHLY_ANALYSES`, `used = usage_counters.count` for the current calendar month in `QUOTA_TIMEZONE` (BR-003) — incremented on every start, decremented only by a refund (BR-007). 2. Premium: `limit = PREMIUM_DAILY_CAP` per calendar day, `periodType = day`. 3. `resetsAt` is the first instant of the next period, ISO-8601 UTC. 4. Values come from `usage_counters` (TBL-010), not from Redis (BR-004). |
+| FR-002 | Show plan and quota | A user can see their plan (`free`/`pro`, from the subscription record — FR-034, BR-017; *changed v1.2*), analyses used and remaining in the current period, when the period resets, and a summary of their subscription. | Must | 1. Free: `limit = FREE_MONTHLY_ANALYSES`, `used = usage_counters.count` for the current calendar month in `QUOTA_TIMEZONE` (BR-003) — incremented on every start, decremented only by a refund (BR-007). 2. Pro: `limit = null`, `unlimited = true`, `used` = this month's count (informational only, never enforced — BR-020); `periodType = month`. *(v1.0 "premium: `PREMIUM_DAILY_CAP` per day" is Deprecated — A-07.)* 3. `resetsAt` is the first instant of the next month, ISO-8601 UTC. 4. Values come from `usage_counters` (TBL-010), not from Redis (BR-004). 5. Response includes `subscription: { status, currentPeriodEnd, cancelAtPeriodEnd } \| null` (FR-037). |
 | FR-003 | Record consent before processing | Before the first upload, and again whenever `CONSENT_VERSION` changes, the user must accept the DPDP notice (purpose, data, third-party AI processing, retention, rights). The acceptance is stored with version, time, IP and user agent. | Must | 1. Upload (FR-004) and analysis (FR-008) return 403 `ERR-006` when no consent row exists for the current `CONSENT_VERSION`. 2. Accepting creates a `consents` row (TBL-003) and an audit row `consent.accepted`. 3. `GET /consents/current` tells the client whether acceptance is needed and returns the notice text version. 4. Consent can be withdrawn by the erase-all flow (FR-022); withdrawal is recorded as `consent.withdrawn`. |
 | FR-004 | Upload a resume file | A user uploads one resume as `multipart/form-data` field `file`. The API accepts only PDF and DOCX and only up to `MAX_FILE_BYTES` (5 MiB) `[A-02]`. | Must | 1. Declared `Content-Type` ∉ {`application/pdf`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`} → 415 `ERR-011`. 2. Size > `MAX_FILE_BYTES` → 413 `ERR-010`; the limit is enforced by the multipart parser before buffering the whole body. 3. Size = 0 → 422 `ERR-013`. 4. Success → 201 with `resumeId`, `status = uploaded`, and the file stored per FR-007. 5. Rate limit `RATE_LIMIT_UPLOAD` = 10 uploads/hour/user → 429 `ERR-005`. 6. User with a pending erase request (FR-022) → 409 `ERR-025`. |
 | FR-005 | Validate file integrity | After the size/type check the API validates the file signature and structure before it is stored or parsed. | Must | 1. PDF must start with bytes `%PDF-`; DOCX must be a ZIP (`PK\x03\x04`) containing `word/document.xml`; mismatch with the declared type → 415 `ERR-012`. 2. Encrypted PDF (`/Encrypt` in trailer) or password-protected DOCX → 422 `ERR-014`. 3. PDF with > `MAX_PAGES` (10) pages → 422 `ERR-016`. 4. Structurally unreadable file (parser throws) → 422 `ERR-015`. 5. A rejected file is never written to object storage; nothing persists except an audit row `resume.rejected` with the error code. 6. Validation runs on a stream with a hard 10 s CPU budget; exceeding it counts as `ERR-015`. |
 | FR-006 | Extract resume text | The worker extracts plain text from the stored file (PDF via `pdf-parse`, DOCX via `mammoth`) `[A-03]`, normalises whitespace, and stores it on the resume. | Must | 1. Extraction runs in the worker (CMP-003), not in the HTTP request; resume status moves `uploaded → extracting → ready`. 2. Extracted text < `MIN_EXTRACTED_CHARS` (200) → status `extraction_failed`, `failureCode = TEXT_TOO_SHORT` (ERR-017) — covers scanned/image-only PDFs; OCR is out of scope `[A-04]`. 3. Extracted text > `MAX_EXTRACTED_CHARS` (60 000) → `extraction_failed`, `ERR-018`. 4. Parser exception → `extraction_failed`, `ERR-015`. 5. Text is stored as `extracted_text` (PII, TBL-004) with `extracted_at`; the original byte stream is never loaded into memory beyond the streaming parser. 6. Control characters except `\n` and `\t` are stripped; the text is NFC-normalised. |
 | FR-007 | Secure temporary storage and cleanup | Uploaded files are stored privately in object storage under a per-user key, encrypted at rest, and deleted automatically after use. | Must | 1. Key format `resumes/{env}/{userId}/{resumeId}.{pdf\|docx}`; bucket is private; SSE-KMS (CR-026). 2. The API streams the validated file to storage; no file is written to local disk except an OS temp file that is unlinked in a `finally` block. 3. The original file is deleted `RESUME_FILE_RETENTION_HOURS` (24) after the last analysis on it reaches a terminal state, by the purge job (FR-023); `resumes.file_deleted_at` is set. 4. Storage write failure → 503 `ERR-034`, nothing persisted. 5. Users can delete the file earlier via FR-021. |
 | FR-008 | Start an analysis | The user starts an analysis of a ready resume for one `roleId` and one `experienceLevel`. | Must | 1. Body `{ resumeId, roleId, experienceLevel }`; unknown/inactive role → 422 `ERR-023`; level ∉ enum → 400 `ERR-001`. 2. Resume must belong to the user, be `ready`, and still hold `extracted_text`; `uploaded/extracting` → 409 `ERR-019` (`details.reason = "processing"`); text purged by FR-023 → 409 `ERR-019` (`details.reason = "text_expired"`, UI asks for a re-upload); `extraction_failed` → 422 with the resume's failure code. 3. Quota and concurrency are checked atomically (FR-009). 4. On success an `analyses` row (TBL-005) with status `queued` is created and job `run-analysis` is enqueued in the same transaction boundary (BR-006); response 202 `{ analysisId, status: queued }`. 5. Consent gate per FR-003. |
-| FR-009 | Enforce quota and concurrency | Free users get `FREE_MONTHLY_ANALYSES` (3) analyses per calendar month `[A-06]`; premium users `PREMIUM_DAILY_CAP` (20) per day as fair use `[A-07]`. At most `MAX_INFLIGHT_PER_USER` (1) analysis may be `queued/running` per user `[A-08]`. | Must | 1. The counter of record is `usage_counters` (TBL-010), incremented inside the same DB transaction that inserts the analysis, with `SELECT … FOR UPDATE` on the user's period row (BR-004). 2. Redis key `ro:{env}:quota:user:{userId}:{period}` is a fast-path cache of the counter with TTL to period end; a miss or Redis outage falls back to the DB (BR-005). 3. Exceeding the limit → 402 `ERR-020` with `details { limit, used, resetsAt, plan }`. 4. A second concurrent start while one is in flight → 409 `ERR-021` with `details.analysisId`; enforced by the partial unique index `uq_analyses_user_inflight` (IDX-05). 5. Analyses that end `failed` for a system reason (`AI_*`, `INTERNAL`) are refunded: the counter is decremented in the failure transaction (BR-007). 6. Two simultaneous requests with one quota left: exactly one succeeds (TC-041). |
+| FR-009 | Enforce quota and concurrency | Free users get `FREE_MONTHLY_ANALYSES` (3) analyses per calendar month `[A-06]`; Pro users are **unlimited** (*changed v1.2*, Round 2 point 2; the v1.0 fair-use cap `[A-07]` is Deprecated). At most `MAX_INFLIGHT_PER_USER` (1) analysis may be `queued/running` per user `[A-08]`, for both plans. | Must | 1. The counter of record is `usage_counters` (TBL-010), incremented inside the same DB transaction that inserts the analysis, with `SELECT … FOR UPDATE` on the user's period row (BR-004); for Pro users the counter is incremented but never compared to a limit (BR-020). 2. Redis key `ro:{env}:quota:user:{userId}:{period}` is a fast-path cache of the counter with TTL to period end; a miss or Redis outage falls back to the DB (BR-005); the fast path is skipped for Pro users. 3. Exceeding the limit (free plan only) → 402 `ERR-020` with `details { limit, used, resetsAt, plan }`; the only guards for Pro are the API-008 rate limit (30 starts/hour, 429 `ERR-005`) and the in-flight rule. 4. A second concurrent start while one is in flight → 409 `ERR-021` with `details.analysisId`; enforced by the partial unique index `uq_analyses_user_inflight` (IDX-05). 5. Analyses that end `failed` for a system reason (`AI_*`, `INTERNAL`) are refunded: the counter is decremented in the failure transaction (BR-007). 6. Two simultaneous requests with one quota left: exactly one succeeds (TC-041). |
 | FR-010 | Run the analysis asynchronously and expose status | The worker runs parse-check → AI scoring → validation → persistence; the client polls status. | Must | 1. Status values: `queued → running → completed \| failed`; `failed` carries `failureCode` from ERR-040…ERR-047 and `userMessage`. 2. `GET /analyses/{id}` returns status within 300 ms p95 (NFR-003); clients poll every 2 s with `Retry-After: 2` hint while non-terminal. 3. A job is processed at most once at a time (BullMQ job id = `analysisId`); a retried job after a worker crash resumes idempotently: if the analysis is already terminal it exits without side effects (BR-008). 4. Job attempts: `JOB_MAX_ATTEMPTS` (3), exponential backoff 10 s; after the last attempt the analysis is marked `failed` with the last failure code. 5. End-to-end time from `queued` to terminal state p95 < 45 s (NFR-002). |
 | FR-011 | Score the resume on ATS dimensions | The AI scores six dimensions, each 0–100; the system computes the overall score as the weighted sum with weights that total exactly 100 % `[A-09]`. | Must | 1. Dimensions and weights: `keyword_match` 30 % · `experience_relevance` 20 % · `formatting_parseability` 15 % · `impact_quantification` 15 % · `section_completeness` 10 % · `clarity_language` 10 % (= 100 %). 2. `overallScore = round(Σ(weight_i × score_i) / 100)` using round-half-up to an integer 0–100; computed by the system, never taken from the AI. 3. Each dimension score is stored with a ≤ 300-char `rationale` and up to 5 `evidence` quotes that must be verbatim substrings of the extracted text (BR-010). 4. A dimension the AI reports as `null` (insufficient information) is scored 0 and flagged `insufficientData = true`; the response explains which dimension lacked data. 5. Score bands shown in UI: 0–49 "Needs work", 50–74 "Fair", 75–89 "Strong", 90–100 "Excellent". |
 | FR-012 | AI request contract | The worker calls the AI provider through `AiPort` (CMP-007) with a fixed system prompt, the role rubric (title, level, core and preferred skills from TBL-002), and the masked resume text, requesting a JSON object that matches the schema in §6.2 (API-009 result shape). | Must | 1. Before sending, e-mail addresses, phone numbers, URLs and postal codes in the text are replaced with placeholders `[EMAIL]`, `[PHONE]`, `[URL]`, `[PIN]` (BR-011, data minimisation). 2. The text is wrapped in a delimited data block with the instruction that it is untrusted data and contains no instructions (CR-022). 3. The request uses structured output (JSON schema) so the response is machine-parseable; `max_tokens` = `AI_MAX_OUTPUT_TOKENS` (8 000); timeout `AI_TIMEOUT_MS` (60 000). 4. Model, effort and timeout are configuration (`AI_MODEL` default `claude-opus-5-5`, `AI_EFFORT` default `medium`) `[A-10]`. 5. Every call writes an `ai_calls` row (TBL-011) with provider, model, latency, input/output tokens, status and error code — never prompt or response text. 6. The provider is told not to retain data for training (contractual/API setting) — see legal question L-2. |
@@ -287,13 +297,13 @@ Everything else below is engineering design. Where a requirement rests on an ass
 | FR-014 | Validate AI output and guard facts | Every AI result is validated by the system before it is stored; invalid parts are dropped or the analysis fails, so the user never sees invented facts. | Must | 1. Schema validation (Zod) on the whole object; dimension scores must be integers 0–100 or `null`. 2. Each `suggestion.originalText` must appear verbatim (after whitespace normalisation) in the extracted text; otherwise the suggestion is dropped (BR-010). 3. A `rewrittenText` must not contain a number (digits, percentages, currency) that does not appear in `originalText` or elsewhere in the extracted text; violating suggestions are dropped (BR-012). 4. A `rewrittenText` must not introduce a capitalised proper noun (employer, certification, institution) absent from the extracted text; violating suggestions are dropped (BR-012). 5. `missingSkills` entries must exist in the role's `role_skills` (TBL-002) and must not match (case-insensitive, token-normalised) any skill present in the extracted text (BR-013). 6. If after validation fewer than 1 dimension score remains valid, the analysis fails with `AI_MALFORMED_RESPONSE`. 7. The count of dropped items is stored in `analyses.validation_dropped` and logged (no content). |
 | FR-015 | List missing skills | The result lists skills required or preferred for the chosen role and level that are not evidenced in the resume. | Must | 1. Up to `MAX_MISSING_SKILLS` (15) entries, each `{ skill, importance: core\|preferred, why }` ordered core first then by the role's `rank`. 2. Source of truth is `role_skills` filtered by `level_min ≤ chosen level` (BR-013); the AI only judges presence/absence, it does not invent skills. 3. Free users see the first `FREE_VISIBLE_MISSING_SKILLS` (5) entries; the rest are returned as `{ locked: true }` placeholders with the total count (FR-017). |
 | FR-016 | Suggest rewrites for weak lines | The result lists up to `MAX_SUGGESTIONS` (10) weak lines with a rewrite and a reason. | Must | 1. Each entry `{ originalText, rewrittenText, reason, severity: high\|medium\|low }`; `rewrittenText` ≤ 400 chars; `reason` ≤ 200 chars. 2. Ordered by severity then by position of `originalText` in the resume. 3. All entries passed FR-014 checks. 4. Suggestions are in English (CR-031) `[A-13]`. 5. Each suggestion is labelled in the UI "Suggestion — verify before use"; the system never claims the rewrite is factually true. 6. Free users see the first `FREE_VISIBLE_SUGGESTIONS` (3) entries unlocked; the remainder are returned as locked placeholders (FR-017). |
-| FR-017 | Gate results by plan | Free-plan users receive a partial view of suggestions and missing skills; the overall score, dimension scores and rationales are shown to everyone `[A-11]`. | Must | 1. Gating is applied in the API response layer from the plan claim at read time, never by deleting data; upgrading to premium reveals the full stored result on the next read. 2. Locked entries are `{ locked: true }` with no text; counts `total` and `visible` are included. 3. The PDF report for a free user contains the same partial view plus an upgrade note (FR-019). 4. Premium users receive everything. 5. Response includes `plan` and `gating: { suggestionsVisible, missingSkillsVisible }`. |
-| FR-018 | List analysis history | A user can list their analyses, newest first, with status, role, level, overall score, and created time. | Should | 1. Paginated (§6.1), default `pageSize = 20`. 2. Filters: `status`, `roleId`. 3. Deleted analyses are excluded. 4. Each item carries `resumeId` and `reportAvailable`. |
-| FR-019 | Generate the PDF report | A user can request a PDF of a completed analysis; the worker renders it from the stored result and the report is stored in object storage. | Must | 1. `POST /analyses/{id}/report` on a `completed` analysis → 202 and job `render-report`; on a non-completed analysis → 409 `ERR-022`. 2. Report content: title, role and level, date, overall score and band, dimension table with rationales, missing skills (gated per plan), suggestions (gated per plan), the disclaimer text of FR-027, the `analysisId` and generation time. 3. Rendering uses `@react-pdf/renderer` in the worker `[A-12]`; no headless browser. 4. Filename `surfingbear-resume-analysis-{yyyyMMdd}-{analysisId first 8}.pdf`; only `[a-z0-9-]` characters. 5. Storage key `reports/{env}/{userId}/{analysisId}.pdf`; report row (TBL-009) status `generating → ready \| failed`; a second request while `generating` or `ready` returns the existing report (idempotent). 6. Render failure → status `failed`, `ERR-033`, audit row; the user may retry; three consecutive failures block further retries for 1 h. 7. Report must be ≤ 2 MB and ≤ 6 pages. |
+| FR-017 | Gate results by plan | Free-plan users receive a partial view of suggestions and missing skills; the overall score, dimension scores and rationales are shown to everyone `[A-11]`. Pro users see **all** suggestions and all missing skills (Round 2 point 2). | Must | 1. Gating is applied in the API response layer from the user's entitlement (BR-017) at read time, never by deleting data; upgrading to Resume Pro reveals the full stored result on the next read, and losing Pro (expiry) re-applies the free view on the next read. 2. Locked entries are `{ locked: true }` with no text; counts `total` and `visible` are included. 3. The PDF report for a free user contains the same partial view plus an upgrade note (FR-019). 4. Pro users receive everything. 5. Response includes `plan` and `gating: { suggestionsVisible, missingSkillsVisible, upgradeAvailable }` (`upgradeAvailable` has been part of the shape since v1.0, API-009). 6. Free-plan behaviour is identical to v1.0 (FR-036). |
+| FR-018 | List analysis history | A user can list their analyses, newest first, with status, role, level, overall score, and created time. *(Unchanged in v1.2: history was already available to every user in v1.0 and free users stay as they are — Round 2 point 5; the Pro-only addition is the comparison, FR-035.)* | Must (raised from Should in v1.2: Round 2 point 3 names history as a Pro deliverable) | 1. Paginated (§6.1), default `pageSize = 20`. 2. Filters: `status`, `roleId`. 3. Deleted analyses are excluded. 4. Each item carries `resumeId` and `reportAvailable`. |
+| FR-019 | Generate the PDF report | A user can request a PDF of a completed analysis; the worker renders it from the stored result and the report is stored in object storage. | Must | 1. `POST /analyses/{id}/report` on a `completed` analysis → 202 and job `render-report`; on a non-completed analysis → 409 `ERR-022`. 2. Report content: title, role and level, date, overall score and band, dimension table with rationales, missing skills (gated per plan), suggestions (gated per plan), the disclaimer text of FR-027, the `analysisId` and generation time. 3. Rendering uses `@react-pdf/renderer` in the worker `[A-12]`; no headless browser. 4. Filename `surfingbear-resume-analysis-{yyyyMMdd}-{analysisId first 8}.pdf`; only `[a-z0-9-]` characters. 5. Storage key `reports/{env}/{userId}/{analysisId}.pdf`; report row (TBL-009) status `generating → ready \| failed`, plus `purged` after retention; the row records `plan_at_render`. API-012 decides per BR-021 *(v1.4)*: `generating` → 200 existing; `ready` with `plan_at_render = pro`, or `plan_at_render = current plan` → 200 existing (idempotent); `ready` rendered as `free` while the user is now `pro` → 202 **re-render** (same row reset to `generating`, old object deleted first, so the Pro user never receives a gated PDF); `purged` → 202 re-render with the current plan; `failed` → retry rules of AC-6. A Pro-rendered PDF is never downgraded after the plan ends. 6. Render failure → status `failed`, `ERR-033`, audit row; the user may retry; three consecutive failures block further retries for 1 h. 7. Report must be ≤ 2 MB and ≤ 6 pages. |
 | FR-020 | Download the PDF report | A user downloads their own report through a short-lived signed URL. | Must | 1. `GET /analyses/{id}/report` returns `{ status, url, expiresAt }`; `url` is a presigned GET valid `REPORT_URL_TTL_SEC` (300 s) with `Content-Disposition: attachment; filename="…"`. 2. Only the owner can obtain a URL (CR-007); others get 404. 3. Each URL issuance writes audit row `report.downloaded`. 4. If the report is `generating`, the response is 200 with `status = generating` and no URL; if `failed`, `status = failed` with the error code. |
 | FR-021 | Delete a resume or an analysis | A user can delete a single resume (and its analyses and reports) or a single analysis (and its report). | Must | 1. Deletion is immediate for object-storage files and the PII columns (`extracted_text`, `original_filename` set to null, file deleted) and marks rows `deleted_at` (BR-014). 2. Non-PII metadata (ids, status, scores, timestamps) is retained until the retention purge (FR-023) for quota and audit integrity. 3. Returns 204; a second delete returns 204 (idempotent). 4. Audit rows `resume.deleted` / `analysis.deleted`. 5. Deleting a resume with an in-flight analysis cancels the job (BullMQ `remove` + status `failed`, `failureCode = CANCELLED` ERR-047) without quota refund. |
-| FR-022 | Erase all my data (right to erasure) | A user can request erasure of all their Resume Optimizer data; the system completes it asynchronously and confirms. | Must | 1. `POST /me/deletion-requests` creates a `deletion_requests` row (TBL-012) status `pending` → 202; new uploads and analyses are blocked while pending (`ERR-025`). 2. The worker deletes all resume files and reports from storage, nulls all PII columns, marks rows deleted, withdraws consent, and sets status `completed` with `completed_at` — target within 24 h, normally minutes (NFR-007). 3. Storage deletion failure → retry up to 5 times over 6 h; if still failing, status `failed`, alert to ops (Sentry), admin can re-run (FR-025). 4. Audit rows `erasure.requested`, `erasure.completed`; the audit log itself is retained (ids only) as the record of compliance. 5. `GET /me/deletion-requests/{id}` returns the status. 6. Usage counters for the current period are kept (not PII) so quota cannot be reset by erasing. |
-| FR-023 | Retention purge jobs | Scheduled jobs delete data when its retention period ends. | Must | 1. Resume files: `RESUME_FILE_RETENTION_HOURS` (24) after the last terminal analysis. 2. `extracted_text`: `EXTRACTED_TEXT_RETENTION_DAYS` (30) after upload. 3. Reports: `REPORT_RETENTION_DAYS` (30) after generation (re-generable on request if the analysis still exists). 4. Analyses, scores, suggestions, missing skills: `ANALYSIS_RETENTION_DAYS` (365) after creation → rows hard-deleted. 5. Audit rows: `AUDIT_RETENTION_YEARS` (2) → archived to cold storage then deleted. 6. Jobs run hourly (files, text, reports) and daily 02:00 UTC (analyses, audit); each is idempotent, batch-limited (500 rows/run), takes a Postgres advisory lock, and logs counts. |
+| FR-022 | Erase all my data (right to erasure) | A user can request erasure of all their Resume Optimizer data; the system completes it asynchronously and confirms. | Must | 1. `POST /me/deletion-requests` creates a `deletion_requests` row (TBL-012) status `pending` → 202; new uploads and analyses are blocked while pending (`ERR-025`). 2. The worker deletes all resume files and reports from storage, nulls all PII columns, marks rows deleted, withdraws consent, and sets status `completed` with `completed_at` — target within 24 h, normally minutes (NFR-007). 3. Storage deletion failure → retry up to 5 times over 6 h; if still failing, status `failed`, alert to ops (Sentry), admin can re-run (FR-025). 4. Audit rows `erasure.requested`, `erasure.completed`; the audit log itself is retained (ids only) as the record of compliance. 5. `GET /me/deletion-requests/{id}` returns the status. 6. Usage counters for the current period are kept (not PII) so quota cannot be reset by erasing. 7. *(v1.2)* A live Pro subscription is cancelled at the provider **immediately** (not at cycle end; no refund, A-18) and its row set to `expired` before pseudonymisation, so IDX-23 never collides on the sentinel id; billing records (`subscriptions`, `payment_events`) are retained for the statutory period with the `user_id` pseudonymised (sentinel id + hash) — see §5.4 and L-9. |
+| FR-023 | Retention purge jobs | Scheduled jobs delete data when its retention period ends. | Must | 1. Resume files: `RESUME_FILE_RETENTION_HOURS` (24) after the last terminal analysis. 2. `extracted_text`: `EXTRACTED_TEXT_RETENTION_DAYS` (30) after upload. 3. Reports: `REPORT_RETENTION_DAYS` (30) after `ready_at` the purge removes **only the PDF object**: `storage_key = NULL`, `status = purged`, `purged_at = now`; the `reports` row itself is kept (its `plan_at_render` and history stay) until the analysis is purged at 365 d (AC-4, cascade). A purged report is regenerated on the next API-012 call (BR-021) *(v1.4 clarification)*. 4. Analyses, scores, suggestions, missing skills: `ANALYSIS_RETENTION_DAYS` (365) after creation → rows hard-deleted. 5. Audit rows: `AUDIT_RETENTION_YEARS` (2) → archived to cold storage then deleted. 6. Jobs run hourly (files, text, reports) and daily 02:00 UTC (analyses, audit); each is idempotent, batch-limited (500 rows/run), takes a Postgres advisory lock, and logs counts. |
 | FR-024 | Audit data-lifecycle events | Every upload, analysis start/complete/fail, download, deletion, consent and admin access writes an append-only audit row. | Must | 1. Row fields per TBL-013; `actor_type ∈ user\|admin\|system`. 2. No resume content, file names or AI text in audit rows. 3. Audit writes are part of the business transaction where one exists; otherwise best-effort with a logged error (never fails the user action). |
 | FR-025 | Admin support operations | An admin can view a user's usage and analysis metadata, trigger an erasure on the user's behalf (e.g., a DPDP request by e-mail), and re-run a failed erasure. | Should | 1. Admin routes require role `admin` (CR-006). 2. Admin never receives extracted text, suggestions text or files; only ids, statuses, scores, timestamps and error codes. 3. Every admin read writes audit row `admin.viewed_usage`; every admin-triggered erasure stores `requested_by_admin_id`. 4. Audit log query is paginated and filterable by `userId`, `action`, date range. |
 | FR-026 | Health and readiness | The API and worker expose liveness and readiness. | Must | 1. `GET /health` → 200 always when the process is up. 2. `GET /ready` → 200 only if Postgres, Redis and object storage respond within 2 s each; otherwise 503 with the failing dependency named. 3. The worker exposes the same on its own port. |
@@ -301,6 +311,13 @@ Everything else below is engineering design. Where a requirement rests on an ass
 | FR-028 | Idempotent processing and crash recovery | Worker jobs are safe to re-run after a crash or redeploy. | Must | 1. Job id = `analysisId` / `reportId` so BullMQ deduplicates. 2. Every pipeline step checks the current DB status before acting and skips completed steps (BR-008). 3. A job stalled > 90 s (worker died) is re-queued by BullMQ stalled-job detection; the run count is in `analyses.attempts`. 4. Partial AI results are never persisted; persistence of a result is one transaction. |
 | FR-029 | Degraded-mode behaviour | The system behaves predictably when Redis, Postgres, storage or the AI provider is unavailable. | Must | 1. Redis down: reads (FR-002, FR-009 status, FR-018, FR-020) work from Postgres; uploads and analysis starts return 503 `ERR-031` (cannot enqueue, cannot rate-limit safely — CR-024 fail-closed); `/ready` is 503. 2. Postgres down: every request returns 503 `ERR-031`; the worker pauses consumption (BullMQ `pause`) until `/ready` passes; no job is lost because the queue is in Redis. 3. Object storage down: upload → 503 `ERR-034`; report download → 503 `ERR-034`; analyses that are already `ready` continue. 4. AI provider down: starts still succeed (queued), the circuit breaker delays jobs, failures after retries are reported per FR-013. 5. Every degraded path is covered by a test (TC-050–TC-054). |
 | FR-030 | Result retrieval shape | The analysis result is returned in one shape used by the web app, the PDF renderer and the admin view. | Must | 1. Shape per API-009 response schema. 2. Includes `disclaimer`, `gating`, `plan`, `model` (provider model id) and `generatedAt`. 3. Timestamps ISO-8601 UTC (CR-030). |
+| FR-031 | Subscribe to Resume Pro (v1.2) | A free user can buy the **Resume Pro** monthly subscription at ₹299/month `[A-17]` through Razorpay `[A-19]`, using Razorpay's hosted Checkout; the module never handles card data. | Must | 1. `POST /subscriptions/checkout` (API-022) creates a Razorpay Subscription for plan `RAZORPAY_PLAN_ID` (monthly, amount `PRO_PRICE_MINOR` = 29 900 paise, `PRO_CURRENCY` = INR) and a local `subscriptions` row (TBL-014) with status `created`; returns `{ subscriptionId, providerSubscriptionId, checkoutKeyId, amountMinor, currency, status }` for the web Checkout (API-022). 2. Checkout handler order: (a) if a row with status `active`, `past_due` or `cancelled` exists **and** its `current_period_end > now` → 409 `ERR-050`; (b) if such a row exists but its `current_period_end ≤ now` (period lapsed without a renewal webhook) the handler first sets it `expired` (same rule as the expiry job, FR-033 AC-4) and continues; (c) if an unpaid `created` row younger than `CHECKOUT_ABANDON_HOURS` exists, the same `providerSubscriptionId` is returned again with 200 so Checkout can be retried (no second provider subscription is created); (d) otherwise a new row is created. IDX-23 therefore never raises on this path; if it ever does (race), the handler returns 409 `ERR-050`, never 500. 3. A `created` subscription older than `CHECKOUT_ABANDON_HOURS` (24) with no payment is marked `abandoned` by the expiry job (FR-033) and a new checkout then creates a fresh row. 4. Activation happens only on the provider's `subscription.activated` / `subscription.charged` webhook (FR-032), never on the browser's return URL. 5. No free trial, no proration, no in-app refunds `[A-18]`. 6. Provider unavailable or error → 503 `ERR-052`, nothing persisted. 7. Rate limit: 5 checkout creations per hour per user (429 `ERR-005`). 8. Audit `subscription.checkout_created`. |
+| FR-032 | Process Razorpay webhooks (v1.2) | The module receives Razorpay webhooks, verifies the signature, stores each event once, and updates the subscription state asynchronously. | Must | 1. `POST /webhooks/razorpay` (API-024) is public (no JWT) and verifies `X-Razorpay-Signature` (HMAC-SHA256 of the raw body with `RAZORPAY_WEBHOOK_SECRET`); invalid → 401 `ERR-053`, body discarded. 2. Each event is inserted into `payment_events` (TBL-015) keyed by the provider event id (`uq_payment_events_provider_event_id`); a duplicate returns 200 without side effects (BR-019). 3. The endpoint acknowledges with 200 within 5 s and processing happens in the `payments` queue job `process-payment-event` (NFR-020). 4. Handled events and effects: `subscription.activated` / `subscription.charged` → status `active`, `current_period_start/end` from the event, `last_payment_at`, and the payment fields of the `payment_events` row (`provider_payment_id`, `amount_minor`, `currency`, `payment_status`); `subscription.pending` / `payment.failed` on an `active` subscription → status `past_due` (Pro access continues until `current_period_end`, BR-017); `payment.failed` on a `created` subscription (first Checkout attempt failed) → no status change, the row stays `created` so Checkout can be retried (FR-031 AC-2c) until it is abandoned; `subscription.halted` → `past_due` and `halted_at`; `subscription.cancelled` → status `cancelled` with `cancel_at_period_end = true` (or `expired` if `current_period_end ≤ now`); `subscription.completed` → `expired`. Unknown event types are stored with status `ignored`. 5. Events are applied in order of the provider `created_at`; an event older than the subscription's `last_event_at` is stored and ignored (out-of-order guard). 6. Every state change writes an audit row (TBL-013, action `subscription.<new_status>`, `details { from, to, providerEventId }`) and invalidates the Redis entitlement cache key for the user (FR-034). 7. A webhook that fails processing is retried by the queue (5 attempts, backoff 1 min, 5, 15, 60, 360); after the last attempt the event is marked `failed` and alerted (Sentry). 8. Nightly reconciliation (`reconcile-subscriptions`, FR-033 AC-5) fetches each non-terminal subscription from the provider and repairs drift. |
+| FR-033 | Cancel subscription and expiry (v1.2) | A Pro user can cancel at any time; Pro access continues until the end of the paid month (Round 2 point 4). | Must | 1. `POST /subscriptions/cancel` (API-023) calls the provider's cancel with "at cycle end", sets `cancel_at_period_end = true`, `cancelled_at = now`, status `cancelled`; access unchanged until `current_period_end` (BR-017, BR-018). 2. No subscription in a cancellable status → 409 `ERR-051`. 3. Cancellation is idempotent (second call → 200 same state). 4. Access ends at `current_period_end` itself: BR-017 is evaluated per request (cached ≤ 60 s), so the user is free from that instant regardless of the job. The hourly job `expire-subscriptions` is bookkeeping: it sets status `expired` where `status ∈ {active, cancelled, past_due} AND current_period_end ≤ now` (an `active` row only lapses this way if no renewal webhook arrived), invalidates the entitlement cache and writes audit `subscription.expired`. 5. Daily job `reconcile-subscriptions` (02:30 UTC) fetches each non-terminal subscription from the provider, applies the provider state through the same handler as FR-032 AC-4, and writes an audit row `subscription.reconciled` with `details { subscriptionId, before, after }` for every change (Sentry alert if more than 10 drifts in one run). 6. A user whose subscription is `cancelled` but still in period can **re-subscribe** only after expiry (409 `ERR-050` until then) `[A-18]`. 7. Provider unavailable on cancel → 503 `ERR-052`; the local state is not changed (the user retries). 8. Audit `subscription.cancel_requested`. |
+| FR-034 | Plan entitlement source (v1.2) | The user's plan is computed from the module's `subscriptions` table, not from the platform token; every plan-dependent rule (FR-002, FR-009, FR-017, FR-019, FR-035) reads this one function. | Must | 1. `EntitlementService.planFor(userId)` returns `pro` iff BR-017 holds, else `free`. 2. Result is cached in Redis key `ro:{env}:plan:{userId}` with TTL 60 s and invalidated on every subscription state change (FR-032 AC-6, FR-033); Redis unavailable → read the DB (NFR-021). 3. The platform `plan` claim, if present, is ignored (CR-002, A-01). 4. `plan` is evaluated at request time; an analysis started as Pro and read after expiry is shown with the free gating (FR-017 AC-1). 5. Admin usage view (API-016) shows the computed plan and the subscription status. |
+| FR-035 | Compare two analyses (Pro) (v1.2) | A Pro user can compare two of their completed analyses: overall and per-dimension score deltas, missing skills resolved and newly missing, and suggestion counts (Round 2 point 3). | Must | 1. `GET /analyses/compare?a=&b=` (API-025); both analyses must belong to the user, be `completed`, not deleted, and be different ids; otherwise 404 `ERR-004` (not owned/unknown) or 422 `ERR-055` (`details.reason ∈ {same_analysis, not_completed}`). 2. Free user → 402 `ERR-054` (`details.feature = "compare"`). 3. Response: `baseline` (= `a`), `comparison` (= `b`), `overallDelta = b.overallScore − a.overallScore`, per-dimension `{ dimension, a, b, delta }`, `missingSkills: { resolved[] (in a, not in b), newlyMissing[] (in b, not in a), unchanged[] }`, `suggestionCount: { a, b }`, and `sameRole: boolean` with a warning text when role or level differ. 4. Computed on read from stored results (no new table); p95 < 300 ms (NFR-003). 5. Comparison appears in the history screen (SCR-003) as "Select two to compare". 6. The comparison is on-screen only (SCR-003); it is not part of the PDF report, because TBL-009 holds exactly one report per analysis and API-012 is idempotent (a comparison PDF would be a separate feature). *(v1.3: the v1.2 `compareWith` option on API-012 was withdrawn for this reason.)* |
+| FR-036 | Free tier unchanged (v1.2) | Free users keep exactly the v1.0 behaviour: 3 analyses per calendar month, partial suggestions (3) and missing skills (5), history list, PDF with upgrade note (Round 2 point 5). | Must | 1. No free-plan acceptance criterion in FR-002, FR-009, FR-015, FR-016, FR-017, FR-018, FR-019 changes value in v1.2. 2. Regression tests TC-120 and TC-121 run the v1.0 free-plan scenarios unchanged and must pass. 3. A free user sees the Resume Pro offer (price, benefits, `SCR-005`) but no feature is removed. |
+| FR-037 | View subscription status (v1.2) | A user can see their subscription status, current period, cancellation state and payment history. | Must | 1. `GET /me/subscription` (API-021) returns `null` when the user never subscribed or the last subscription is `expired`/`abandoned` (with `lastSubscription` summary), otherwise `{ status, currentPeriodStart, currentPeriodEnd, cancelAtPeriodEnd, priceMinor, currency, payments: [{ paidAt, amountMinor, currency, providerPaymentId, status }] }`. 2. Payment history lists the last 24 months of `payment_events` of type payment. 3. Admin can view the same for any user via API-016 (no provider ids beyond the subscription id). |
 
 ### 3.2 Non-functional requirements
 
@@ -318,12 +335,15 @@ Everything else below is engineering design. Where a requirement rests on an ass
 | NFR-010 | Security | Untrusted content handling | 100 % of prompt-injection test payloads (10 cases) produce schema-valid results with no instruction following | TC-032 |
 | NFR-011 | Observability | Tracing of a user action | Every request and job carries `requestId`; Sentry captures 100 % of 5xx; dashboards for queue depth, AI latency, failure codes | Manual check per release; alert rules exist |
 | NFR-012 | Cost | AI spend per analysis | Average ≤ 25 000 input tokens and ≤ 4 000 output tokens per analysis; alert if daily spend > 2× 7-day average | `ai_calls` aggregation, dashboard |
-| NFR-013 | Accessibility | Web UI | WCAG 2.1 AA on upload, result and history screens; keyboard-only flow works | axe in Playwright; manual keyboard test |
+| NFR-013 | Accessibility | Web UI | WCAG 2.1 AA on upload, result, history, comparison and (v1.2) plan/billing screens; keyboard-only flow works, including the hand-off to and return from Razorpay Checkout | axe in Playwright; manual keyboard test |
 | NFR-014 | Compatibility | Browsers | Last 2 versions of Chrome, Edge, Firefox, Safari; iOS Safari 16+, Android Chrome | Playwright projects |
 | NFR-015 | Durability | Database backups | Daily snapshot, 14-day retention, PITR enabled; restore drill before go-live | Runbook evidence |
 | NFR-016 | Maintainability | Code quality gates | TS strict, 0 lint errors, coverage api 80 % / web 60 % / shared 90 % | CI |
 | NFR-017 | Testability | Deterministic AI in tests | AI port has a stub adapter replaying golden JSON fixtures; 100 % of pipeline tests run without network | Test suite config |
 | NFR-018 | Reliability | Job loss | 0 lost analyses on worker crash or redeploy (queue persistence + idempotent re-run) | TC-055 chaos test |
+| NFR-019 | Security (payments, v1.2) | No card or bank data ever reaches our systems (PCI DSS SAQ-A posture via hosted Checkout); webhook signature verified on 100 % of events; Razorpay secrets only in the api/worker environment | 0 card fields in any request DTO, table or log; TC-123 rejects an unsigned webhook | Code review; TC-123; `gitleaks` |
+| NFR-020 | Reliability (webhooks, v1.2) | Webhook acknowledgement and processing | ack p95 < 1 s (always before processing); event applied p95 < 5 s, p99 < 60 s; duplicates produce 0 side effects | TC-124; dashboard on `payment_events` |
+| NFR-021 | Consistency (entitlement, v1.2) | Pro access becomes effective after payment and ends exactly at the period end | effective ≤ 60 s after the activating event is received; access ends at `current_period_end` as evaluated per request (BR-017), visible within `PLAN_CACHE_TTL_SEC` = 60 s; the hourly job that marks the row `expired` is bookkeeping only and runs within 60 min | TC-122, TC-125, TC-126 |
 
 ### 3.3 Assumptions and out of scope
 
@@ -331,17 +351,19 @@ Everything else below is engineering design. Where a requirement rests on an ass
 
 Upload PDF/DOCX · choose role and experience level · AI score /100 on several ATS dimensions · missing skills for the role · rewrite suggestions for weak lines · free users: limited analyses per month and only some suggestions · PDF download · users already logged in via SurfingBear (no sign-up/login here) · personal data under India's DPDP Act · stack NestJS + Next.js + PostgreSQL + Redis.
 
+**Round 2 (2026-10-22):** Resume Pro monthly subscription at ₹299 via Razorpay · Pro = unlimited analyses + all rewrite suggestions · Pro gets analysis history and a score comparison between two analyses · cancel any time, access until end of the paid month · free users unchanged.
+
 #### 3.3.2 Engineering assumptions (not stakeholder-confirmed)
 
 | ID | Assumption | Reason | Needs confirmation from |
 |---|---|---|---|
-| A-01 | The platform session is a JWT (RS256) verifiable via a JWKS URL, carrying `sub` (user id, UUID), `plan` (`free`/`premium`), `role` (exactly one of `user`/`admin`; ops staff use separate admin accounts, and an `admin` token cannot call user endpoints), `exp`. | The brief says users are already logged in; a signed token is the standard way a module verifies that without a call per request. If the platform instead offers an introspection endpoint, only `JwtAuthGuard` changes. | Platform team |
+| A-01 | The platform session is a JWT (RS256) verifiable via a JWKS URL, carrying `sub` (user id, UUID), `role` (exactly one of `user`/`admin`; ops staff use separate admin accounts, and an `admin` token cannot call user endpoints), `exp`. *(v1.2: the `plan` claim assumed in v1.0 is no longer used; plan comes from FR-034.)* | The brief says users are already logged in; a signed token is the standard way a module verifies that without a call per request. If the platform instead offers an introspection endpoint, only `JwtAuthGuard` changes. | Platform team |
 | A-02 | Max upload 5 MiB, max 10 pages. | Resumes are 1–3 pages; 5 MiB covers image-heavy PDFs while bounding parse time and storage. | Product |
 | A-03 | Text extraction is done server-side with open-source parsers, not by sending the file to the AI provider. | Keeps the raw file (full PII) out of the third-party processor; enables masking (BR-011) and size control. | Product / DPO |
 | A-04 | Scanned image-only PDFs are rejected (no OCR). | OCR adds a dependency and cost; ATS systems also fail on image-only resumes, so rejection with guidance is the honest result. | Product |
 | A-05 | Experience levels are a fixed enum of four values. | Enough for rubric selection; avoids free text. | Product |
-| A-06 | Free quota = 3 analyses per calendar month (`Asia/Kolkata`). | "Limited number per month" needs a number; 3 allows one iteration loop without giving away the premium value. | Product |
-| A-07 | Premium users have a fair-use cap of 20 analyses/day. | Protects AI spend from abuse; invisible to normal use. | Product |
+| A-06 | Free quota = 3 analyses per calendar month (`Asia/Kolkata`). | "Limited number per month" needs a number; 3 allows one iteration loop without giving away the Resume Pro value. | Product |
+| A-07 | **Deprecated (v1.2)** — v1.0 assumed a premium fair-use cap of 20 analyses/day. Round 2 point 2 makes Pro unlimited; the only abuse guards are the API-008 rate limit and the in-flight rule. | Kept for history; do not reuse the ID. | — |
 | A-08 | One in-flight analysis per user. | Bounds cost and worker load; a user cannot meaningfully use two parallel results. | Product |
 | A-09 | Six scoring dimensions with weights 30/20/15/15/10/10. | Mirrors what commercial ATS checkers measure (keywords, experience fit, parseability, quantified impact, completeness, clarity); weights favour role fit. | Product |
 | A-10 | AI provider: Anthropic Claude via the Messages API with structured JSON output; model and effort are config. | Structured outputs give schema-valid JSON, which FR-014 depends on; provider is isolated behind `AiPort` so it can be swapped. | Engineering lead / DPO (L-2) |
@@ -351,6 +373,12 @@ Upload PDF/DOCX · choose role and experience level · AI score /100 on several 
 | A-14 | Single-region deployment in `ap-south-1` (Mumbai): AWS S3 for storage, managed Postgres and Redis, API/worker containers. | Keeps data in India by default, which simplifies the DPDP position; see L-1 for the AI provider transfer. | Infra / DPO |
 | A-15 | Platform users are adults (18+) per SurfingBear's own terms. | DPDP has special rules for children's data (L-4); the module cannot verify age. | Platform / Legal |
 | A-16 | Role catalogue seeded with ~25 roles across families Software, Data, Product, Design, Marketing, Operations, each with 10–20 skills per level. | Needed for missing-skill ground truth (BR-013); maintained by ops via seed/migration in v1 (no admin UI). | Product |
+| A-17 | (v1.2) ₹299 is the price **inclusive of GST**; INR only; billed monthly in advance; the Razorpay plan is created once in the Razorpay dashboard and referenced by `RAZORPAY_PLAN_ID`. | The brief gives only "₹299 monthly"; tax treatment and currency must be fixed for invoicing (L-9). | Finance / Product |
+| A-18 | (v1.2) No free trial, no proration, no in-app refunds; a cancelled subscription cannot be re-subscribed before it expires; refunds are handled by support through the Razorpay dashboard. | Keeps the state machine small for v1.2; the brief says nothing about trials or refunds. | Product |
+| A-19 | (v1.2) Razorpay **Subscriptions** (recurring, autopay) with hosted **Checkout** and **Webhooks**; activation is webhook-driven, never trusted from the browser. | Standard Razorpay recurring flow; keeps card data out of our systems (NFR-019). | Engineering lead |
+| A-20 | (v1.2) On a failed renewal the subscription becomes `past_due`; Pro access continues until `current_period_end`, then expires. Razorpay's own retry schedule is relied on; no extra grace period. | "Access continues until the end of the paid month" is the only rule given; a grace period would give unpaid access. | Product |
+| A-21 | (v1.2) The internal plan value is renamed `premium` → `pro` everywhere; "Resume Pro" is the display name. | The product now has a name; values are not IDs, so renaming is allowed and recorded in §8. | — |
+| A-22 | (v1.3) After Pro ends mid-month, analyses already run that month count against the free limit (no reset, no separate Pro counter). | Simplest rule that cannot be gamed by subscribing for a day; the user is told on SCR-005 ("Your free analyses for this month: n of 3 used"). | Product |
 
 #### 3.3.3 Business rules (defined once, referenced by ID)
 
@@ -358,7 +386,7 @@ Upload PDF/DOCX · choose role and experience level · AI score /100 on several 
 |---|---|
 | BR-001 | A resume can be analysed only when `status = ready` and `deleted_at IS NULL`; a resume belongs to exactly one user. |
 | BR-002 | An analysis is bound to exactly one `(resume, role, level)` triple at creation; changing the role requires a new analysis. |
-| BR-003 | Quota period: free = calendar month in `QUOTA_TIMEZONE`; premium = calendar day in `QUOTA_TIMEZONE`. Period key format `YYYY-MM` or `YYYY-MM-DD`. |
+| BR-003 | Quota period: free = calendar month in `QUOTA_TIMEZONE`, period key `YYYY-MM`. *(v1.0 "premium = calendar day, key `YYYY-MM-DD`" is Deprecated in v1.2; Pro has no quota, BR-020. The `day` period type remains in the schema only for historical rows.)* |
 | BR-004 | `usage_counters` in PostgreSQL is the source of truth for quota; it is updated in the same transaction as the analysis insert, under a row lock. Redis is a cache and rate-limiter only; it may be lost at any time without affecting correctness. |
 | BR-005 | Fast-path order on analysis start: read Redis counter → if present and ≥ limit, reject early (402) without touching the DB; otherwise do the DB transaction (authoritative) and write the new count back to Redis. Redis unavailable ⇒ skip the fast path. |
 | BR-006 | Enqueue-after-commit: the job is added to the queue only after the DB transaction commits; if the enqueue fails, the analysis is marked `failed` with `INTERNAL` and quota refunded. A reconciliation job (every 5 min) re-enqueues any `queued` analysis older than 2 min with no job in the queue. |
@@ -370,8 +398,13 @@ Upload PDF/DOCX · choose role and experience level · AI score /100 on several 
 | BR-012 | No-new-facts rule for rewrites: a rewrite may not introduce digits/percentages/currency amounts absent from the original line or the resume, nor capitalised multi-word proper nouns absent from the resume. Violations drop the suggestion. |
 | BR-013 | Missing-skill ground truth: candidate set = `role_skills` for the role where `level_min ≤ chosen level`; a skill is "present" if any of its `aliases` matches the extracted text (case-insensitive, word-boundary). The AI may only confirm or reject candidates and write the `why` text. |
 | BR-014 | Deletion semantics: user-initiated deletion removes files and PII columns immediately and sets `deleted_at`; non-PII metadata remains until retention purge; audit rows are never deleted by user action. |
-| BR-015 | Plan gating is a read-time projection of stored data based on the current token `plan`; stored data is always complete. |
+| BR-015 | Plan gating is a read-time projection of stored data based on the user's current entitlement (BR-017; *v1.2: no longer the token claim*); stored data is always complete. |
 | BR-016 | Every AI-generated text shown to the user is labelled as a suggestion/estimate (FR-027); the system makes no claim of ATS pass/fail prediction. |
+| BR-017 | (v1.2) **Entitlement rule:** a user is `pro` iff a `subscriptions` row exists with `status ∈ {active, past_due, cancelled}` and `current_period_end > now()`; otherwise `free`. Exactly this predicate is implemented once (FR-034) and used by every plan-dependent feature. |
+| BR-018 | (v1.2) **Subscription state machine:** `created → active` (first charge webhook) · `created → created` (first payment failed: no change, Checkout retried) · `created → abandoned` (no payment within `CHECKOUT_ABANDON_HOURS`) · `active → past_due` (failed renewal) · `past_due → active` (successful retry) · `active \| past_due → cancelled` (user cancel, provider cancel while in period) · `active \| past_due \| cancelled → expired` (period end reached: hourly job or checkout handler; provider `completed`; provider `cancelled` when the period has already ended; erasure, FR-022 AC-7). `expired` and `abandoned` are terminal; a new purchase creates a new row. At most one non-terminal subscription per user (IDX-23). |
+| BR-019 | (v1.2) **Webhook idempotency and ordering:** every provider event is stored once by provider event id; events are applied only if their provider `created_at` is ≥ the subscription's `last_event_at`; processing is in a queue job, after a fast 200 acknowledgement; replays and duplicates are no-ops. |
+| BR-020 | (v1.2) **Free unchanged / Pro unlimited:** the free plan's limits and views are exactly those of v1.0 (FR-036). For `pro`, the usage counter is maintained for reporting but no limit is applied; no daily cap exists. When Pro ends mid-month the free limit applies to the same month counter immediately: analyses started while Pro count toward it, so a user with `count ≥ FREE_MONTHLY_ANALYSES` is limited until the next month `[A-22]`. |
+| BR-021 | (v1.4) **Report lifecycle:** one `reports` row per analysis for the analysis's whole life. Retention (30 d after `ready_at`) deletes only the PDF object and marks the row `purged`; the row is deleted only when its analysis is purged (365 d). Regeneration on API-012: `purged` → re-render with the current plan; `ready` with `plan_at_render = free` and current plan `pro` → re-render (upgrade reveals full content); `ready` with `plan_at_render = pro` → always returned as is, even after the plan ended (a rendered Pro PDF is never downgraded); `generating` → returned as is; `failed` → FR-019 AC-6 retry rules. Re-render resets the same row (`status = generating`, `storage_key = NULL`, `plan_at_render = current plan`, `failures = 0`) after deleting the old object. |
 
 #### 3.3.4 Constants (configuration, with defaults)
 
@@ -381,7 +414,12 @@ Upload PDF/DOCX · choose role and experience level · AI score /100 on several 
 | `MAX_PAGES` | 10 | FR-005 |
 | `MIN_EXTRACTED_CHARS` / `MAX_EXTRACTED_CHARS` | 200 / 60 000 | FR-006 |
 | `FREE_MONTHLY_ANALYSES` | 3 | FR-002, FR-009 |
-| `PREMIUM_DAILY_CAP` | 20 | FR-002, FR-009 |
+| `PREMIUM_DAILY_CAP` | **Deprecated (v1.2)** — was 20 | formerly FR-002, FR-009; no longer read by any code path |
+| `PRO_PRICE_MINOR` / `PRO_CURRENCY` | 29 900 / `INR` | FR-031, FR-037 (display only; the charged amount comes from the Razorpay plan) |
+| `PRO_BILLING_INTERVAL` | `monthly` | FR-031 |
+| `CHECKOUT_ABANDON_HOURS` | 24 | FR-031 AC-3 |
+| `WEBHOOK_TOLERANCE_SEC` | 90 000 (25 h; v1.3 — was 300) | FR-032, API-024: an event whose provider `created_at` is older than this at receipt is stored with `ignore_reason = stale` and not applied. 25 h covers Razorpay's own 24 h retry window, so provider retries after an outage still activate subscriptions; replay protection itself is the unique event id (BR-019), not this window |
+| `PLAN_CACHE_TTL_SEC` | 60 | FR-034 |
 | `MAX_INFLIGHT_PER_USER` | 1 | FR-009 |
 | `FREE_VISIBLE_SUGGESTIONS` / `FREE_VISIBLE_MISSING_SKILLS` | 3 / 5 | FR-015, FR-016, FR-017 |
 | `MAX_SUGGESTIONS` / `MAX_MISSING_SKILLS` | 10 / 15 | FR-015, FR-016 |
@@ -393,13 +431,13 @@ Upload PDF/DOCX · choose role and experience level · AI score /100 on several 
 | `EXTRACTED_TEXT_RETENTION_DAYS` / `REPORT_RETENTION_DAYS` / `ANALYSIS_RETENTION_DAYS` / `AUDIT_RETENTION_YEARS` | 30 / 30 / 365 / 2 | FR-023 |
 | `REPORT_URL_TTL_SEC` | 300 | FR-020 |
 | `RATE_LIMIT_UPLOAD` | 10 per hour per user | FR-004 |
-| `CONSENT_VERSION` | `2026-10` | FR-003 |
+| `CONSENT_VERSION` | `2026-10-r2` (v1.2; was `2026-10`) | FR-003 — bumped because Razorpay was added as a processor (L-9) |
 
 #### 3.3.5 Out of scope (v1)
 
 | # | Item | Reason |
 |---|---|---|
-| OOS-1 | Sign-up, login, password reset, plan purchase | Owned by the SurfingBear platform (brief). |
+| OOS-1 | Sign-up, login, password reset | Owned by the SurfingBear platform (brief). *(v1.0 also listed "plan purchase"; since v1.2 the Resume Pro subscription is sold inside this module — FR-031.)* |
 | OOS-2 | OCR of scanned resumes | A-04. |
 | OOS-3 | Editing the resume in-app or generating a full rewritten resume | Brief asks for suggestions for weak lines only. |
 | OOS-4 | Job matching, job applications, recruiter features | Different product. |
@@ -416,12 +454,13 @@ Listing safeguards does **not** make the system DPDP-compliant. The following mu
 |---|---|---|
 | L-1 | Cross-border transfer: the AI provider processes masked resume text outside India. Is this permitted under DPDP §16 for SurfingBear, and must the notice name the processor and country? | Masked text only (BR-011); processor and region named in the consent notice (FR-003). |
 | L-2 | Processor terms: does the AI provider contract prohibit training on inputs and set retention ≤ 30 days? Is a data-processing agreement in place (DPDP §8(2))? | Assumed yes; `ai_calls` stores no content. |
-| L-3 | Notice and consent wording (DPDP §5–6): purposes, data categories, retention, rights, grievance contact, withdrawal method. | Draft notice v`2026-10` shipped in the locale file; versioned consent (FR-003). |
+| L-3 | Notice and consent wording (DPDP §5–6): purposes, data categories, retention, rights, grievance contact, withdrawal method. | Draft notice v`2026-10-r2` (v1.2, names Razorpay) shipped in the locale file; versioned consent (FR-003). |
 | L-4 | Children's data (DPDP §9): can the platform guarantee users are 18+? If not, verifiable parental consent is needed. | A-15. |
 | L-5 | Retention periods (DPDP §8(7)): are 24 h (file) / 30 d (text) / 365 d (results) acceptable, and is the audit log retention of 2 years justified as a legal obligation? | FR-023 defaults. |
 | L-6 | Breach notification (DPDP §8(6)): who notifies the Data Protection Board and affected users, within what time? Runbook step needed. | Runbook placeholder; Sentry alert path. |
 | L-7 | Grievance officer and Consent Manager integration requirements. | Contact shown in the notice; no Consent Manager integration in v1. |
 | L-8 | Is `name` in resume text acceptable to send to the processor (not masked, BR-011)? | Kept for format assessment; can be masked by config `AI_MASK_NAME=true`. |
+| L-9 | (v1.2) Billing: is ₹299 GST-inclusive, who issues the tax invoice (Razorpay invoice vs. SurfingBear), what is the statutory retention of payment records, and what refund/cancellation terms must be shown under consumer-protection rules? Razorpay is a new third party receiving personal data (the e-mail and phone the user types into Checkout, plus our user id as `notes.userId`; this module holds no profile and sends no prefill) — DPA and notice update needed (CR-028). | A-17, A-18; billing rows retained 8 years pseudonymised (§5.4); consent notice v`2026-10-r2` names Razorpay. |
 
 ---
 ## 4. Architecture
@@ -448,6 +487,9 @@ flowchart LR
   subgraph AI["AI provider (external)"]
     LLM[CMP-007 AiPort → Anthropic Messages API]
   end
+  subgraph PAY["Payment provider (external, v1.2)"]
+    RZP[CMP-011 PaymentPort → Razorpay<br/>Subscriptions · Checkout · Webhooks]
+  end
   WEB -- "HTTPS JSON, Bearer JWT" --> API
   WEB -. "login redirect" .-> IDP
   API -- "JWKS fetch (cached)" --> IDP
@@ -462,22 +504,26 @@ flowchart LR
   WRK --> PDF
   API --> OBS
   WRK --> OBS
+  API -- "create / cancel subscription (REST, key + secret)" --> RZP
+  RZP -. "webhooks, X-Razorpay-Signature" .-> API
+  WEB -. "hosted Checkout (card/UPI never on our pages)" .-> RZP
 ```
 
 ### 4.2 Components
 
 | ID | Component | Responsibility | Technology |
 |---|---|---|---|
-| CMP-001 | Web app | Upload form with role/level picker, consent dialog, analysis status polling, result view with plan gating, history, PDF download, erase-my-data flow, error display with `requestId`. Renders lists as Server Components; forms and polling as Client Components. Route guard in `middleware.ts` redirects unauthenticated users to the platform login. | Next.js 15 (App Router), React 19, TypeScript, MUI 6, React Hook Form + Zod, TanStack Query (polling), next-intl |
-| CMP-002 | API | All synchronous behaviour: auth guard, RBAC, validation, upload validation and streaming to storage, quota transaction, job enqueue, result projection and gating, report URL signing, deletion requests, admin routes, health. Owns the error filter and the audit writer. | NestJS 11, Prisma 6, class-validator, `@nestjs/bullmq`, `jose` (JWT), `file-type` (signatures), `pdf-parse` (page count only), Swagger |
-| CMP-003 | Worker | Asynchronous pipeline: `run-analysis` (extract → mask → AI → validate → persist), `render-report`, `erase-user-data`, cron jobs (purge, reconcile). Scales by process count. Pauses on `/ready` failure. | Same NestJS codebase, separate entrypoint `worker.ts`; BullMQ workers; `@nestjs/schedule` |
-| CMP-004 | PostgreSQL | System of record: catalogue, resumes, analyses, results, usage counters, consents, deletion requests, audit, AI call metrics. Enforces status/ownership/quota constraints at the schema level. | PostgreSQL 16 (managed, PITR), extensions `pgcrypto`, `citext` |
-| CMP-005 | Redis | Job queue (BullMQ), per-user quota fast-path cache, rate limiter counters, in-flight locks, JWKS cache, AI circuit-breaker state. Never the sole source of truth for anything durable (BR-004). | Redis 7 (managed), `maxmemory-policy volatile-ttl`, AOF on |
+| CMP-001 | Web app | Upload form with role/level picker, consent dialog, analysis status polling, result view with plan gating, history, PDF download, erase-my-data flow, error display with `requestId`; (v1.2) Resume Pro plan page with hosted Checkout and cancel (SCR-005), comparison view (SCR-003). Renders lists as Server Components; forms and polling as Client Components. Route guard in `middleware.ts` redirects unauthenticated users to the platform login. | Next.js 15 (App Router), React 19, TypeScript, MUI 6, React Hook Form + Zod, TanStack Query (polling), next-intl |
+| CMP-002 | API | All synchronous behaviour: auth guard, RBAC, validation, upload validation and streaming to storage, quota transaction, job enqueue, result projection and gating, report URL signing, deletion requests, admin routes, health; (v1.2) checkout and cancel through `PaymentPort`, webhook ingestion with signature verification, `EntitlementService` (FR-034). Owns the error filter and the audit writer. | NestJS 11, Prisma 6, class-validator, `@nestjs/bullmq`, `jose` (JWT), `file-type` (signatures), `pdf-parse` (page count only), Swagger |
+| CMP-003 | Worker | Asynchronous pipeline: `run-analysis` (extract → mask → AI → validate → persist), `render-report`, `erase-user-data`, (v1.2) `process-payment-event`, cron jobs (purge, reconcile, `expire-subscriptions`, `reconcile-subscriptions`). Scales by process count. Pauses on `/ready` failure. | Same NestJS codebase, separate entrypoint `worker.ts`; BullMQ workers; `@nestjs/schedule` |
+| CMP-004 | PostgreSQL | System of record: catalogue, resumes, analyses, results, usage counters, consents, deletion requests, audit, AI call metrics, (v1.2) subscriptions and payment events. Enforces status/ownership/quota constraints at the schema level. | PostgreSQL 16 (managed, PITR), extensions `pgcrypto`, `citext` |
+| CMP-005 | Redis | Job queue (BullMQ), per-user quota fast-path cache, rate limiter counters, in-flight locks, JWKS cache, AI circuit-breaker state, (v1.2) plan-entitlement cache (60 s). Never the sole source of truth for anything durable (BR-004). | Redis 7 (managed), `maxmemory-policy volatile-ttl`, AOF on |
 | CMP-006 | Object storage | Private bucket for resume files and PDF reports; presigned GET for downloads; lifecycle rule as a safety net (expire `resumes/` after 3 days, `reports/` after 45 days) behind the application purge. | AWS S3 `ap-south-1` (prod); MinIO in `docker-compose` locally; `@aws-sdk/client-s3` |
 | CMP-007 | AI adapter | Implements `AiPort.analyse(input): Promise<AiResult>`: builds the prompt, calls the Messages API with structured JSON output, enforces timeout/retry/circuit rules, maps provider errors to the failure codes, records `ai_calls`. Only this adapter imports the provider SDK. | `@anthropic-ai/sdk` (TypeScript), Zod schema shared with FR-014 validation |
-| CMP-008 | Platform identity (external) | Issues the user's session JWT; publishes JWKS; owns plan/role claims. | SurfingBear platform (A-01) |
+| CMP-008 | Platform identity (external) | Issues the user's session JWT; publishes JWKS; owns the `sub` and `role` claims. (v1.2: it does **not** own the plan — the plan is this module's subscription record, FR-034.) | SurfingBear platform (A-01) |
 | CMP-009 | PDF renderer | Deterministic PDF from the stored result and the plan-gated projection; runs in the worker process. | `@react-pdf/renderer` |
-| CMP-010 | Observability | Structured logs with redaction, error tracking, uptime checks, dashboards (queue depth, AI latency, failure codes, quota rejections). | pino → platform log sink; Sentry (api + web + worker); Better Stack uptime |
+| CMP-010 | Observability | Structured logs with redaction, error tracking, uptime checks, dashboards (queue depth, AI latency, failure codes, quota rejections, webhook lag). | pino → platform log sink; Sentry (api + web + worker); Better Stack uptime |
+| CMP-011 | Payment adapter (v1.2) | Implements `PaymentPort` (`createSubscription`, `cancelAtPeriodEnd`, `fetchSubscription`, `verifyWebhookSignature`) against Razorpay Subscriptions; the only place the Razorpay SDK and secrets are used. The web app loads Razorpay's hosted Checkout with the public key id; webhook ingestion lives in `modules/billing` and the state machine (BR-018) in `BillingService`. | `razorpay` Node SDK in api/worker; Razorpay Checkout.js in web; HMAC-SHA256 verification with `RAZORPAY_WEBHOOK_SECRET` |
 
 ### 4.3 Main flows
 
@@ -665,7 +711,7 @@ sequenceDiagram
       A-->>U: 200 { status: failed, failureCode, userMessage, refunded }
     else completed
       A->>P: SELECT scores, missing_skills, suggestions
-      A->>A: project by plan claim: lock entries beyond FREE_VISIBLE_* (BR-015)
+      A->>A: project by entitlement (BR-017, FR-034 — plan is never read from the token since v1.2): lock entries beyond FREE_VISIBLE_* (BR-015)
       A-->>U: 200 full result shape (API-009) + disclaimer
     end
   end
@@ -733,6 +779,7 @@ sequenceDiagram
   participant Q as Queue
   participant W as Worker (CMP-003)
   participant S as Object storage
+  participant R as Razorpay (CMP-011, v1.2)
   U->>A: POST /me/deletion-requests  (or admin: POST /admin/users/{id}/deletion-requests)
   A->>P: pending request exists?
   alt already pending
@@ -746,13 +793,18 @@ sequenceDiagram
   A-->>U: 202 { id, status: pending }
   Q->>W: erase-user-data
   W->>P: cancel in-flight analyses (failed CANCELLED) · list storage keys for user
+  W->>R: (v1.2) cancel live subscription immediately, no refund (A-18)
+  alt provider error
+    W-->>Q: nack → retry (same 5 attempts) · subscription step is idempotent
+  end
+  W->>P: (v1.2) UPDATE subscription status=expired, expired_at=now · audit subscription.expired
   W->>S: DELETE all resumes/{env}/{userId}/* and reports/{env}/{userId}/*
   alt storage deletion error
     W->>P: UPDATE deletion_requests attempts+1, last_error
     W-->>Q: nack → retry (up to 5 over ~6 h)
     Note over W: after 5 failures: status=failed, Sentry alert, admin re-run (FR-025)
   end
-  W->>P: BEGIN · NULL PII columns (extracted_text, original_filename, suggestions text…) · mark rows deleted · withdraw consent · UPDATE request completed · audit erasure.completed · COMMIT
+  W->>P: BEGIN · NULL PII columns (extracted_text, original_filename, suggestions text…) · mark rows deleted · withdraw consent · (v1.2) subscriptions.user_id = sentinel + erased_user_hash · reduce payment_events.payload · UPDATE request completed · audit erasure.completed · COMMIT
   alt DB failure
     W-->>Q: nack → retry · storage deletes are idempotent
   end
@@ -782,20 +834,140 @@ sequenceDiagram
     end
   end
   C->>P: UPDATE resumes SET extracted_text = NULL WHERE extracted_at < now()-30d
-  C->>P: DELETE reports older than 30 d (+ objects) · DELETE analyses older than 365 d (cascade)
+  C->>P: reports with ready_at < now() − 30 d: DELETE object, SET storage_key NULL, status purged, purged_at (row kept, BR-021) · DELETE analyses older than 365 d (cascade removes report rows)
   C->>P: audit purge.completed {counts} · release lock
+```
+
+#### SEQ-08 Subscribe to Resume Pro — checkout and webhook activation (FR-031, FR-032, FR-034; v1.2)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (CMP-001)
+  participant A as API (CMP-002)
+  participant P as PostgreSQL
+  participant R as PaymentPort → Razorpay (CMP-011)
+  participant Q as Queue
+  participant W as Worker (CMP-003)
+  U->>A: POST /subscriptions/checkout
+  A->>P: entitlement (BR-017) and non-terminal subscription?
+  alt active / past_due / in-period cancelled exists
+    A-->>U: 409 SUBSCRIPTION_ALREADY_ACTIVE (ERR-050)
+  else unpaid created row younger than 24 h
+    A-->>U: 200 same providerSubscriptionId (retry Checkout, no new provider call)
+  end
+  A->>R: create subscription (plan RAZORPAY_PLAN_ID, notes.userId)
+  alt provider error / timeout 10 s
+    A-->>U: 503 PAYMENT_PROVIDER_ERROR (ERR-052), nothing persisted
+  end
+  A->>P: INSERT subscriptions(status=created, provider_subscription_id) + audit
+  alt DB failure
+    A->>R: cancel the just-created provider subscription (best effort, logged)
+    A-->>U: 503 SERVICE_UNAVAILABLE (ERR-031)
+  end
+  A-->>U: 201 { subscriptionId, providerSubscriptionId, checkoutKeyId }
+  U->>R: hosted Checkout — card/UPI entered on Razorpay, never on our pages
+  R-->>U: payment result (browser return is informational only)
+  R->>A: POST /webhooks/razorpay subscription.activated / subscription.charged (X-Razorpay-Signature)
+  A->>A: verify HMAC signature
+  alt signature invalid
+    A-->>R: 401 WEBHOOK_SIGNATURE_INVALID (ERR-053), body discarded
+  end
+  A->>P: INSERT payment_events (unique provider_event_id)
+  alt duplicate event id
+    A-->>R: 200 (no side effects, BR-019)
+  end
+  A->>Q: add process-payment-event (jobId = eventId)
+  A-->>R: 200 acknowledged (p95 < 1 s, NFR-020)
+  Q->>W: process-payment-event
+  W->>P: SELECT subscription FOR UPDATE, check event created_at ≥ last_event_at
+  alt stale / out-of-order event
+    W->>P: mark event ignored
+  else in order
+    W->>P: UPDATE subscriptions status=active, period start/end, last_payment_at, last_event_at + audit subscription.active
+    W->>W: invalidate Redis plan cache ro:{env}:plan:{userId}
+  end
+  alt processing error
+    W-->>Q: nack → retry ×5 then event failed + Sentry alert
+  end
+  U->>A: GET /me/subscription (poll every 2 s for up to 60 s after returning from Checkout)
+  A-->>U: 200 { status: active, currentPeriodEnd }
+```
+
+#### SEQ-09 Cancel subscription and expiry (FR-033, BR-017, BR-018; v1.2)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (CMP-001)
+  participant A as API (CMP-002)
+  participant P as PostgreSQL
+  participant R as Razorpay (CMP-011)
+  participant C as Cron (worker, CMP-003)
+  U->>A: POST /subscriptions/cancel
+  A->>P: subscription in {active, past_due}?
+  alt none
+    A-->>U: 409 SUBSCRIPTION_NOT_ACTIVE (ERR-051)
+  else already cancelled
+    A-->>U: 200 current state (idempotent)
+  end
+  A->>R: cancel subscription (cancel_at_cycle_end = 1)
+  alt provider error / timeout
+    A-->>U: 503 PAYMENT_PROVIDER_ERROR (ERR-052), local state unchanged
+  end
+  A->>P: UPDATE status=cancelled, cancel_at_period_end=true, cancelled_at + audit
+  A->>A: invalidate plan cache
+  A-->>U: 200 { status: cancelled, currentPeriodEnd } — Pro continues until then
+  Note over C,P: every hour at :40 (expire-subscriptions)
+  C->>P: pg_try_advisory_lock(expire_subscriptions)
+  alt lock held elsewhere
+    C-->>C: skip this run
+  end
+  C->>P: UPDATE status=expired WHERE status IN (active, cancelled, past_due) AND current_period_end ≤ now() — active included: a lapsed period with no renewal webhook also expires (BR-018)
+  C->>P: UPDATE status=abandoned WHERE status=created AND created_at < now() − CHECKOUT_ABANDON_HOURS
+  C->>C: invalidate plan cache for each affected user, audit subscription.expired
+  alt DB failure
+    C-->>C: log, release lock, next run retries (idempotent)
+  end
+```
+
+#### SEQ-10 Compare two analyses (FR-035; v1.2)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User (CMP-001)
+  participant A as API (CMP-002)
+  participant P as PostgreSQL
+  U->>A: GET /analyses/compare?a=&b=
+  A->>A: entitlement (BR-017, cached 60 s)
+  alt plan = free
+    A-->>U: 402 PLAN_REQUIRED (ERR-054, details.feature = compare)
+  end
+  A->>P: SELECT both analyses WHERE user_id = sub AND deleted_at IS NULL
+  alt either missing / not owned
+    A-->>U: 404 NOT_FOUND (ERR-004)
+  else a = b, or either not completed
+    A-->>U: 422 COMPARE_INVALID (ERR-055)
+  else DB unavailable
+    A-->>U: 503 SERVICE_UNAVAILABLE (ERR-031)
+  end
+  A->>P: SELECT dimension scores, missing skills, suggestion counts for both
+  A->>A: overall and per-dimension deltas, resolved / newly missing skills, sameRole flag
+  A-->>U: 200 comparison (API-025)
 ```
 
 ### 4.4 External integrations
 
 | System | Purpose | Protocol / auth | Failure handling |
 |---|---|---|---|
-| SurfingBear platform identity (CMP-008) | Verify the user's session; obtain `sub`, `plan`, `role` | JWT RS256 in `Authorization: Bearer`; JWKS over HTTPS, cached in Redis 10 min, refreshed on unknown `kid` | JWKS unreachable and cache empty → 503 `ERR-031`; cache present → verification continues. Invalid/expired token → 401 `ERR-002`. No fallback to unauthenticated access. |
+| SurfingBear platform identity (CMP-008) | Verify the user's session; obtain `sub`, `role` (a `plan` claim is ignored since v1.2 — FR-034) | JWT RS256 in `Authorization: Bearer`; JWKS over HTTPS, cached in Redis 10 min, refreshed on unknown `kid` | JWKS unreachable and cache empty → 503 `ERR-031`; cache present → verification continues. Invalid/expired token → 401 `ERR-002`. No fallback to unauthenticated access. |
 | Anthropic Messages API (via CMP-007) | Score resume, judge missing skills, propose rewrites | HTTPS, API key from env `AI_API_KEY`; SDK `@anthropic-ai/sdk`; structured JSON output; timeout 60 s; SDK retries disabled (the adapter owns retries) | Per FR-013: retry on timeout/429/529/5xx with backoff, circuit breaker 5 failures/60 s → open 30 s, no retry on 4xx/refusal, malformed JSON → one corrective retry; terminal failures become `analyses.failure_code` and refund quota. Data sent: masked text + rubric only; no files. Region: provider default (see L-1). |
 | AWS S3 `ap-south-1` (CMP-006) | Store resume files and reports; presigned downloads | HTTPS, IAM role of the service; SSE-KMS; bucket policy denies public access | PUT/DELETE timeout 10 s, 2 retries; failure → 503 `ERR-034` (upload) or job retry (worker). Lifecycle rules expire objects as a safety net. |
 | Managed PostgreSQL (CMP-004) | System of record | TLS, credentials from env; Prisma pool size 10 per process; statement timeout 15 s | Unavailable → 503 `ERR-031` for all requests; worker pauses; queue holds jobs. |
 | Managed Redis (CMP-005) | Queue, cache, rate limits, locks | TLS, password from env; `ioredis` with 2 s connect timeout | Unavailable → writes fail closed (503), reads continue from Postgres; queue consumers reconnect with backoff; no durable data lost (BR-004). |
 | Sentry / log sink / uptime (CMP-010) | Observability | HTTPS DSN; async transport | Never blocks requests; dropped events are logged locally. |
+| Razorpay (CMP-011, v1.2) | Sell and manage the Resume Pro subscription: create subscription, hosted Checkout, cancel at cycle end, fetch state; receive lifecycle webhooks | REST with `RAZORPAY_KEY_ID` + `RAZORPAY_KEY_SECRET` (api/worker only); Checkout.js in the browser with the public key id; webhooks signed with `RAZORPAY_WEBHOOK_SECRET` (HMAC-SHA256 over the raw body). Timeouts 10 s, 2 retries on network errors for idempotent reads only. **Data shared:** user id (as `notes.userId`); e-mail and phone are entered by the user directly in Razorpay's Checkout and are not stored by this module (processor listed in the consent notice, L-9). No card data reaches our systems. | Create/cancel failure → 503 `ERR-052`, nothing persisted; webhook outage → provider retries for 24 h plus our daily reconciliation (FR-033 AC-5); signature mismatch → 401 `ERR-053`; duplicate/out-of-order events → no-op (BR-019). Provider down does not affect existing Pro users (entitlement is local, BR-017). |
 
 ### 4.5 Tech stack and reasons
 
@@ -815,7 +987,8 @@ sequenceDiagram
 | Hosting | Containers (API ×2, worker ×2) on the company's standard container platform in `ap-south-1`; managed Postgres and Redis | Horizontal scaling of the worker by process count (NFR-005); managed stores give backups and PITR without ops effort. |
 | CI/CD | GitHub Actions | Company standard (CR-036); runs lint, typecheck, unit, Testcontainers integration tests, build, migrations. |
 | Observability | pino, Sentry, Better Stack | Structured logs with redaction (CR-010); Sentry captures 5xx with `requestId` (CR-016); uptime on `/ready` (CR-040). |
-| Testing | Jest + supertest + Testcontainers; Vitest + RTL; Playwright; k6 | Integration tests run against real Postgres/Redis/MinIO containers so constraints and locks are tested, not mocked; the AI port has a golden-fixture stub (NFR-017). |
+| Testing | Jest + supertest + Testcontainers; Vitest + RTL; Playwright; k6 | Integration tests run against real Postgres/Redis/MinIO containers so constraints and locks are tested, not mocked; the AI port has a golden-fixture stub (NFR-017); the payment port has a stub that emits recorded Razorpay webhook fixtures (TC-122–TC-126). |
+| Payments (v1.2) | Razorpay Subscriptions + hosted Checkout + Webhooks, behind `PaymentPort` | Mandated by Round 2. Subscriptions give recurring monthly billing and cancel-at-cycle-end natively (Round 2 points 1 and 4); hosted Checkout keeps card/UPI data off our pages (NFR-019, PCI SAQ-A); webhooks make activation server-verified rather than trusting the browser. The port isolates the SDK so a provider change touches one adapter. |
 
 ### 4.6 Configuration (environment variables)
 
@@ -846,6 +1019,11 @@ Every variable is listed in `.env.example` with this description (CR-020). Valid
 | `RATE_LIMIT_MULTIPLIER` | api | No | `1` | scales all rate limits per environment (CR-035) |
 | `NEXT_PUBLIC_API_URL` | web (build) | Yes | — | public base URL of the API, used only by the BFF route handlers server-side (see §4.8) |
 | `BASE_URL` | Playwright | Yes | — | environment under test (CR-ENV rule in CR-035) |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | api, worker | Yes (v1.2) | — | Razorpay API credentials; test-mode keys in local/dev/staging, live keys only in prod (CR-033) |
+| `RAZORPAY_WEBHOOK_SECRET` | api | Yes (v1.2) | — | HMAC secret configured on the Razorpay webhook (FR-032) |
+| `RAZORPAY_PLAN_ID` | api | Yes (v1.2) | — | id of the ₹299/month plan created in the Razorpay dashboard (A-17) |
+| `NEXT_PUBLIC_RAZORPAY_KEY_ID` | web (build) | Yes (v1.2) | — | public key id for Checkout.js (never the secret) |
+| `PRO_PRICE_MINOR` / `PRO_CURRENCY` / `CHECKOUT_ABANDON_HOURS` / `WEBHOOK_TOLERANCE_SEC` / `PLAN_CACHE_TTL_SEC` | api, worker | No | §3.3.4 | billing constants (v1.2) |
 | Constants of §3.3.4 (`MAX_FILE_BYTES`, `FREE_MONTHLY_ANALYSES`, …) | api, worker | No | §3.3.4 | business constants |
 
 Rate limiting algorithm (CR-024, §6.1): fixed window in Redis — key `ro:{env}:rl:{scope}:{userId|ip}:{windowStart}`, `INCR` + `EXPIRE` on first hit; limit check after increment; `Retry-After` = seconds to window end.
@@ -859,12 +1037,15 @@ All queues are BullMQ on Redis (CMP-005), prefix `ro:{env}:q`. Job ids are the e
 | `resumes` | `extract-text` | `resumeId` | API-005 after commit | 3 / exponential 5 s | FR-006: load file, extract and normalise text, set `ready` or `extraction_failed` [concurrency 4] |
 | `analysis` | `run-analysis` | `analysisId` | API-008 after commit; reconcile cron | 3 / exponential 10 s; stalled after 90 s | SEQ-03 pipeline [concurrency 4 per process] |
 | `reports` | `render-report` | `reportId` | API-012 | 3 / exponential 10 s | SEQ-05 render + store [concurrency 2] |
-| `privacy` | `erase-user-data` | `requestId` | API-014, API-017 | 5 / fixed 1 h | SEQ-06 erasure [concurrency 1] |
+| `privacy` | `erase-user-data` | `requestId` | API-014, API-017 | 5 / fixed 1 h | SEQ-06 erasure, including (v1.2) immediate provider cancel, `expired` status, sentinel `user_id` + hash and `payment_events.payload` reduction [concurrency 1] |
 | cron (`@nestjs/schedule`) | `purge-files` | — | every hour at :05 | — (advisory lock) | FR-023 AC-1 |
 | cron | `purge-text-and-reports` | — | every hour at :20 | — | FR-023 AC-2, AC-3 |
 | cron | `purge-analyses-and-audit` | — | daily 02:00 UTC | — | FR-023 AC-4, AC-5 |
 | cron | `reconcile-queued` | — | every 5 min | — | BR-006: `queued` analyses older than 2 min with no job → re-add |
 | cron | `expire-report-blocks` | — | every 15 min | — | clear `reports.blocked_until` in the past |
+| `payments` (v1.2) | `process-payment-event` | `payment_events.id` | API-024 after the event row is committed | 5 / 1 min, 5, 15, 60, 360 min | apply the provider event to the subscription (FR-032 AC-4–AC-6, BR-019) [concurrency 1 per user via advisory lock on `user_id`] |
+| cron (v1.2) | `expire-subscriptions` | — | every hour at :40 | — (advisory lock) | FR-033 AC-4 and FR-031 AC-3 (expire / abandon), invalidate plan cache |
+| cron (v1.2) | `reconcile-subscriptions` | — | daily 02:30 UTC | — | FR-033 AC-5: compare non-terminal subscriptions with the provider |
 
 Worker lifecycle: on start, wait until `/ready` checks pass, then start consumers; on `SIGTERM`, stop taking new jobs and allow 60 s for in-flight jobs; a job that cannot finish is left to stalled-job recovery (FR-028).
 
@@ -876,13 +1057,14 @@ Worker lifecycle: on start, wait until `/ready` checks pass, then start consumer
 
 | ID | Route | Purpose | Key behaviour and states |
 |---|---|---|---|
-| SCR-001 | `/resume-optimizer` | Upload + role picker | Shows entitlements banner (API-002). If `consentRequired`, a modal shows the notice (i18n key `consent.notice.2026-10`, draft text below) with an "I agree" button → API-004. Drag-and-drop or file picker, client-side pre-check (type, 5 MiB) with the same Zod rule as the API; on submit → API-005 then polls API-006 every 2 s until `ready`/`extraction_failed`; then role (API-001, grouped by family) and level radio; "Analyse" → API-008 → navigates to SCR-002. States: idle · uploading (progress) · extracting (spinner) · extraction failed (error text per ERR code + "Upload another") · quota exhausted (banner with `resetsAt`, upgrade link) · erasure pending (upload disabled, text from ERR-025). |
-| SCR-002 | `/resume-optimizer/analyses/[id]` | Analysis status and result | Polls API-009 every 2 s while `queued/running` ("Analysing… usually under a minute"). On `failed`: `userMessage`, "Quota not used" badge when `refunded`, "Try again" → SCR-001 with the same resume preselected. On `completed`: score dial with band, six dimension cards (score, rationale, evidence quotes), missing skills list (locked items rendered as blurred rows with one "Unlock with Premium" CTA), suggestions list (original vs rewrite side by side, severity chip, "Suggestion — verify before use" label), disclaimer (FR-027) always visible, "Download PDF" → API-012 then polls API-013 until `ready` then opens `url`; "Delete this analysis" → confirm dialog → API-011. |
-| SCR-003 | `/resume-optimizer/analyses` | History | Server-rendered first page of API-010; filters by status and role; pagination; each row links to SCR-002; empty state "No analyses yet" with CTA to SCR-001. |
-| SCR-004 | `/resume-optimizer/privacy` | Data and privacy | Lists what is stored and the retention periods (text from §3.3.4), link to the notice, "Delete all my Resume Optimizer data" → two-step confirm → API-014 → shows request status (API-015) and disables upload while pending. |
+| SCR-001 | `/resume-optimizer` | Upload + role picker | Shows entitlements banner (API-002). If `consentRequired`, a modal shows the notice (i18n key `consent.notice.2026-10-r2`, draft text below) with an "I agree" button → API-004. Drag-and-drop or file picker, client-side pre-check (type, 5 MiB) with the same Zod rule as the API; on submit → API-005 then polls API-006 every 2 s until `ready`/`extraction_failed`; then role (API-001, grouped by family) and level radio; "Analyse" → API-008 → navigates to SCR-002. States: idle · uploading (progress) · extracting (spinner) · extraction failed (error text per ERR code + "Upload another") · quota exhausted (banner with `resetsAt`, upgrade link) · erasure pending (upload disabled, text from ERR-025). |
+| SCR-002 | `/resume-optimizer/analyses/[id]` | Analysis status and result | Polls API-009 every 2 s while `queued/running` ("Analysing… usually under a minute"). On `failed`: `userMessage`, "Quota not used" badge when `refunded`, "Try again" → SCR-001 with the same resume preselected. On `completed`: score dial with band, six dimension cards (score, rationale, evidence quotes), missing skills list (locked items rendered as blurred rows with one "Unlock with Resume Pro" CTA → SCR-005), suggestions list (original vs rewrite side by side, severity chip, "Suggestion — verify before use" label), disclaimer (FR-027) always visible, "Download PDF" → API-012 then polls API-013 until `ready` then opens `url`; "Delete this analysis" → confirm dialog → API-011. |
+| SCR-003 | `/resume-optimizer/analyses` | History | Server-rendered first page of API-010; filters by status and role; pagination; each row links to SCR-002; empty state "No analyses yet" with CTA to SCR-001. *(v1.2)* Pro users see a checkbox per completed row and a "Compare selected (2)" button → `/resume-optimizer/analyses/compare?a=&b=` (API-025) rendering overall delta, a per-dimension delta table, resolved / newly missing skills and a "different role" warning; free users see the same button disabled with a Resume Pro tooltip → SCR-005. |
+| SCR-004 | `/resume-optimizer/privacy` | Data and privacy | Lists what is stored and the retention periods (text from §3.3.4), link to the notice, "Delete all my Resume Optimizer data" → two-step confirm → API-014 → shows request status (API-015) and disables upload while pending. *(v1.2)* States that an active Resume Pro subscription is cancelled by erasure and that billing records are retained pseudonymised (L-9). |
+| SCR-005 | `/resume-optimizer/plan` (v1.2) | Resume Pro plan and billing | Shows current plan (API-021). **Free:** benefits list (unlimited analyses, all suggestions and missing skills, comparison), price "₹299 / month, incl. GST" (A-17), "Subscribe" → API-022 → opens Razorpay Checkout.js with `providerSubscriptionId` and `NEXT_PUBLIC_RAZORPAY_KEY_ID`; on return, polls API-021 every 2 s up to 60 s; states: activating (spinner) · active (success) · payment failed / closed Checkout ("No charge was made; you can try again") · still pending after 60 s ("We're confirming your payment; you'll see Pro within a minute"). **Pro:** status, current period end, "Cancel subscription" → confirm dialog stating access continues until the period end → API-023; cancelled state shows "Pro until <date>"; `past_due` shows a payment-problem banner; payment history table. Admin tokens cannot open this page (403). |
 
-**Draft consent notice (i18n key `consent.notice.2026-10`, pending legal review L-3; the builder ships this text, not their own):**
-"SurfingBear Resume Optimizer will read the resume you upload to score it and suggest improvements. To do this we store your file for up to 24 hours after analysis and its text for up to 30 days, and we send the text — with your e-mail, phone number and links removed — to our AI processing partner Anthropic, whose servers may be outside India. Your results are kept for up to 1 year unless you delete them earlier. You can delete a single analysis or all your data at any time from the Privacy page. For questions or to exercise your rights under the Digital Personal Data Protection Act, contact privacy@surfingbear.example (grievance officer). By continuing you agree to this processing."
+**Draft consent notice (i18n key `consent.notice.2026-10-r2`, pending legal review L-3 and L-9; the builder ships this text, not their own; v1.2 bumps `CONSENT_VERSION` so every user re-accepts once):**
+"SurfingBear Resume Optimizer will read the resume you upload to score it and suggest improvements. To do this we store your file for up to 24 hours after analysis and its text for up to 30 days, and we send the text — with your e-mail, phone number and links removed — to our AI processing partner Anthropic, whose servers may be outside India. Your results are kept for up to 1 year unless you delete them earlier. If you subscribe to Resume Pro, you will enter your e-mail address and phone number directly on the checkout page of our payment partner Razorpay, which processes your payment under its own privacy policy; we receive only the subscription status and never see your card or bank details. You can delete a single analysis or all your data at any time from the Privacy page. For questions or to exercise your rights under the Digital Personal Data Protection Act, contact privacy@surfingbear.example (grievance officer). By continuing you agree to this processing."
 
 ### 4.9 AI provider contract (`AiPort`, CMP-007)
 
@@ -963,7 +1145,7 @@ Complete skill rows for `data-analyst`:
 ---
 ## 5. ERD and database design
 
-**Standards applied.** PostgreSQL 16. Primary keys `uuid DEFAULT gen_random_uuid()`. Every mutable table has `created_at timestamptz NOT NULL DEFAULT now()` and `updated_at timestamptz NOT NULL DEFAULT now()` maintained by a trigger; append-only tables (`audit_logs`, `ai_calls`) have `created_at` only. Enumerations are `text` columns with `CHECK` constraints (values `lower_snake`) so a new value is one migration. There is **no `users` table**: `user_id` is the platform subject (`sub` claim, UUID) and is never a foreign key; ownership checks compare it to the token (CR-007). Columns flagged **PII** are the ones nulled by deletion (BR-014) and purge (FR-023). Money is not stored. All instants are `timestamptz`.
+**Standards applied.** PostgreSQL 16. Primary keys `uuid DEFAULT gen_random_uuid()`. Every mutable table has `created_at timestamptz NOT NULL DEFAULT now()` and `updated_at timestamptz NOT NULL DEFAULT now()` maintained by a trigger; append-only tables (`audit_logs`, `ai_calls`) have `created_at` only. Enumerations are `text` columns with `CHECK` constraints (values `lower_snake`) so a new value is one migration. There is **no `users` table**: `user_id` is the platform subject (`sub` claim, UUID) and is never a foreign key; ownership checks compare it to the token (CR-007). Columns flagged **PII** are the ones nulled by deletion (BR-014) and purge (FR-023). Money amounts (v1.2) are stored only as integer minor units with an ISO-4217 code (`price_minor`/`amount_minor` + `currency` in TBL-014/TBL-015); no card, UPI or bank data is ever stored (NFR-019). All instants are `timestamptz`.
 
 ### 5.1 ERD
 
@@ -978,6 +1160,7 @@ erDiagram
   analyses ||--o| reports : "rendered as"
   analyses ||--o{ ai_calls : "made"
   role_skills ||--o{ missing_skills : "snapshot of"
+  subscriptions ||--o{ payment_events : "receives"
 
   job_roles {
     uuid id PK
@@ -1134,9 +1317,46 @@ erDiagram
     inet ip
     timestamptz created_at
   }
+  subscriptions {
+    uuid id PK
+    uuid user_id "sentinel after erasure"
+    text erased_user_hash
+    text provider
+    text provider_subscription_id UK
+    text provider_plan_id
+    text status
+    int price_minor
+    char3 currency
+    timestamptz current_period_start
+    timestamptz current_period_end
+    boolean cancel_at_period_end
+    timestamptz cancelled_at
+    timestamptz halted_at
+    timestamptz last_payment_at
+    timestamptz last_event_at
+    timestamptz expired_at
+  }
+  payment_events {
+    uuid id PK
+    uuid subscription_id FK
+    text provider
+    text provider_event_id UK
+    text event_type
+    timestamptz provider_created_at
+    timestamptz received_at
+    text status
+    smallint attempts
+    text last_error
+    jsonb payload "card data stripped"
+    text provider_payment_id
+    int amount_minor
+    char3 currency
+    text payment_status
+    timestamptz applied_at
+  }
 ```
 
-(`consents`, `usage_counters`, `deletion_requests` and `audit_logs` key on `user_id` only; they have no FK because users live in the platform.)
+(`consents`, `usage_counters`, `deletion_requests`, `audit_logs` and, since v1.2, `subscriptions` key on `user_id` only; they have no FK because users live in the platform. `payment_events` reach the user only through `subscriptions`.)
 
 ### 5.2 Tables
 
@@ -1276,8 +1496,10 @@ Purpose: PDF report per analysis (FR-019, FR-020).
 | id | uuid | NO | PK | gen_random_uuid() | also the BullMQ job id |
 | analysis_id | uuid | NO | FK → analyses(id), UK | | `ON DELETE CASCADE`; `uq_reports_analysis` — one report per analysis |
 | user_id | uuid | NO | | | owner |
-| status | text | NO | | 'generating' | `ck IN ('generating','ready','failed')` |
-| storage_key | text | YES | UK | | `uq_reports_storage_key`; null until ready / after purge |
+| status | text | NO | | 'generating' | `ck IN ('generating','ready','failed','purged')` (`purged` added v1.4: file removed by retention, row kept) |
+| storage_key | text | YES | UK | | `uq_reports_storage_key`; `ck (status = 'ready') = (storage_key IS NOT NULL)` — null while generating, after failure and after purge |
+| plan_at_render | text | NO | | | `ck IN ('free','pro')` (v1.4) — the plan whose gating the PDF was rendered with; drives regeneration (BR-021) |
+| purged_at | timestamptz | YES | | | (v1.4) set by the retention purge |
 | filename | text | NO | | | `ck filename ~ '^[a-z0-9-]+\.pdf$'` |
 | size_bytes | int | YES | | | `ck size_bytes ≤ 2097152` |
 | page_count | smallint | YES | | | `ck page_count ≤ 6` |
@@ -1294,11 +1516,11 @@ Purpose: authoritative quota counter per user and period (FR-009, BR-004).
 |---|---|---|---|---|---|
 | id | uuid | NO | PK | gen_random_uuid() | |
 | user_id | uuid | NO | | | `uq_usage_counters_user_period (user_id, period_type, period_key)` |
-| period_type | text | NO | | | `ck IN ('month','day')` |
+| period_type | text | NO | | | `ck IN ('month','day')` — `day` is Deprecated since v1.2 (BR-003); no new `day` rows are written |
 | period_key | text | NO | | | `YYYY-MM` or `YYYY-MM-DD` in `QUOTA_TIMEZONE` |
-| plan | text | NO | | | `ck IN ('free','premium')`; plan at first use in the period |
+| plan | text | NO | | | `ck IN ('free','pro')` (v1.2: value renamed from `premium`, existing rows migrated — A-21); plan at first use in the period |
 | count | int | NO | | 0 | `ck count ≥ 0` |
-| limit_snapshot | int | NO | | | limit applied in this period (for the entitlements view) |
+| limit_snapshot | int | YES | | | limit applied in this period (for the entitlements view); NULL = unlimited (`pro`, v1.2) |
 
 #### TBL-011 `ai_calls` (append-only)
 Purpose: per-attempt metrics for cost, latency and failure analysis (FR-012, NFR-012). Contains no prompt or response text.
@@ -1350,6 +1572,52 @@ Purpose: who did what to which entity (CR-012, FR-024). The app DB role has INSE
 | ip | inet | YES | | | user actions only |
 | created_at | timestamptz | NO | | now() | |
 
+#### TBL-014 `subscriptions` (v1.2)
+Purpose: one Resume Pro subscription attempt or term per row; the source of the user's plan (FR-031–FR-034, BR-017, BR-018). Billing record: never deleted by application code; pseudonymised on erasure (§5.4).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | |
+| user_id | uuid | NO | | | platform `sub`; on erasure replaced by the sentinel `00000000-0000-0000-0000-000000000000` |
+| erased_user_hash | text | YES | | | `sha256(original user_id)` set on erasure so finance can still group a person's records without identifying them |
+| provider | text | NO | | 'razorpay' | `ck IN ('razorpay')` |
+| provider_subscription_id | text | NO | UK | | `uq_subscriptions_provider_subscription_id` |
+| provider_plan_id | text | NO | | | `RAZORPAY_PLAN_ID` at creation |
+| status | text | NO | | 'created' | `ck IN ('created','active','past_due','cancelled','expired','abandoned')` (BR-018) |
+| price_minor | int | NO | | | `ck price_minor > 0`; snapshot of `PRO_PRICE_MINOR` (29900) |
+| currency | char(3) | NO | | 'INR' | |
+| current_period_start | timestamptz | YES | | | from the activating/charged event |
+| current_period_end | timestamptz | YES | | | `ck_subscriptions_period: (status IN ('created','abandoned')) = (current_period_end IS NULL)` — every row that ever had a paid period (`active`, `past_due`, `cancelled`, `expired`) keeps it; drives BR-017 and the `lastSubscription` view (FR-037) |
+| cancel_at_period_end | boolean | NO | | false | |
+| cancelled_at | timestamptz | YES | | | |
+| halted_at | timestamptz | YES | | | provider halted after failed retries |
+| last_payment_at | timestamptz | YES | | | |
+| last_event_at | timestamptz | YES | | | provider `created_at` of the last applied event (BR-019 ordering) |
+| expired_at | timestamptz | YES | | | set by the expiry job or `completed` event |
+
+#### TBL-015 `payment_events` (v1.2, append-only except `status`/`attempts`/`last_error`/`applied_at`/`ignore_reason`, and the one-time `payload` reduction on erasure, §5.4)
+Purpose: inbox of provider webhooks (idempotency key) and the user's payment history (FR-032, FR-037).
+
+| Column | Type | Null | Key | Default | Constraint / note |
+|---|---|---|---|---|---|
+| id | uuid | NO | PK | gen_random_uuid() | also the BullMQ job id |
+| subscription_id | uuid | YES | FK → subscriptions(id) | | `ON DELETE RESTRICT`; null when the event references an unknown subscription (stored, status `ignored`) |
+| provider | text | NO | | 'razorpay' | |
+| provider_event_id | text | NO | UK | | `uq_payment_events_provider_event_id` — idempotency (BR-019) |
+| event_type | text | NO | | | e.g. `subscription.activated`, `subscription.charged`, `payment.failed` |
+| provider_created_at | timestamptz | NO | | | from the payload; ordering (BR-019) |
+| received_at | timestamptz | NO | | now() | |
+| status | text | NO | | 'pending' | `ck IN ('pending','applied','ignored','failed')` |
+| ignore_reason | text | YES | | | `ck IN ('unknown_event_type','out_of_order','stale','unknown_subscription')`; `ck (status = 'ignored') = (ignore_reason IS NOT NULL)` — distinguishes the four ignore cases for the NFR-020 dashboard (v1.3) |
+| attempts | smallint | NO | | 0 | |
+| last_error | text | YES | | | error code only |
+| payload | jsonb | NO | | | raw event with the `card` object and any `vpa`/account fields removed before insert (NFR-019); kept for audit and reconciliation |
+| provider_payment_id | text | YES | | | set for payment events |
+| amount_minor | int | YES | | | |
+| currency | char(3) | YES | | | |
+| payment_status | text | YES | | | `ck IN ('captured','failed','refunded')` |
+| applied_at | timestamptz | YES | | | |
+
 ### 5.3 Indexes
 
 | ID | Table | Index | Columns | Why |
@@ -1366,7 +1634,7 @@ Purpose: who did what to which entity (CR-012, FR-024). The app DB role has INSE
 | IDX-10 | resumes | `idx_resumes_purge_text` | (extracted_at) WHERE extracted_text IS NOT NULL | hourly text purge |
 | IDX-11 | usage_counters | `uq_usage_counters_user_period` | (user_id, period_type, period_key) UNIQUE | row lock target of the quota transaction (BR-004) |
 | IDX-12 | reports | `uq_reports_analysis` | (analysis_id) UNIQUE | one report per analysis; idempotent request |
-| IDX-13 | reports | `idx_reports_purge` | (ready_at) WHERE storage_key IS NOT NULL | report purge after 30 d |
+| IDX-13 | reports | `idx_reports_purge` | (ready_at) WHERE status = 'ready' | report purge after 30 d (v1.4: predicate aligned with the `ready ⇔ storage_key` check) |
 | IDX-14 | deletion_requests | `uq_deletion_requests_user_pending` | (user_id) UNIQUE WHERE status = 'pending' | one pending erasure per user; upload gate (ERR-025) |
 | IDX-15 | ai_calls | `idx_ai_calls_created` | (created_at) | cost/latency dashboards (NFR-012) |
 | IDX-16 | ai_calls | `idx_ai_calls_analysis` | (analysis_id) | per-analysis attempt history in admin view |
@@ -1375,6 +1643,13 @@ Purpose: who did what to which entity (CR-012, FR-024). The app DB role has INSE
 | IDX-19 | analysis_dimension_scores | `uq_dimension_scores_analysis_dimension` | (analysis_id, dimension) UNIQUE | exactly one row per dimension; result read |
 | IDX-20 | missing_skills | `uq_missing_skills_analysis_skill` | (analysis_id, role_skill_id) UNIQUE | no duplicate skill per analysis; result read |
 | IDX-21 | suggestions | `idx_suggestions_analysis_rank` | (analysis_id, rank) | ordered result read |
+| IDX-22 | subscriptions | `uq_subscriptions_provider_subscription_id` | (provider_subscription_id) UNIQUE | webhook → subscription lookup (FR-032) |
+| IDX-23 | subscriptions | `uq_subscriptions_user_nonterminal` | (user_id) UNIQUE WHERE status IN ('created','active','past_due','cancelled') | at most one live subscription per user (BR-018, FR-031 AC-2); erasure sets the row `expired` before writing the sentinel `user_id`, so sentinel rows never collide (§5.4) |
+| IDX-24 | subscriptions | `idx_subscriptions_user_period_end` | (user_id, current_period_end DESC) | entitlement predicate BR-017 on every plan check (FR-034) |
+| IDX-25 | subscriptions | `idx_subscriptions_expiry` | (current_period_end) WHERE status IN ('active','past_due','cancelled') | hourly expiry job (FR-033 AC-4) — same status set as the job's `WHERE` and BR-018 (v1.4: `active` added; it expires too when its period lapses without a renewal webhook) |
+| IDX-26 | payment_events | `uq_payment_events_provider_event_id` | (provider_event_id) UNIQUE | idempotent webhook inbox (BR-019) |
+| IDX-27 | payment_events | `idx_payment_events_subscription_created` | (subscription_id, provider_created_at DESC) | payment history (FR-037) and ordering guard |
+| IDX-28 | payment_events | `idx_payment_events_pending` | (received_at) WHERE status = 'pending' | retry/alert dashboard (NFR-020) |
 
 All foreign keys not listed above are covered by an index named `idx_<table>_<fk>`.
 
@@ -1392,6 +1667,8 @@ All foreign keys not listed above are covered by an index named `idx_<table>_<fk
 | reports.analysis_id | analyses.id | 1 : 0..1 | CASCADE (object deleted by the same job before the row) |
 | ai_calls.analysis_id | analyses.id | N : 0..1 | SET NULL — metrics outlive the analysis |
 | consents / usage_counters / deletion_requests / audit_logs.user_id | platform user | N : 1 (logical) | no FK; see erasure below |
+| subscriptions.user_id (v1.2) | platform user | N : 1 (logical) | no FK; pseudonymised on erasure (sentinel id + hash), row kept |
+| payment_events.subscription_id (v1.2) | subscriptions.id | N : 0..1 | RESTRICT — billing records are never deleted by application code; purged only by the retention job after the statutory period (A-17, L-9: 8 years default) |
 
 **What happens when a user asks to delete their data (FR-021, FR-022, BR-014):**
 
@@ -1408,6 +1685,7 @@ All foreign keys not listed above are covered by an index named `idx_<table>_<fk
 | `ai_calls` | unchanged (no PII) | unchanged |
 | `audit_logs` | new rows added; existing rows never changed | new rows added; existing rows kept (record of compliance) |
 | `deletion_requests` | — | row kept with `completed_at` |
+| `subscriptions`, `payment_events` (v1.2) | unchanged | live subscription cancelled at the provider immediately (FR-022 AC-7) and set to `expired` (terminal, so IDX-23 cannot collide), then `subscriptions.user_id` set to the sentinel id and `erased_user_hash` filled; `payment_events.payload` reduced to `{ event_type, amount, currency, provider ids }` (names, e-mail, phone removed); rows retained for the statutory period (L-9) then purged |
 
 Hard deletion of remaining rows happens by the retention purge (FR-023), which is the only path that issues `DELETE` on `analyses`; cascades then remove scores, skills, suggestions and reports.
 
@@ -1417,13 +1695,13 @@ Hard deletion of remaining rows happens by the retention purge (FR-023), which i
 ### 6.1 Common rules
 
 - **Base path:** `https://<api-host>/api/v1/resume-optimizer` (local: `http://localhost:4000/api/v1/resume-optimizer`). Health endpoints live at the service root (`/health`, `/ready`).
-- **Auth header / cookie:** `Authorization: Bearer <platform JWT>` on every endpoint except `/health`, `/ready`. The guard verifies RS256 against the platform JWKS (CR-002) and exposes `principal = { userId: sub, plan, role }`. Admin endpoints additionally require `role = admin`. No API-key or anonymous access exists in v1.
+- **Auth header / cookie:** `Authorization: Bearer <platform JWT>` on every endpoint except `/health`, `/ready` and the Razorpay webhook (API-024, authenticated by its HMAC signature instead — v1.2). The guard verifies RS256 against the platform JWKS (CR-002) and exposes `principal = { userId: sub, role }`; `plan` is resolved per request by `EntitlementService` (FR-034, BR-017) and attached as `principal.plan ∈ { free, pro }`. Admin endpoints additionally require `role = admin`. No API-key or anonymous access exists.
 - **Content types:** requests `application/json` except API-005 (`multipart/form-data`); responses `application/json; charset=utf-8`. Success envelope: `{ "data": <object | array>, "meta"?: { … } }`.
 - **Pagination format:** offset pagination; query `page` (default 1, min 1) and `pageSize` (default 20, min 1, max 100); response `meta: { page, pageSize, total, totalPages }`. Sorting is fixed per endpoint (documented inline). Filters are query parameters; repeated params form arrays (`status=completed&status=failed`).
 - **Date / time format and timezone:** all instants are ISO-8601 UTC with `Z` (`2026-10-19T09:30:00.000Z`); the client renders in the viewer's timezone (CR-030). Period keys follow BR-003.
 - **IDs:** UUID v4 strings. Unknown or not-owned ids return 404 (CR-007).
 - **Headers:** request `X-Request-Id` optional (UUID v4; generated if absent); responses always carry `X-Request-Id` and `X-App-Version`; 429 responses carry `Retry-After` (seconds); non-terminal status responses carry `Retry-After: 2` as a polling hint.
-- **Rate limits (CR-024):** 120 req/min per user on all endpoints; API-005 additionally `RATE_LIMIT_UPLOAD` = 10/hour per user; API-008 additionally 30/hour per user. Enforced in Redis; fail closed for write endpoints when Redis is unavailable (503 `ERR-031`).
+- **Rate limits (CR-024):** 120 req/min per user on all endpoints; API-005 additionally `RATE_LIMIT_UPLOAD` = 10/hour per user; API-008 additionally 30/hour per user; API-022 additionally 5/hour per user (v1.2); API-024 is limited per source IP only (600/min) because it carries no user. Enforced in Redis; fail closed for write endpoints when Redis is unavailable (503 `ERR-031`).
 - **Idempotency:** `DELETE` endpoints and API-012/API-014 are idempotent (a repeat returns the current state); API-008 is not idempotent by design (each call is a new analysis) and is protected by the in-flight rule (ERR-021).
 - **Validation:** DTO validation with `whitelist` and `forbidNonWhitelisted` (CR-021); unknown body fields → 400 `ERR-001`.
 - **Standard error format (must match section 1.4, CR-014):**
@@ -1467,6 +1745,11 @@ Endpoint index:
 | API-018 | GET | `/admin/audit-logs` | admin | FR-024, FR-025 |
 | API-019 | GET | `/health` (service root) | public | FR-026 |
 | API-020 | GET | `/ready` (service root) | public | FR-026 |
+| API-021 | GET | `/me/subscription` (v1.2) | user | FR-037, FR-034 |
+| API-022 | POST | `/subscriptions/checkout` (v1.2) | user (free) | FR-031 |
+| API-023 | POST | `/subscriptions/cancel` (v1.2) | user (pro) | FR-033 |
+| API-024 | POST | `/webhooks/razorpay` (v1.2) | public, HMAC signature | FR-032 |
+| API-025 | GET | `/analyses/compare` (v1.2) | user (pro) | FR-035 |
 
 Common errors on every authenticated endpoint (not repeated below): 401 `ERR-002` (missing/invalid/expired token), 403 `ERR-003` (role not allowed), 429 `ERR-005`, 500 `ERR-030`, 503 `ERR-031`.
 
@@ -1526,12 +1809,16 @@ Headers: `Cache-Control: private, max-age=600`.
     "used": 1,
     "remaining": 2,
     "resetsAt": "2026-10-31T18:30:00.000Z",
+    "unlimited": false,
     "inFlightAnalysisId": null,
     "consentRequired": false,
-    "erasurePending": false
+    "erasurePending": false,
+    "subscription": null
   }
 }
 ```
+
+Pro example (v1.2): `"plan": "pro", "limit": null, "used": 7, "remaining": null, "unlimited": true, "subscription": { "status": "active", "currentPeriodEnd": "2026-11-21T10:15:00.000Z", "cancelAtPeriodEnd": false }`.
 
 **Errors:** common only.
 
@@ -1543,7 +1830,7 @@ Headers: `Cache-Control: private, max-age=600`.
 **Response 200**
 
 ```json
-{ "data": { "consentVersion": "2026-10", "accepted": false, "acceptedAt": null, "noticeKey": "consent.notice.2026-10" } }
+{ "data": { "consentVersion": "2026-10-r2", "accepted": false, "acceptedAt": null, "noticeKey": "consent.notice.2026-10-r2" } }
 ```
 
 (`noticeKey` is the i18n key of the notice text shipped with the web app; the API does not return legal copy.)
@@ -1563,7 +1850,7 @@ Headers: `Cache-Control: private, max-age=600`.
 **Response 201**
 
 ```json
-{ "data": { "consentVersion": "2026-10", "acceptedAt": "2026-10-19T09:30:00.000Z" } }
+{ "data": { "consentVersion": "2026-10-r2", "acceptedAt": "2026-10-19T09:30:00.000Z" } }
 ```
 
 A repeat for the same version returns 200 with the original `acceptedAt`.
@@ -1671,7 +1958,7 @@ While `status` is `uploaded`/`extracting` the response carries `Retry-After: 2`.
 | HTTP | Error code | When |
 |---|---|---|
 | 400 | VALIDATION_ERROR | bad uuid, bad level, unknown field |
-| 402 | QUOTA_EXCEEDED | period limit reached (details: limit, used, plan, resetsAt) |
+| 402 | QUOTA_EXCEEDED | free plan only: monthly limit reached (details: limit, used, plan, resetsAt); never returned for `pro` (v1.2) |
 | 403 | CONSENT_REQUIRED | no consent |
 | 404 | NOT_FOUND | resume not owned/unknown |
 | 409 | RESUME_NOT_READY | resume `uploaded`/`extracting` (`details.reason = "processing"`) or its text already purged (`details.reason = "text_expired"`) |
@@ -1759,7 +2046,7 @@ While `status` is `uploaded`/`extracting` the response carries `Retry-After: 2`.
 }
 ```
 
-`band` ∈ `needs_work` (0–49) · `fair` (50–74) · `strong` (75–89) · `excellent` (90–100). Premium responses have `visible = total` and no locked items.
+`band` ∈ `needs_work` (0–49) · `fair` (50–74) · `strong` (75–89) · `excellent` (90–100). Pro responses (`"plan": "pro"`) have `visible = total`, no locked items and `"upgradeAvailable": false`.
 
 **Errors**
 
@@ -1811,13 +2098,20 @@ While `status` is `uploaded`/`extracting` the response carries `Retry-After: 2`.
 - **Auth / role:** user (own).
 - **Implements:** FR-019
 
-**Request:** path `analysisId` only; empty body.
+**Request**
 
-**Response 202** (new) or **200** (existing)
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| analysisId | path | uuid | Yes | owned, `completed` |
+| compareWith | query | — | — | **Deprecated (v1.3)** — added in v1.2, withdrawn because one report per analysis (TBL-009) cannot carry a comparison; the parameter is rejected as an unknown field (400 `ERR-001`, CR-021) |
+
+**Response 202** (new render, or re-render after purge / after a free → Pro upgrade, BR-021) or **200** (existing `generating`/`ready` report returned unchanged)
 
 ```json
-{ "data": { "reportId": "c0de…", "analysisId": "a91f…", "status": "generating", "createdAt": "…" } }
+{ "data": { "reportId": "c0de…", "analysisId": "a91f…", "status": "generating", "planAtRender": "pro", "regenerated": true, "createdAt": "…" } }
 ```
+
+`regenerated` is `true` only on the re-render cases; `planAtRender` is the plan the (new or existing) PDF is gated with.
 
 **Errors**
 
@@ -1838,7 +2132,7 @@ While `status` is `uploaded`/`extracting` the response carries `Retry-After: 2`.
 { "data": { "reportId": "c0de…", "status": "ready", "filename": "surfingbear-resume-analysis-20261019-a91f3c2e.pdf", "sizeBytes": 412833, "url": "https://…signed…", "expiresAt": "2026-10-19T09:40:00.000Z" } }
 ```
 
-For `generating`: `{ "status": "generating", "url": null, "expiresAt": null }` with `Retry-After: 2`. For `failed`: `{ "status": "failed", "errorCode": "REPORT_RENDER_FAILED", "url": null }`.
+For `generating`: `{ "status": "generating", "url": null, "expiresAt": null }` with `Retry-After: 2`. For `failed`: `{ "status": "failed", "errorCode": "REPORT_RENDER_FAILED", "url": null }`. For `purged` (v1.4): `{ "status": "purged", "url": null, "purgedAt": "…", "regenerate": "POST /analyses/{analysisId}/report" }`. Every response carries `planAtRender` so the client can offer "Regenerate with Pro content" when `planAtRender = free` and the user is now Pro (BR-021).
 
 **Errors**
 
@@ -1893,7 +2187,7 @@ For `generating`: `{ "status": "generating", "url": null, "expiresAt": null }` w
 **Response 200**
 
 ```json
-{ "data": { "userId": "…", "counters": [ { "periodType": "month", "periodKey": "2026-10", "plan": "free", "count": 3, "limit": 3 } ], "analyses": [ { "analysisId": "a91f…", "status": "failed", "failureCode": "AI_TIMEOUT", "refunded": true, "attempts": 3, "createdAt": "…" } ], "pendingErasure": null } }
+{ "data": { "userId": "…", "counters": [ { "periodType": "month", "periodKey": "2026-10", "plan": "free", "count": 3, "limit": 3 } ], "analyses": [ { "analysisId": "a91f…", "status": "failed", "failureCode": "AI_TIMEOUT", "refunded": true, "attempts": 3, "createdAt": "…" } ], "pendingErasure": null, "plan": "free", "subscription": null } }
 ```
 
 Writes audit `admin.viewed_usage`.
@@ -1965,9 +2259,153 @@ Writes audit `admin.viewed_usage`.
 **Response 200 (`/ready`)**: `{ "data": { "status": "ok", "checks": { "postgres": "ok", "redis": "ok", "storage": "ok" } } }`
 **Response 503 (`/ready`)**: standard error envelope with `code = SERVICE_UNAVAILABLE`, `details.checks = { "postgres": "ok", "redis": "timeout", "storage": "ok" }`.
 
+#### API-021 `GET /me/subscription` (v1.2)
+- **Purpose:** the user's Resume Pro subscription status, period and payment history.
+- **Auth / role:** user.
+- **Implements:** FR-037, FR-034
+
+**Request:** none.
+
+**Response 200 — subscribed** (`active`, `past_due` or `cancelled` still in period)
+
+```json
+{ "data": { "subscriptionId": "5b2c…", "status": "cancelled", "plan": "pro", "priceMinor": 29900, "currency": "INR", "currentPeriodStart": "2026-10-22T10:15:00.000Z", "currentPeriodEnd": "2026-11-22T10:15:00.000Z", "cancelAtPeriodEnd": true, "cancelledAt": "2026-10-30T08:00:00.000Z", "payments": [ { "paidAt": "2026-10-22T10:15:02.000Z", "amountMinor": 29900, "currency": "INR", "providerPaymentId": "pay_…", "status": "captured" } ] } }
+```
+
+**Response 200 — not subscribed** (never, `expired` or `abandoned`)
+
+```json
+{ "data": null, "meta": { "plan": "free", "lastSubscription": { "status": "expired", "currentPeriodEnd": "2026-09-22T10:15:00.000Z" } } }
+```
+
+**Errors:** common only.
+
+#### API-022 `POST /subscriptions/checkout` (v1.2)
+- **Purpose:** create a Razorpay subscription for the fixed Resume Pro plan and return what the hosted Checkout needs.
+- **Auth / role:** user with `plan = free` and no live subscription.
+- **Implements:** FR-031
+
+**Request:** empty body (the plan and price are fixed by configuration).
+
+**Response 201** (new) or **200** (an unpaid `created` subscription younger than 24 h already exists and is returned again so Checkout can be retried)
+
+```json
+{ "data": { "subscriptionId": "5b2c…", "providerSubscriptionId": "sub_…", "checkoutKeyId": "rzp_live_…", "amountMinor": 29900, "currency": "INR", "status": "created" } }
+```
+
+The web app opens Razorpay Checkout.js with `subscription_id = providerSubscriptionId` and `key = checkoutKeyId`; after Checkout closes it polls API-021 (SCR-005). The browser result is never used to grant Pro.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 409 | SUBSCRIPTION_ALREADY_ACTIVE | an `active`, `past_due` or in-period `cancelled` subscription exists (an unpaid `created` one is returned with 200 instead) |
+| 409 | DELETION_IN_PROGRESS | pending erasure |
+| 429 | RATE_LIMITED | > 5 checkouts/hour |
+| 503 | PAYMENT_PROVIDER_ERROR | Razorpay create failed or timed out (nothing persisted) |
+
+#### API-023 `POST /subscriptions/cancel` (v1.2)
+- **Purpose:** cancel at the end of the current paid period; access continues until then.
+- **Auth / role:** user with a live subscription.
+- **Implements:** FR-033
+
+**Request:** empty body.
+
+**Response 200**
+
+```json
+{ "data": { "subscriptionId": "5b2c…", "status": "cancelled", "cancelAtPeriodEnd": true, "currentPeriodEnd": "2026-11-22T10:15:00.000Z", "proUntil": "2026-11-22T10:15:00.000Z" } }
+```
+
+A repeat call returns 200 with the same state.
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 409 | SUBSCRIPTION_NOT_ACTIVE | no `active`/`past_due`/`cancelled`-in-period subscription |
+| 503 | PAYMENT_PROVIDER_ERROR | Razorpay cancel failed (local state unchanged) |
+
+#### API-024 `POST /webhooks/razorpay` (v1.2)
+- **Purpose:** receive Razorpay subscription and payment events.
+- **Auth / role:** public; authenticated by `X-Razorpay-Signature` = HMAC-SHA256(raw body, `RAZORPAY_WEBHOOK_SECRET`), compared in constant time. The route is registered with raw-body access (NestJS `rawBody: true`); no JSON transformation happens before verification.
+- **Implements:** FR-032
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| X-Razorpay-Signature | header | hex string | Yes | HMAC matches raw body |
+| X-Razorpay-Event-Id | header | string | Yes | used as `provider_event_id` (fallback: `payload.event_id`) |
+| body | body (raw JSON) | Razorpay event object | Yes | ≤ 64 KB; `event` string present; provider `created_at` not older than `WEBHOOK_TOLERANCE_SEC` (25 h), otherwise stored with `status = ignored`, `ignore_reason = stale` (still 200) |
+
+**Response 200** (always, once the signature is valid — including duplicates and unknown event types)
+
+```json
+{ "data": { "received": true, "eventId": "evt_…", "duplicate": false } }
+```
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | body not JSON, missing `event`, > 64 KB |
+| 401 | WEBHOOK_SIGNATURE_INVALID | signature missing or mismatched (body discarded, IP logged) |
+| 429 | RATE_LIMITED | per-IP limit |
+| 503 | SERVICE_UNAVAILABLE | event could not be stored (Razorpay will retry) |
+
+#### API-025 `GET /analyses/compare` (v1.2)
+- **Purpose:** compare two completed analyses of the same user (Pro).
+- **Auth / role:** user with `plan = pro`.
+- **Implements:** FR-035
+- **Routing note (v1.3):** this static route is registered **before** `GET /analyses/{analysisId}` (API-009) in the controller so that `compare` is never parsed as an `analysisId`.
+
+**Request**
+
+| Field | In | Type | Required | Validation |
+|---|---|---|---|---|
+| a | query | uuid | Yes | baseline analysis; owned, `completed`, not deleted |
+| b | query | uuid | Yes | comparison analysis; owned, `completed`, not deleted, `b ≠ a` |
+
+**Response 200**
+
+```json
+{
+  "data": {
+    "baseline": { "analysisId": "a91f…", "createdAt": "2026-10-01T…", "role": { "id": "2b1e…", "title": "Backend Engineer" }, "experienceLevel": "mid", "overallScore": 68 },
+    "comparison": { "analysisId": "c7d2…", "createdAt": "2026-10-20T…", "role": { "id": "2b1e…", "title": "Backend Engineer" }, "experienceLevel": "mid", "overallScore": 81 },
+    "sameRole": true,
+    "warning": null,
+    "overallDelta": 13,
+    "dimensions": [
+      { "dimension": "keyword_match", "a": 62, "b": 80, "delta": 18 },
+      { "dimension": "experience_relevance", "a": 70, "b": 76, "delta": 6 },
+      { "dimension": "formatting_parseability", "a": 85, "b": 85, "delta": 0 },
+      { "dimension": "impact_quantification", "a": 55, "b": 78, "delta": 23 },
+      { "dimension": "section_completeness", "a": 80, "b": 90, "delta": 10 },
+      { "dimension": "clarity_language", "a": 72, "b": 80, "delta": 8 }
+    ],
+    "missingSkills": { "resolved": ["Docker", "CI/CD"], "newlyMissing": [], "unchanged": ["AWS", "Redis", "Unit testing", "Message queues"] },
+    "suggestionCount": { "a": 7, "b": 4 },
+    "disclaimer": "This score is an AI estimate of how well your resume matches common ATS criteria for the selected role. It is not a guarantee of how any employer's system will rate it."
+  }
+}
+```
+
+`warning` is the i18n key `compare.differentRole` when role or level differ (`sameRole = false`).
+
+**Errors**
+
+| HTTP | Error code | When |
+|---|---|---|
+| 400 | VALIDATION_ERROR | missing or malformed `a`/`b` |
+| 402 | PLAN_REQUIRED | user is `free` (`details.feature = "compare"`) |
+| 404 | NOT_FOUND | either analysis unknown, deleted or not owned |
+| 422 | COMPARE_INVALID | `a = b` (`details.reason = "same_analysis"`) or either not `completed` (`"not_completed"`) |
+
 ### 6.3 Error code list
 
-Numbering is grouped by family: `ERR-00x` general, `ERR-01x` upload and file, `ERR-02x` state and quota, `ERR-03x` infrastructure, `ERR-04x` analysis failure codes (returned inside a 200 body as `failureCode`, never as an HTTP error).
+Numbering is grouped by family: `ERR-00x` general, `ERR-01x` upload and file, `ERR-02x` state and quota, `ERR-03x` infrastructure, `ERR-04x` analysis failure codes (returned inside a 200 body as `failureCode`, never as an HTTP error), `ERR-05x` billing and Pro features (v1.2).
 
 | ID | Code | HTTP | Message | When it happens |
 |---|---|---|---|---|
@@ -1987,7 +2425,7 @@ Numbering is grouped by family: `ERR-00x` general, `ERR-01x` upload and file, `E
 | ERR-017 | TEXT_TOO_SHORT | 422 | We could not find enough text. Scanned images are not supported; please upload a text-based PDF or DOCX. | extracted text < MIN_EXTRACTED_CHARS (also used as a resume failure code) |
 | ERR-018 | TEXT_TOO_LONG | 422 | The document contains too much text to analyse. | extracted text > MAX_EXTRACTED_CHARS |
 | ERR-019 | RESUME_NOT_READY | 409 | Your resume is not available for analysis. | resume `uploaded`/`extracting` (`details.reason = processing`, message "still being processed") or `extracted_text` purged after 30 days (`details.reason = text_expired`, message "please upload the resume again") |
-| ERR-020 | QUOTA_EXCEEDED | 402 | You have used all your analyses for this period. | counter ≥ limit; `details { limit, used, plan, resetsAt }` |
+| ERR-020 | QUOTA_EXCEEDED | 402 | You have used all your free analyses for this month. | free plan only: counter ≥ limit; `details { limit, used, plan, resetsAt }` (never for `pro`, v1.2) |
 | ERR-021 | ANALYSIS_IN_PROGRESS | 409 | An analysis is already running. Please wait for it to finish. | in-flight unique index hit; `details.analysisId` |
 | ERR-022 | ANALYSIS_NOT_COMPLETED | 409 | The report is available once the analysis has completed. | report requested for non-completed analysis |
 | ERR-023 | UNKNOWN_ROLE | 422 | Please choose a valid target role. | role missing or inactive |
@@ -2005,6 +2443,12 @@ Numbering is grouped by family: `ERR-00x` general, `ERR-01x` upload and file, `E
 | ERR-045 | AI_MALFORMED_RESPONSE | — (failure code) | The analysis result was invalid. Your quota was not used. | JSON/schema invalid twice, or < 1 valid dimension; refunded |
 | ERR-046 | AI_REFUSED | — (failure code) | The content could not be analysed. | provider refusal; not refunded |
 | ERR-047 | CANCELLED | — (failure code) | The analysis was cancelled because the resume was deleted. | user deleted resume/analysis or requested erasure; not refunded |
+| ERR-050 | SUBSCRIPTION_ALREADY_ACTIVE | 409 | You already have a Resume Pro subscription. | an `active`, `past_due` or in-period `cancelled` subscription exists (FR-031 AC-2); an unpaid `created` row is not an error — it is returned again with 200 |
+| ERR-051 | SUBSCRIPTION_NOT_ACTIVE | 409 | You have no active subscription to cancel. | FR-033 AC-2 |
+| ERR-052 | PAYMENT_PROVIDER_ERROR | 503 | Our payment partner is temporarily unavailable. Please try again; no charge was made. | Razorpay API error or timeout on create/cancel (CMP-011) |
+| ERR-053 | WEBHOOK_SIGNATURE_INVALID | 401 | Invalid signature. | HMAC mismatch on API-024 (FR-032 AC-1) |
+| ERR-054 | PLAN_REQUIRED | 402 | This feature is part of Resume Pro. | free user calls a Pro-only feature; `details.feature` (FR-035) |
+| ERR-055 | COMPARE_INVALID | 422 | Choose two different completed analyses to compare. | FR-035 AC-1; `details.reason ∈ { same_analysis, not_completed }` |
 
 ---
 ## 7. Traceability matrix
@@ -2016,14 +2460,14 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | Requirement | Component(s) | Table(s) | API(s) | Verified by |
 |---|---|---|---|---|
 | FR-001 | CMP-001, CMP-002, CMP-004 | TBL-001, TBL-002 | API-001 | TC-001 |
-| FR-002 | CMP-001, CMP-002, CMP-004, CMP-005 | TBL-010, TBL-005, TBL-003, TBL-012 | API-002 | TC-002 |
+| FR-002 | CMP-001, CMP-002, CMP-004, CMP-005 | TBL-010, TBL-005, TBL-003, TBL-012, TBL-014 (v1.2) | API-002, API-021 | TC-002, TC-131 |
 | FR-003 | CMP-001, CMP-002, CMP-004 | TBL-003, TBL-013 | API-003, API-004, API-005, API-008 | TC-003, TC-004 |
 | FR-004 | CMP-001, CMP-002, CMP-005, CMP-006 | TBL-004, TBL-013 | API-005 | TC-010, TC-011 |
 | FR-005 | CMP-002 | TBL-004, TBL-013 | API-005 | TC-012, TC-013, TC-014 |
 | FR-006 | CMP-003, CMP-006 | TBL-004 | API-006 | TC-020, TC-021 |
 | FR-007 | CMP-002, CMP-003, CMP-006 | TBL-004 | API-005, API-007 | TC-015, TC-061 |
 | FR-008 | CMP-001, CMP-002, CMP-004, CMP-005 | TBL-005, TBL-004, TBL-001, TBL-013 | API-008 | TC-030 |
-| FR-009 | CMP-002, CMP-004, CMP-005 | TBL-010, TBL-005 | API-008, API-002 | TC-040, TC-041, TC-042, TC-043 |
+| FR-009 | CMP-002, CMP-004, CMP-005 | TBL-010, TBL-005, TBL-014 (v1.2) | API-008, API-002 | TC-040, TC-041, TC-042, TC-043, TC-131 |
 | FR-010 | CMP-002, CMP-003, CMP-005 | TBL-005 | API-008, API-009 | TC-031, TC-055 |
 | FR-011 | CMP-003, CMP-007 | TBL-006, TBL-005 | API-009 | TC-032, TC-033 |
 | FR-012 | CMP-003, CMP-007 | TBL-011, TBL-002 | — (worker-internal; observable via API-009) | TC-034, TC-035 |
@@ -2031,12 +2475,12 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | FR-014 | CMP-003 | TBL-006, TBL-007, TBL-008, TBL-005 | API-009 | TC-033, TC-035 |
 | FR-015 | CMP-003, CMP-002 | TBL-007, TBL-002 | API-009 | TC-033, TC-045 |
 | FR-016 | CMP-003, CMP-002 | TBL-008 | API-009 | TC-033, TC-045 |
-| FR-017 | CMP-002, CMP-001, CMP-009 | TBL-007, TBL-008 | API-009, API-013 | TC-045, TC-046 |
+| FR-017 | CMP-002, CMP-001, CMP-009 | TBL-007, TBL-008, TBL-014 (v1.2 entitlement) | API-009, API-013 | TC-045, TC-046, TC-125 |
 | FR-018 | CMP-001, CMP-002 | TBL-005, TBL-001 | API-010 | TC-047 |
-| FR-019 | CMP-002, CMP-003, CMP-009, CMP-006 | TBL-009 | API-012 | TC-070, TC-071 |
+| FR-019 | CMP-002, CMP-003, CMP-009, CMP-006 | TBL-009, TBL-014 (plan at render) | API-012, API-013 | TC-070, TC-071, TC-134 |
 | FR-020 | CMP-002, CMP-006 | TBL-009, TBL-013 | API-013 | TC-072, TC-073 |
 | FR-021 | CMP-002, CMP-006, CMP-005 | TBL-004, TBL-005, TBL-008, TBL-006, TBL-009, TBL-013 | API-007, API-011 | TC-060, TC-061 |
-| FR-022 | CMP-002, CMP-003, CMP-006 | TBL-012, TBL-004, TBL-005, TBL-006, TBL-008, TBL-009, TBL-003, TBL-013 | API-014, API-015, API-017 | TC-062, TC-063, TC-064 |
+| FR-022 | CMP-002, CMP-003, CMP-006, CMP-011 (v1.2) | TBL-012, TBL-004, TBL-005, TBL-006, TBL-008, TBL-009, TBL-003, TBL-013, TBL-014, TBL-015 | API-014, API-015, API-017 | TC-062, TC-063, TC-064, TC-130 |
 | FR-023 | CMP-003, CMP-006 | TBL-004, TBL-005, TBL-009, TBL-013 | — (scheduled job) | TC-065, TC-066 |
 | FR-024 | CMP-002, CMP-003 | TBL-013 | API-018 (read) | TC-080 |
 | FR-025 | CMP-002 | TBL-010, TBL-005, TBL-012, TBL-013 | API-016, API-017, API-018 | TC-081, TC-082 |
@@ -2063,6 +2507,16 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | NFR-016 | all code | — | — | TC-116 |
 | NFR-017 | CMP-007 (stub adapter) | — | — | TC-117 |
 | NFR-018 | CMP-003, CMP-005 | TBL-005 | API-009 | TC-055 |
+| FR-031 | CMP-001, CMP-002, CMP-004, CMP-011 | TBL-014, TBL-013 | API-022, API-021 | TC-122, TC-127, TC-129 |
+| FR-032 | CMP-002, CMP-003, CMP-005, CMP-011 | TBL-015, TBL-014, TBL-013 | API-024 | TC-122, TC-123, TC-124, TC-126 |
+| FR-033 | CMP-002, CMP-003, CMP-004, CMP-005, CMP-011 | TBL-014, TBL-013 | API-023 | TC-125, TC-126, TC-129, TC-132 |
+| FR-034 | CMP-002, CMP-004, CMP-005 | TBL-014 | API-002, API-009, API-016, API-021, API-025 | TC-122, TC-125 |
+| FR-035 | CMP-001, CMP-002, CMP-004, CMP-005 | TBL-005, TBL-006, TBL-007, TBL-008, TBL-014 (entitlement) | API-025 | TC-128, TC-133 |
+| FR-036 | CMP-002 | TBL-010, TBL-014 | API-002, API-008, API-009 | TC-120, TC-121 |
+| FR-037 | CMP-001, CMP-002 | TBL-014, TBL-015 | API-021, API-016 | TC-122, TC-125 |
+| NFR-019 | CMP-011, CMP-001, CMP-002 | TBL-015 | API-022, API-024 | TC-123, TC-116 (`gitleaks`) |
+| NFR-020 | CMP-002, CMP-003, CMP-005 | TBL-015 | API-024 | TC-124 |
+| NFR-021 | CMP-002, CMP-005 | TBL-014 | API-021 | TC-122, TC-125 |
 
 **Company-wide requirement → where satisfied**
 
@@ -2073,7 +2527,7 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | CR-006, CR-007, CR-008 | §1.2 table, `roles.guard.ts`, ownership checks in services (404 on foreign ids); TC-007, TC-008 |
 | CR-009, CR-010, CR-011, CR-012, CR-013 | `common/logging/*` with redaction, `request-id.interceptor.ts`, TBL-013, retention config; TC-080, TC-111 |
 | CR-014, CR-015, CR-016, CR-017, CR-018 | §6.1 envelope, §6.3 list, `http-exception.filter.ts`, §4.4 timeouts/retries, web error component; TC-009, TC-050–TC-054 |
-| CR-019 – CR-028 | TLS/HSTS config, `gitleaks` CI, DTO validation, CR-022 prompt data block (FR-012), Helmet/CSP, Redis rate limiter (FR-004, §6.1), PII flags §5.2 + purge FR-023, SSE-KMS + managed encryption, `pnpm audit`, processor table §4.4 + L-1/L-2; TC-010–TC-014, TC-035, TC-052, TC-110 |
+| CR-019 – CR-028 | TLS/HSTS config, `gitleaks` CI, DTO validation, CR-022 prompt data block (FR-012), Helmet/CSP, Redis rate limiter (FR-004, §6.1), PII flags §5.2 + purge FR-023, SSE-KMS + managed encryption, `pnpm audit`, processor table §4.4 + L-1/L-2 and, since v1.2, Razorpay (CR-028, L-9, NFR-019); TC-010–TC-014, TC-035, TC-052, TC-110, TC-123 |
 | CR-029, CR-030, CR-031 | `next-intl` catalogue, ISO-8601 fields (§6.1), FR-016 AC-4; TC-114 |
 | CR-032 – CR-035 | `config/env.schema.ts`, `.env.example`, separate resources per env, seed script; TC-116 |
 | CR-036 – CR-040 | `.github/workflows/ci.yml`, tag releases, `prisma migrate deploy` in pipeline, runbook, API-019/API-020 + Sentry/uptime; TC-090 |
@@ -2083,7 +2537,7 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | TC | Type | Verifies | Summary |
 |---|---|---|---|
 | TC-001 | API integration | FR-001 | only active roles, sorted; levels with bands; cache header |
-| TC-002 | API integration | FR-002 | free month / premium day counters; `resetsAt` at period boundary in `Asia/Kolkata` |
+| TC-002 | API integration | FR-002 | free month counter and `resetsAt` at the month boundary in `Asia/Kolkata`; Pro response has `limit = null`, `unlimited = true` and the subscription summary (v1.2; the v1.0 "premium day counter" case is removed with A-07) |
 | TC-003 | API integration | FR-003 | upload/start without consent → 403 `ERR-006`; consent row + audit on accept |
 | TC-004 | API integration | FR-003 | version bump requires re-acceptance; repeat accept returns 200 original time |
 | TC-005 | API integration | CR-002/003 | expired token, wrong `kid`, wrong issuer → 401; valid token → principal |
@@ -2109,11 +2563,11 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | TC-037 | worker integration (AI stub) | FR-013 | 429 with `retry-after` honoured; 5xx retried; 400 not retried → `AI_PROVIDER_ERROR` |
 | TC-038 | worker integration (AI stub) | FR-013 | malformed JSON then valid → success; malformed twice → `AI_MALFORMED_RESPONSE`; `refusal` → `AI_REFUSED` no refund |
 | TC-039 | worker integration | FR-013 | 5 failures in 60 s open the circuit; job re-queued with 30 s delay without consuming an attempt |
-| TC-040 | API integration | FR-009 | free user 4th analysis in month → 402 with details; premium 21st in day → 402 |
+| TC-040 | API integration | FR-009 | free user 4th analysis in month → 402 with details (the v1.0 "premium 21st in day → 402" case is removed; Pro unlimited is TC-131) |
 | TC-041 | API integration (concurrency) | FR-009, BR-004 | 20 parallel starts with 1 quota left → exactly 1 × 202, 19 × 402/409; counter = limit |
 | TC-042 | API integration | FR-009 | Redis flushed mid-period → DB still authoritative; Redis down → start works via DB path |
 | TC-043 | worker integration | BR-007 | refund on `AI_*`/`INTERNAL`; no refund on `TEXT_TOO_SHORT`, `AI_REFUSED`, `CANCELLED` |
-| TC-045 | API integration | FR-015–FR-017 | free token → 3 unlocked suggestions, 5 skills, rest `{locked:true}` with totals; premium token on same analysis → all unlocked |
+| TC-045 | API integration | FR-015–FR-017 | free user → 3 unlocked suggestions, 5 skills, rest `{locked:true}` with totals; same user with an active subscription row (v1.2 entitlement, not a token claim) → all unlocked on the next read |
 | TC-046 | worker integration | FR-017, FR-019 | free user's PDF contains partial lists and upgrade note |
 | TC-047 | API integration | FR-018 | pagination, filters, deleted excluded, `reportAvailable` |
 | TC-048 | unit + Playwright | FR-027 | disclaimer text in API, UI and PDF; forbidden phrases absent from locale file |
@@ -2129,7 +2583,8 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | TC-062 | worker integration | FR-022 | erasure completes: all objects deleted, all PII nulled, consent withdrawn, request `completed` |
 | TC-063 | worker integration | FR-022, NFR-007 | completion within test budget; status endpoint reflects it |
 | TC-064 | worker integration | FR-022 | storage delete failing 5× → `failed`, Sentry event; admin re-run succeeds |
-| TC-065 | job integration | FR-023, NFR-008 | files purged 24 h after terminal; text nulled after 30 d; reports after 30 d (clock injected) |
+| TC-065 | job integration | FR-023, NFR-008 | files purged 24 h after terminal; text nulled after 30 d; report **object** removed after 30 d with the row kept as `purged` (`storage_key` NULL, `purged_at` set); row cascades away only with the analysis at 365 d (clock injected) |
+| TC-134 | API + worker integration (v1.4) | FR-019 AC-5, BR-021 | free-rendered `ready` report + user now Pro → API-012 returns 202 `regenerated: true`, old object deleted, new PDF ungated; Pro-rendered report + user now free → 200 existing, PDF unchanged; `purged` → 202 re-render with current plan; API-013 on `purged` → `status: purged` with `regenerate` hint |
 | TC-066 | job integration | FR-023 | advisory lock prevents concurrent purge; batch limit 500; analyses > 365 d hard-deleted with cascades |
 | TC-070 | worker integration | FR-019, NFR-004 | PDF renders ≤ 5 s, ≤ 2 MB, ≤ 6 pages; content sections present |
 | TC-071 | worker integration | FR-019 | render error → `failed`; 3 failures → `blocked_until`; API-012 → 429 `ERR-035` |
@@ -2151,6 +2606,20 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | TC-115 | runbook drill | NFR-015 | restore from snapshot + PITR verified |
 | TC-116 | CI | NFR-016, CR-032 | typecheck, lint, coverage gates; env schema fails fast on missing var |
 | TC-117 | CI | NFR-017 | pipeline tests run with network disabled using the stub adapter |
+| TC-120 | API integration (regression, v1.2) | FR-036 | the v1.0 free scenarios run unchanged: 3 analyses/month then 402, partial gating 3 suggestions / 5 skills, history list, PDF with upgrade note |
+| TC-121 | contract (regression, v1.2) | FR-036 | a free user's API-009 and API-002 responses equal the v1.1 golden fixtures except the added `subscription`/`unlimited` fields |
+| TC-122 | API + worker integration (payment stub) | FR-031, FR-032, FR-034, FR-037, NFR-021 | checkout → 201 and `created` row; stub `subscription.activated` webhook → `active`, plan `pro` within 60 s, API-021 shows the payment |
+| TC-123 | API integration | FR-032 AC-1, NFR-019 | missing or wrong `X-Razorpay-Signature` → 401 `ERR-053`, no `payment_events` row; payload with a `card` object is stored without it |
+| TC-124 | worker integration | FR-032, BR-019, NFR-020 | duplicate event id → 200 `duplicate: true`, no state change; event older than `last_event_at` → stored `ignored`; ack measured < 1 s with processing deferred |
+| TC-125 | API + job integration (clock injected) | FR-033, FR-034, FR-017 | cancel → `cancelled`, plan still `pro`; clock past `current_period_end` → expiry job sets `expired`, plan `free`, API-009 re-applies free gating |
+| TC-126 | worker integration | FR-032 AC-4, A-20 | `payment.failed` → `past_due` with Pro kept until period end; `subscription.charged` afterwards → `active` with new period; `subscription.halted` then expiry → `expired` |
+| TC-127 | API integration | FR-031 AC-2/AC-3, BR-018, IDX-23 | checkout while `active`/`past_due`/in-period `cancelled` → 409 `ERR-050`; second checkout while an unpaid `created` row < 24 h exists → 200 with the same `providerSubscriptionId` and no new provider call; `created` row older than 24 h → `abandoned`; after expiry a new checkout creates a second row |
+| TC-128 | API integration | FR-035 | Pro: deltas, resolved/newly missing skills, `sameRole` warning for different role; free → 402 `ERR-054`; `a = b` → 422; not completed → 422; foreign id → 404 |
+| TC-129 | chaos (payment stub down) | FR-031 AC-6, FR-033 AC-7, CMP-011 | checkout → 503 `ERR-052` with no row; cancel → 503 with local state unchanged; existing Pro user still Pro |
+| TC-130 | worker integration | FR-022 AC-7, §5.4 | erasure with an active subscription calls the provider cancel, sets the sentinel `user_id` and `erased_user_hash`, reduces `payment_events.payload`, keeps rows |
+| TC-131 | API integration | FR-009, BR-020 | Pro user starts 25 analyses in a day (rate limit raised in test) → all 202, counter increments, never 402 |
+| TC-132 | job integration | FR-033 AC-5 | provider stub reports `cancelled` while local row is `active` → reconcile applies the change and writes `subscription.reconciled` |
+| TC-133 | API integration | FR-035 AC-6 | **Deprecated (v1.3)** as a PDF test; now verifies that `?compareWith=` on API-012 is rejected with 400 `ERR-001` and that the comparison appears only on SCR-003 |
 
 ### 7.3 Internal consistency rules (checked before every release of this document)
 
@@ -2161,6 +2630,7 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 5. Every status value used in §3, §4 and §6 appears in the matching `CHECK` constraint in §5.2.
 6. Every endpoint in the §6.2 index has a specification block and appears in at least one row of §7.1.
 7. Every table in §5.2 appears in at least one row of §7.1.
+8. (v1.2) The plan values are exactly `free` and `pro` wherever a plan is named (the word `premium` appears only inside Deprecated notes), and BR-017 is the only plan source cited by any requirement.
 
 ---
 
@@ -2173,3 +2643,6 @@ Every FR and NFR appears at least once. `—` is used only where nothing applies
 | v0.1 | 2026-10-19 | Sandip Kumar Mondal | Outline created from the standard template; sections 1–2 (company-wide requirements, coding conventions) written for a NestJS + Next.js + PostgreSQL + Redis project. | Round 1 start; brief and template received 2026-10-14. | CR-001–CR-040 |
 | v1.0 | 2026-10-19 | Sandip Kumar Mondal | First complete version: 30 FRs with acceptance criteria, 18 NFRs, 16 assumptions, 16 business rules, constants, out-of-scope and DPDP legal questions (§3); 10 components, 7 sequence diagrams with failure paths, integrations, stack reasons (§4); 13 tables, 21 indexes, delete rules (§5); 20 endpoints and 35 error codes (§6); traceability and 70 verification cases (§7). | Round 1 submission — buildable from this document alone. | FR-001–FR-030, NFR-001–NFR-018, A-01–A-16, BR-001–BR-016, CMP-001–CMP-010, TBL-001–TBL-013, API-001–API-020, ERR-001–ERR-047 |
 | v1.1 | 2026-10-19 | Sandip Kumar Mondal | Builder-readiness review additions: §4.6 environment variables and rate-limit algorithm, §4.7 queues and jobs, §4.8 web token handling (BFF), screens SCR-001–SCR-004 and draft consent notice, §4.9 AI provider contract (input/output schema, prompt skeleton, error mapping), §4.10 seed catalogue (24 roles, full skill rows for two roles). Consistency fixes: ERR-019 gains `details.reason` (`processing` / `text_expired`) for resumes whose text was purged; FR-002 reads the quota counter; A-01 states admin tokens cannot call user endpoints; SEQ-03 handles a purged file; Mermaid syntax corrected (no `;` in messages, `FK, UK`). | Reading the spec as the builder showed these would otherwise be guesses; all nine Mermaid blocks now parse with Mermaid 11.4. | FR-002, FR-008, FR-012, A-01, A-16, CMP-001, CMP-007, ERR-019, API-008, SEQ-03 |
+| v1.2 | 2026-10-22 | Sandip Kumar Mondal | **Round 2 — Resume Pro paid plan.** New: FR-031 (subscribe via Razorpay), FR-032 (webhook processing), FR-033 (cancel at period end, expiry), FR-034 (plan from the module's subscription record), FR-035 (Pro-only comparison of two analyses), FR-036 (free tier unchanged), FR-037 (subscription status); NFR-019–NFR-021; A-17–A-21; BR-017–BR-020; L-9; CMP-011; SEQ-08–SEQ-10; SCR-005; TBL-014 `subscriptions`, TBL-015 `payment_events`; IDX-22–IDX-28; API-021–API-025; ERR-050–ERR-055; TC-120–TC-133; constants `PRO_*`, `CHECKOUT_ABANDON_HOURS`, `WEBHOOK_TOLERANCE_SEC`, `PLAN_CACHE_TTL_SEC`. Changed: CR-002 and A-01 (plan claim no longer used), §1.2 role table, FR-002, FR-009, FR-017, FR-018 (note), FR-022 (billing records on erasure), BR-003, BR-015, OOS-1, `CONSENT_VERSION` → `2026-10-r2` with Razorpay named in the notice, `usage_counters.plan` values, §2.2 folder tree, §4.1/4.4/4.5/4.6/4.7/4.8, §5.4 delete rules, §6.1 auth and rate limits, API-002/008/009/012/016 examples, ERR-020 wording, TC-002/040/045, §7.3 rule 8. **Deprecated (rows kept):** A-07 (premium daily cap), constant `PREMIUM_DAILY_CAP`, the `day` quota period in BR-003, "plan purchase" in OOS-1. Plan value renamed `premium` → `pro` (A-21). | Coordinator's Round 2 requirement (2026-10-22): paid plan ₹299/month via Razorpay; Pro unlimited analyses and all suggestions; history and comparison; cancel anytime with access to period end; free unchanged. | FR-002, FR-009, FR-017, FR-018, FR-022, FR-031–FR-037, NFR-019–NFR-021, CR-002, CR-028, A-01, A-07, A-17–A-21, BR-003, BR-015, BR-017–BR-020, CMP-010, CMP-011, TBL-010, TBL-014, TBL-015, IDX-22–IDX-28, API-002, API-008, API-009, API-012, API-016, API-021–API-025, ERR-020, ERR-050–ERR-055, SEQ-08–SEQ-10, SCR-002, SCR-003, SCR-004, SCR-005, L-9, TC-002, TC-040, TC-045, TC-120–TC-133 |
+| v1.3 | 2026-10-22 | Sandip Kumar Mondal | **Round 2 — fixes from an independent review of v1.2** (27 findings, all applied). Blockers: TBL-014 period check constraint no longer forbids `current_period_end` on `expired` rows (expiry job and `lastSubscription` now valid); erasure sets a live subscription `expired` before writing the sentinel `user_id`, so IDX-23 cannot collide (FR-022 AC-7, SEQ-06, §5.4). Consistency: one end-of-access instant (`current_period_end`, BR-017) — FR-033 AC-4 and NFR-021 reworded, hourly job is bookkeeping; FR-031 AC-2 defines the checkout handler order incl. a lapsed `active` row (no 500 path); BR-018 gains `created → created` (first payment failed) and all paths to `expired`; FR-032 AC-4 handles `payment.failed` on `created`; `WEBHOOK_TOLERANCE_SEC` raised 300 → 90 000 s so provider retries after an outage are applied; `payment_events.ignore_reason` added; `usage_counters.limit_snapshot` nullable for Pro; "money is not stored" corrected; SEQ-04 and CMP-008 no longer mention a plan claim; L-3 notice version r2; notice/L-9/§4.4 agree that Checkout collects e-mail/phone directly (no prefill); §4.2 responsibilities, `PaymentPort` in §2.2, NFR-013, FR-017 AC-5 `upgradeAvailable`, FR-031 AC-1 response fields, FR-032 AC-6 audit rows, §7.1 rows FR-033/FR-035 completed; FR-018 priority raised to Must; A-22 (Pro ending mid-month) added to BR-020; API-025 route-order note. **Deprecated (rows kept):** `compareWith` on API-012 and the PDF comparison (FR-035 AC-6, TC-133) — one report per analysis cannot carry it; comparison is on-screen only. | Self-review before the Round 2 deadline: every finding was either a contradiction between two sections or a point a builder would have to guess. | FR-017, FR-018, FR-022, FR-031, FR-032, FR-033, FR-035, NFR-013, NFR-021, A-22, BR-018, BR-020, CMP-001–CMP-005, CMP-008, TBL-010, TBL-014, TBL-015, IDX-23, API-012, API-024, API-025, SEQ-04, SEQ-06, L-3, L-9, TC-133, `WEBHOOK_TOLERANCE_SEC` |
+| v1.4 | 2026-10-30 | Sandip Kumar Mondal | **Coordinator feedback after scoring (2026-10-28).** (1) Subscription expiry rule aligned everywhere: `active` expires too when its period lapses without a renewal webhook — SEQ-09 `UPDATE … WHERE status IN (active, cancelled, past_due)` and IDX-25 partial index now use the same status set as FR-033 AC-4 and BR-018. (2) Report purge defined: the 30-day purge removes only the PDF object and marks the row `purged` (new status, `purged_at`, `plan_at_render` on TBL-009; `ready ⇔ storage_key` check; IDX-13 predicate); BR-021 defines regeneration — re-render after purge or after a free → Pro upgrade, never downgrade a Pro-rendered PDF; FR-019 AC-5, FR-023 AC-3, SEQ-07, API-012 (`regenerated`, `planAtRender`), API-013 (`purged` response), TC-065, TC-134, §7.1. (3) Process: commit cadence and AI-link evidence addressed in `process.md`. | Feedback from the Round 2 review: expiry rule inconsistent across FR-033 / SEQ-09 / index; report purge and plan-change behaviour undefined; process evidence weak. | FR-019, FR-023, BR-021, TBL-009, IDX-13, IDX-25, SEQ-07, SEQ-09, API-012, API-013, TC-065, TC-134 |
