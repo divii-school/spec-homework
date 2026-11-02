@@ -55,10 +55,11 @@ Rules every Divii / Hanriver project follows, written for this module. Each rule
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-001 | Authentication | The module never issues, stores or refreshes credentials. Every request is authenticated with the platform's access token: a JWT signed with RS256, read from the `sb_access` cookie (httpOnly, Secure, SameSite=Lax, Domain=`.surfingbear.com`) or, for service-to-service calls only, from `Authorization: Bearer <token>`. | Integration test: request with no token, expired token, wrong signature, wrong `iss` → each returns 401 `UNAUTHENTICATED`. |
+| CR-001 | Authentication | The module never issues, stores or refreshes credentials. Every request is authenticated with the platform's access token: a JWT signed with RS256, read from the `sb_access` cookie (httpOnly, Secure, SameSite=Lax, Domain = the cookie domain of the environment, *(v0.7)* per environment in 4.8.1, A-17; host-only on `localhost` in `local`) or, for service-to-service calls only, from `Authorization: Bearer <token>`. | Integration test: request with no token, expired token, wrong signature, wrong `iss` → each returns 401 `UNAUTHENTICATED`. |
 | CR-002 | Authentication | Token validation checks: signature against the platform JWKS (`PLATFORM_JWKS_URL`), `iss` = `PLATFORM_ISSUER`, `aud` contains `resume-optimizer`, `exp` in the future with at most 30 s clock skew. JWKS keys are cached in memory for 10 minutes and refetched once immediately when a token carries an unknown `kid`. | Unit tests on the token validator; test with a rotated key id. |
 | CR-003 | Authentication | The claims the module uses are `sub` (user id, string, max 64 chars) and `roles` (array, contains `USER` and optionally `ADMIN`). *(Changed in v0.4: the `plan` claim is no longer read; any value in it is ignored, and the plan comes from FR-025.)* A missing `sub`, or a `sub` over 64 characters, makes the token invalid → 401 `UNAUTHENTICATED`. On `/api/v1/**` a valid token whose `roles` does not contain `USER` (for example a `PLATFORM_SERVICE` token) → 403 `FORBIDDEN`. | Unit test per case. |
 | CR-004 | Authentication | Service-to-service calls (platform → module, see FR-021) use a separate token whose `roles` contains `PLATFORM_SERVICE`. A user token can never reach `/internal/**`. | Integration test: user token on `/internal/**` → 403 `FORBIDDEN`. |
+| CR-034 | Authentication | *(v0.7)* Local sign-in exists only in `local`. With `APP_ENV=local` the API also serves `GET /local/login` and `GET /local/jwks.json` (4.8.1, "Local sign-in"), which stand in for the platform's login page and JWKS. The controller and the security filter chain for `/local/**` are `@Profile("local")` beans: in `local` that chain runs only the request id filter (no JWT, CSRF or rate-limit check, like `/webhooks/**`); in every other profile neither bean exists, so both paths are unknown routes → 404 `NOT_FOUND`. The local key pair is never used outside `local`. | `LocalLoginIT` with profile `local`: `/local/login?returnTo=/resume-optimizer/pro` → 302 to `http://localhost:3000/resume-optimizer/pro` and a `Set-Cookie: sb_access` whose token passes CR-002 against `/local/jwks.json`; `returnTo=https://evil.example` → 302 to `http://localhost:3000/resume-optimizer`. `LocalLoginAbsentIT` with profile `dev`: both paths → 404. |
 
 ### 1.2 Roles and permissions
 
@@ -130,7 +131,7 @@ Standard error body:
 |---|---|---|---|
 | CR-015 | Secrets | Secrets (DB password, Redis password, AI API key, S3 credentials, Razorpay key secret and webhook secret) come only from AWS Secrets Manager in dev/staging/prod and from a git-ignored `.env` locally. No secret is in git, Docker images or logs. | CI secret scan (gitleaks) blocks the merge; image scan. |
 | CR-016 | Transport | HTTPS only (TLS 1.2+), HSTS `max-age=31536000; includeSubDomains`. HTTP requests are redirected at the load balancer. | Staging check with `curl -I`. |
-| CR-017 | CORS | Allowed origins are an explicit list per environment (prod: `https://www.surfingbear.com`). `Access-Control-Allow-Credentials: true`. No wildcard. Allowed methods `GET`, `POST`, `DELETE`; allowed request headers `Content-Type`, `X-Requested-With`, `X-Request-Id`; exposed response headers `X-Request-Id`, `Retry-After`, `Location`, `Content-Disposition`; `Access-Control-Max-Age: 600`. An `OPTIONS` preflight is answered by the CORS filter before the token, CSRF and rate-limit checks and is not counted towards the rate limit. | Integration test with a foreign Origin → no CORS headers. |
+| CR-017 | CORS | Allowed origins are an explicit list per environment, read from `app.cors.allowed-origins` / `CORS_ALLOWED_ORIGINS` (4.7; *(v0.7)* one origin per environment, the web origin of 4.8.1). An origin is compared as an exact string (scheme, host and port). `Access-Control-Allow-Credentials: true`. No wildcard. Allowed methods `GET`, `POST`, `DELETE`; allowed request headers `Content-Type`, `X-Requested-With`, `X-Request-Id`; exposed response headers `X-Request-Id`, `Retry-After`, `Location`, `Content-Disposition`; `Access-Control-Max-Age: 600`. An `OPTIONS` preflight is answered by the CORS filter before the token, CSRF and rate-limit checks and is not counted towards the rate limit. | Integration test with a foreign Origin → no CORS headers. |
 | CR-018 | CSRF | State-changing requests (POST, PUT, DELETE) that authenticate with the cookie must carry the header `X-Requested-With` with the value `SurfingBear` exactly (case-sensitive); a missing header or any other value (for example `XMLHttpRequest`) returns 403 `FORBIDDEN`. Combined with SameSite=Lax this blocks cross-site form posts. | Integration test. |
 | CR-019 | Input validation | Every request field is validated with Bean Validation (`jakarta.validation`) before any service code runs. Uploaded files are checked by magic bytes, not by extension or the client's `Content-Type`. | Unit tests per DTO; file tests in FR-003. |
 | CR-020 | Rate limiting | Per user, enforced in Redis with a fixed one-minute window: 60 API requests/minute overall, and 10 resume uploads/hour. These limits apply to every plan, `PRO` included ("unlimited analyses" removes only the monthly quota, FR-007). `/internal/**` and `/webhooks/**` are not rate-limited (no user). Both windows are clock windows in UTC (`ZoneOffset.UTC`): the minute and the hour in the Redis keys of 4.7 are UTC. Excess returns 429 `RATE_LIMITED` with a `Retry-After` header = whole seconds until the next UTC minute (API limit) or the next UTC hour (upload limit), minimum 1. | Integration test with Testcontainers Redis and a fixed clock. |
@@ -161,10 +162,12 @@ Standard error body:
 | PostgreSQL / Redis | Docker containers | AWS RDS / ElastiCache (small) | same sizes as prod | RDS Multi-AZ / ElastiCache with replica |
 | File storage | LocalStack S3 | S3 bucket `sb-ro-dev` | S3 `sb-ro-staging` | S3 `sb-ro-prod` |
 | AI provider | `FakeAiClient` returning a fixed valid response (`AI_PROVIDER=fake`) | Real Anthropic API, separate key, spend limit | Real Anthropic API | Real Anthropic API |
-| Platform auth | Local JWKS file + a dev token script | platform dev | platform staging | platform prod |
+| Platform auth | *(v0.7)* Local sign-in of the API itself (`/local/login`, `/local/jwks.json`, CR-034); `scripts/dev-token.sh` for curl | platform dev (A-18) | platform staging (A-18) | platform prod (A-18) |
 | Payments (Razorpay) | `FakeRazorpayClient` (`BILLING_PROVIDER=fake`) and `scripts/send-test-webhook.sh`, which signs a sample event with the local webhook secret | Razorpay Test Mode, own plan and webhook | Razorpay Test Mode, own plan and webhook | Razorpay Live Mode |
 | Log level | DEBUG | INFO | INFO | INFO |
 | Data | Synthetic | Synthetic | Synthetic | Real |
+
+*(v0.7)* Domains, URLs and the platform contract of each environment are in 4.8.1, the value of every environment variable per environment in 4.8.2, and hosting, pipeline, infrastructure, sizes and monitoring in 4.8.3 – 4.8.7.
 
 ### 1.8 Deployment
 
@@ -208,11 +211,14 @@ resume-optimizer-api/
 ├── pom.xml
 ├── Dockerfile
 ├── docker-compose.yml                 # local: postgres, redis, localstack
+├── config/local-jwt/                  # (v0.7) git-ignored; local key pair created on first local start (CR-034, 4.8.1)
+├── scripts/                           # dev-token.sh, send-test-webhook.sh (4.4, 4.8.1)
 ├── src/main/java/com/surfingbear/resumeoptimizer/
 │   ├── ResumeOptimizerApplication.java
 │   ├── common/
 │   │   ├── error/                     # ErrorCode enum, ApiException, GlobalExceptionHandler
 │   │   ├── security/                  # JWT filter, JWKS cache, CurrentUser
+│   │   │   └── local/                     # (v0.7) @Profile("local") only: LocalLoginController, local key pair, /local/** filter chain (CR-034)
 │   │   ├── logging/                   # request id filter, log redaction
 │   │   ├── ratelimit/                 # Redis rate limiter
 │   │   └── config/                    # typed @ConfigurationProperties
@@ -390,7 +396,7 @@ ATS scoring dimensions (FR-009):
 
 | # | Assumption | Reason |
 |---|---|---|
-| A-1 | *(Changed in v0.4: `plan` removed.)* The platform provides an RS256 JWT with `sub`, `roles`, `aud`, in a cookie shared on `.surfingbear.com`, and publishes a JWKS. Any other claim, including a `plan` claim, is ignored (CR-003). | The description says users are already logged in through the platform; reading its token avoids a second login and a user table copy. |
+| A-1 | *(Changed in v0.4: `plan` removed.)* The platform provides an RS256 JWT with `sub`, `roles`, `aud`, in a cookie shared on the environment's registrable domain (`.surfingbear.com` in prod; *(v0.7)* per environment in A-17), and publishes a JWKS (A-18). Any other claim, including a `plan` claim, is ignored (CR-003). | The description says users are already logged in through the platform; reading its token avoids a second login and a user table copy. |
 | A-2 | **Deprecated in v0.4**, replaced by A-11 and FR-025. *(Was: the plan in the token is the truth for limits; a plan change takes effect with the next platform token.)* | The paid plan is now sold and billed by this module, so the module's own subscription rows are the truth, and the token no longer carries anything the module uses for the plan. |
 | A-3 | *(Changed in v0.4.)* Limits: FREE 3 analyses/month and 3 suggestions visible (unchanged); PRO unlimited analyses and all suggestions (change request). v0.3's PREMIUM 50/month is deprecated. | 3 lets a free user try two or three target roles, enough to see value. "Unlimited" is the change request's rule; AI cost is bounded by the 2-in-progress limit, the rate limits and the fair-use signal (FR-007 criterion 8). |
 | A-4 | Resumes are analysed in English only. A non-English resume is still processed but scores will be low; the notice says so. | The role catalogue, prompt and scoring dimensions are written for English resumes. |
@@ -399,13 +405,15 @@ ATS scoring dimensions (FR-009):
 | A-7 | Platform users are 18 or older; the platform enforces this at sign-up. | DPDP requires verifiable parental consent for children; that belongs to the platform's sign-up, not to this module. |
 | A-8 | Uploads go through the backend (multipart), not as direct browser-to-S3 uploads. | Files are at most 5 MB, and the file must be parsed and validated before anything is stored (FR-004 criterion 5). |
 | A-9 | Scores are not guaranteed to be identical between two runs of the same resume and role (AI output varies between runs, and current Claude models do not accept a temperature setting). | Stating it prevents a support ticket from becoming a bug; each run is stored separately. |
-| A-10 | The web UI is served by the platform under `https://www.surfingbear.com/resume-optimizer` (the platform's CDN routes that path to this module's Next.js service); the API is at `https://ro-api.surfingbear.com`. | Same registrable domain, so the platform's `sb_access` cookie (Domain `.surfingbear.com`, SameSite=Lax) reaches the API from the browser, and users never leave the platform's navigation. |
+| A-10 | The web UI is served by the platform under `https://www.surfingbear.com/resume-optimizer` (the platform's CDN routes that path to this module's Next.js service); the API is at `https://ro-api.surfingbear.com`. *(v0.7)* These are the prod values; every environment follows the same pattern on its own domain (A-17, 4.8.1). | Same registrable domain, so the platform's `sb_access` cookie (Domain `.surfingbear.com`, SameSite=Lax) reaches the API from the browser, and users never leave the platform's navigation. |
 | A-11 | *(v0.4)* Resume Pro is sold and billed by this module through Razorpay Subscriptions (one plan per environment, created once by ops in the Razorpay dashboard, id in `RAZORPAY_PLAN_ID`). The platform is not involved. | The change request names the product, the price and the gateway for this module only. Billing here keeps the entitlement next to the features it unlocks, with no new platform contract. Razorpay Subscriptions handles mandates (card, UPI Autopay), retries and receipts, which the module would otherwise have to build. |
 | A-12 | *(v0.4)* ₹299 includes GST. Razorpay's receipts and the Razorpay dashboard are the payment and tax record. The module's billing tables are an operational copy and are erased like any other personal data (FR-019). | Keeps legal and financial records with the payment provider and finance, and keeps erasure in the module complete. |
 | A-13 | *(v0.4)* One paid subscription per user at a time. A cancelled subscription cannot be resumed; the user subscribes again after `access_until`. | An "undo cancellation" path would be a second state machine for a rare case. Allowing a second subscription while the first still gives access would charge twice for overlapping days. |
 | A-14 | *(v0.4)* Buying Resume Pro does not need the analysis consent of FR-001, and withdrawing that consent (FR-002) does not cancel Pro or erase billing data; erasing everything (FR-019, FR-021) does. The Pro page shows a short payment notice: Razorpay processes the payment, and the module keeps only subscription and payment ids, amounts and dates, for 180 days after the subscription ends. | Paying is a separate purpose that the user starts themselves (DPDP Act s. 7(a), voluntarily provided data for a specified purpose). Asking for the resume-processing consent would mix the two purposes. |
 | A-15 | *(v0.4)* Pro history uses the same 180-day retention as FREE. Pro adds filters, dimension scores and comparison, not longer storage. | Keeping one retention period means Pro access ending never has to delete or hide data, and the DPDP retention statement stays one sentence. |
 | A-16 | *(v0.4)* No grace period after a failed renewal: the plan becomes `FREE` at `access_until`, and comes back as soon as a Razorpay retry succeeds. | "Pro access continues until the end of the paid month" says access is tied to paid time. One rule (`access_until` > now) then covers cancelled, failing and halted subscriptions alike. |
+| A-17 | *(v0.7)* Each deployed environment has its own registrable domain: prod `surfingbear.com`, staging `surfingbear-staging.com`, dev `surfingbear-dev.com`. In each, the web UI is `https://www.<domain>/resume-optimizer`, the public API is `https://ro-api.<domain>`, and the platform sets the `sb_access` cookie with Domain `.<domain>`. Locally the web UI is `http://localhost:3000/resume-optimizer`, the API `http://localhost:8080`, and the cookie is host-only on `localhost`. All values per environment: 4.8.1. | Separate registrable domains keep each environment's `sb_access` cookie apart: with one shared `.surfingbear.com`, a dev login and a prod login in the same browser would overwrite each other's cookie, and a dev token would be sent to the prod API. Inside one environment the web UI and the API share the registrable domain, so the SameSite=Lax cookie reaches the API (A-10). Locally, cookies ignore the port, so one host-only cookie on `localhost` reaches both port 3000 and port 8080, and Chrome and Firefox treat `http://localhost` as a secure context, so the `Secure` attribute works without TLS. |
+| A-18 | *(v0.7)* The platform contract is the same in every deployed environment, on that environment's domain: token issuer `https://auth.<domain>` (`iss` = this URL), JWKS at `<issuer>/.well-known/jwks.json`, login page `https://www.<domain>/login?returnTo=<path>`. `returnTo` must be a relative path on the same host (it starts with one `/`); the platform rejects anything else and lands the user on its home page, and after a successful login it redirects the browser to `returnTo`. The platform owns the CloudFront distribution of `www.<domain>` and adds the two behaviours for `/resume-optimizer*` given in 4.8.3, pointing at the module's origin; the module team gives it the origin host name and the origin secret (4.8.3). The platform calls the internal erasure endpoint at `https://ro-internal.<domain>` from inside the environment's VPC (6.1). Values per environment: 4.8.1. | The module only verifies tokens (CR-001), so it needs exactly three things from the platform per environment: who issues tokens, where the keys are, and where to send a user who has none. A relative-only `returnTo` stops the login page from being used as an open redirect. The CDN belongs to the platform because `www.<domain>` is the platform's site; the module only adds an origin behind one path. |
 
 **Out of scope:**
 
@@ -854,7 +862,7 @@ Razorpay create request (CMP-019), all values from 4.7:
 
 #### 4.3.9 Razorpay webhook and renewals (FR-029) *(added in v0.4)*
 
-The webhook is configured in the Razorpay dashboard of each environment with the URL `https://ro-api.surfingbear.com/webhooks/v1/razorpay` (prod), the secret `RAZORPAY_WEBHOOK_SECRET`, and these events only: `subscription.authenticated`, `subscription.activated`, `subscription.charged`, `subscription.pending`, `subscription.halted`, `subscription.cancelled`, `subscription.completed`.
+The webhook is configured in the Razorpay dashboard of each environment with the URL `https://ro-api.surfingbear.com/webhooks/v1/razorpay` (prod; *(v0.7)* `https://ro-api.<domain>/webhooks/v1/razorpay` in dev and staging, 4.8.1), the secret `RAZORPAY_WEBHOOK_SECRET`, and these events only: `subscription.authenticated`, `subscription.activated`, `subscription.charged`, `subscription.pending`, `subscription.halted`, `subscription.cancelled`, `subscription.completed`.
 
 ```mermaid
 sequenceDiagram
@@ -1189,7 +1197,11 @@ Every value below is a typed `@ConfigurationProperties` field with this default,
 | `app.ai.timeout` / `retry-delay` | — | `45s` / `2s` | FR-008 |
 | `app.worker.concurrency` | `WORKER_CONCURRENCY` | `5` | CMP-010 (10 tasks × 5 = NFR-006's 50) |
 | `app.sweeper.running-timeout` / `queued-timeout` | — | `120s` / `5m` | FR-008 |
-| — | `PLATFORM_JWKS_URL`, `PLATFORM_ISSUER` | none (required) | CR-002 |
+| `app.cors.allowed-origins` *(v0.7)* | `CORS_ALLOWED_ORIGINS` | none (required) | CR-017; comma-separated list of exact origins, values per environment in 4.8.1 |
+| `app.local-login.key-dir` *(v0.7)* | `LOCAL_JWT_KEY_DIR` | `config/local-jwt` | CR-034; read only in `local` |
+| `app.local-login.redirect-origin` *(v0.7)* | `LOCAL_LOGIN_REDIRECT_ORIGIN` | `http://localhost:3000` | CR-034; read only in `local` |
+| `app.local-login.token-ttl` *(v0.7)* | — | `8h` | CR-034; read only in `local` |
+| — | `PLATFORM_JWKS_URL`, `PLATFORM_ISSUER` | none (required) | CR-002; *(v0.7)* values per environment in 4.8.1 (A-18), in `local` the API's own `/local/**` endpoints |
 | — | `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `REDIS_URL`, `REDIS_PASSWORD`, `S3_BUCKET`, `ANTHROPIC_API_KEY`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` (*v0.4*) | none (required; secrets from Secrets Manager) | 4.4 |
 
 Redis keys (naming per 2.1):
@@ -1199,6 +1211,37 @@ Redis keys (naming per 2.1):
 | `ro:<env>:ratelimit:api:<userId>:<yyyyMMddHHmm>` | string counter | 120 s | 60 requests/minute (CR-020) |
 | `ro:<env>:ratelimit:upload:<userId>:<yyyyMMddHH>` | string counter | 3,600 s | 10 uploads/hour (CR-020) |
 | `ro:<env>:queue:analysis` | stream, group `ro-workers` | none; `MAXLEN ~ 10000` on every `XADD`, entries `XDEL`ed after `XACK` | CMP-009 |
+
+### 4.8 Deployment and operations *(added in v0.7)*
+
+How the module is hosted, configured, deployed and watched in each environment. Application defaults stay in 4.7; this section gives the value of every variable per environment (4.8.2) and the infrastructure values (domains, sizes, counts, retention of logs), which are Terraform variables and are defined only here.
+
+#### 4.8.1 Environments and domains
+
+`<domain>` in this spec means the registrable domain of the environment (A-17). Every URL below follows from it; the platform's part comes from A-18.
+
+| | local | dev | staging | prod |
+|---|---|---|---|---|
+| `<domain>` | `localhost` | `surfingbear-dev.com` | `surfingbear-staging.com` | `surfingbear.com` |
+| Web UI, as the browser sees it | `http://localhost:3000/resume-optimizer` | `https://www.surfingbear-dev.com/resume-optimizer` | `https://www.surfingbear-staging.com/resume-optimizer` | `https://www.surfingbear.com/resume-optimizer` |
+| Web origin = the one CORS origin (CR-017) | `http://localhost:3000` | `https://www.surfingbear-dev.com` | `https://www.surfingbear-staging.com` | `https://www.surfingbear.com` |
+| Public API (`/api/v1/**`, `/webhooks/v1/**`) | `http://localhost:8080` | `https://ro-api.surfingbear-dev.com` | `https://ro-api.surfingbear-staging.com` | `https://ro-api.surfingbear.com` |
+| Internal API (`/internal/v1/**`, platform only) | `http://localhost:8080` | `https://ro-internal.surfingbear-dev.com` | `https://ro-internal.surfingbear-staging.com` | `https://ro-internal.surfingbear.com` |
+| Web origin host behind the CDN (4.8.3) | none: the browser calls the Next.js server directly | `ro-web-origin.surfingbear-dev.com` | `ro-web-origin.surfingbear-staging.com` | `ro-web-origin.surfingbear.com` |
+| `sb_access` cookie Domain | none (host-only `localhost`) | `.surfingbear-dev.com` | `.surfingbear-staging.com` | `.surfingbear.com` |
+| Token issuer = `PLATFORM_ISSUER` | `http://localhost:8080/local` | `https://auth.surfingbear-dev.com` | `https://auth.surfingbear-staging.com` | `https://auth.surfingbear.com` |
+| `PLATFORM_JWKS_URL` | `http://localhost:8080/local/jwks.json` | `https://auth.surfingbear-dev.com/.well-known/jwks.json` | `https://auth.surfingbear-staging.com/.well-known/jwks.json` | `https://auth.surfingbear.com/.well-known/jwks.json` |
+| Login page = `PLATFORM_LOGIN_URL` (web) | `http://localhost:8080/local/login` | `https://www.surfingbear-dev.com/login` | `https://www.surfingbear-staging.com/login` | `https://www.surfingbear.com/login` |
+| Razorpay webhook URL (4.3.9) | `http://localhost:8080/webhooks/v1/razorpay`, called only by `scripts/send-test-webhook.sh` (4.4) | `https://ro-api.surfingbear-dev.com/webhooks/v1/razorpay` | `https://ro-api.surfingbear-staging.com/webhooks/v1/razorpay` | `https://ro-api.surfingbear.com/webhooks/v1/razorpay` |
+
+**Local sign-in (CR-034).** In `local` there is no platform, so the API plays its part:
+
+- `GET /local/login?returnTo=<path>&userId=<sub>&admin=<true|false>`. `returnTo` is optional and must start with `/resume-optimizer`; a missing or any other value (an absolute URL, `//host`, another path) becomes `/resume-optimizer`, as the platform does with a bad `returnTo` (A-18). `userId` is optional, default `local-user-1`, 1–64 characters from `[A-Za-z0-9_-]`, else 400 `VALIDATION_FAILED` (`field: userId`). `admin` is optional, default `false`; any value other than `true` or `false` → 400 `VALIDATION_FAILED` (`field: admin`).
+- It signs an RS256 token with the local private key: header `kid` `local-1`; claims `iss` `http://localhost:8080/local`, `aud` `["resume-optimizer"]`, `sub` = `userId`, `roles` `["USER"]` (plus `"ADMIN"` when `admin=true`), `iat` = now, `exp` = now + `app.local-login.token-ttl` (8 h).
+- It answers 302 with `Location: <app.local-login.redirect-origin><returnTo>` (for example `http://localhost:3000/resume-optimizer/pro`), `Set-Cookie: sb_access=<token>; Path=/; Max-Age=28800; HttpOnly; Secure; SameSite=Lax` with no `Domain` attribute (host-only, A-17), and `Cache-Control: no-store`. Calling it again with another `userId` switches the local user, because the cookie is overwritten.
+- `GET /local/jwks.json` returns the public key as `{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"local-1","n":"…","e":"AQAB"}]}`.
+- The key pair is `<app.local-login.key-dir>/private.pem` (PKCS#8) and `public.pem`. The directory is git-ignored. When the API starts in `local` and `private.pem` is missing, it creates an RSA 2048 pair and writes both files. Reason: gitleaks blocks a committed private key (CR-015), and a key made on each machine means a local token is worth nothing anywhere else.
+- `scripts/dev-token.sh [--sub <id>] [--roles <comma-separated>]` prints a token signed with the same key, issuer and audience (defaults `--sub local-user-1 --roles USER`), for curl: `curl -b "sb_access=$(scripts/dev-token.sh)" http://localhost:8080/api/v1/usage`, or for the internal erasure call of FR-021: `curl -X POST -H "Authorization: Bearer $(scripts/dev-token.sh --sub platform --roles PLATFORM_SERVICE)" -H 'Content-Type: application/json' -d '{"userId":"local-user-1"}' http://localhost:8080/internal/v1/erasure-requests`. Integration tests do not use this key: each test creates its own RSA key and serves its JWKS from WireMock.
 
 ---
 
@@ -1738,11 +1781,12 @@ Steps 1–3 remove a value from a CHECK, which is the "contract" half of CR-030.
 | Path prefix | Host (prod) | Who calls it | Auth |
 |---|---|---|---|
 | `/api/v1/**` | `https://ro-api.surfingbear.com` (A-10) | CMP-001 Web UI, from the browser | `sb_access` cookie only (CR-001); a `Authorization` header on these paths is ignored |
-| `/internal/v1/**` | same host; reachable only from the platform's VPC through an internal load balancer listener | SurfingBear platform | `Authorization: Bearer <token>` only, `roles` contains `PLATFORM_SERVICE` (CR-004) |
+| `/internal/v1/**` | *(v0.7)* `https://ro-internal.surfingbear.com`: the module's internal load balancer, in private subnets of the environment's VPC, with a DNS record only in that VPC's private zone (4.8.1); not reachable from the internet. The public load balancer answers `/internal/*` on `ro-api.<domain>` with an empty 404 | SurfingBear platform | `Authorization: Bearer <token>` only, `roles` contains `PLATFORM_SERVICE` (CR-004) |
 | `/webhooks/v1/razorpay` *(v0.4)* | same host, public listener (Razorpay calls from the internet) | Razorpay | `X-Razorpay-Signature` only (CR-033); cookies and `Authorization` are ignored |
 | `/actuator/health/liveness`, `/actuator/health/readiness` | management port 8081, not routed by the public load balancer | ECS and the load balancer | none |
+| `/local/login`, `/local/jwks.json` *(v0.7)* | `http://localhost:8080`, **`local` only** (CR-034); in every other environment these paths do not exist | the developer's browser and the local API itself (JWKS) | none |
 
-The module has no other HTTP endpoints. A path that matches no route returns 404 `NOT_FOUND`; a known path with the wrong method returns 405 `METHOD_NOT_ALLOWED`.
+The module has no other HTTP endpoints. *(v0.7)* The two `/local/**` paths are a local development aid with no API ID: they are not part of the contract and no deployed client may call them. A path that matches no route returns 404 `NOT_FOUND`; a known path with the wrong method returns 405 `METHOD_NOT_ALLOWED`.
 
 **Order of the common checks.** Every request to `/api/v1/**` passes these checks in this order before any endpoint-specific check; the first one that fails decides the response:
 
