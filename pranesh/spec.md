@@ -719,6 +719,8 @@ The single source for every number used in more than one place. Property names a
 | `RECONCILE_BATCH_SIZE` *(v1.2)* | 200 subscriptions per run | `ro.billing.reconcile-batch-size` | FR-032 |
 | `PENDING_CREATE_SEARCH_MARGIN` *(v1.2)* | 60 s added on both sides of the `listSubscriptions` time window, for clock difference between us and Razorpay | **fixed** | §4.6.7 `listSubscriptions` |
 | `WEBHOOK_FAILING_ALERT_AFTER` *(v1.2)* | 1 hour of only 5xx answers on API-022 | **fixed** (alert rule, §4.9) | FR-028 criterion 9, §4.9 |
+| `METRICS_SCRAPE_INTERVAL` *(v1.2)* | 15 s (scrape timeout 10 s) | **fixed**: `infra/adot/adot-config.yaml` | §4.9 |
+| `METRICS_MISSING_ALERT_AFTER` *(v1.2)* | 10 minutes with no `up == 1` series from any backend task | **fixed** (alert rule, §4.9) | §4.4, §4.9 |
 | `RAZORPAY_TIMEOUT` *(v1.1)* | connect 3 s, read 10 s, no automatic retry | `ro.billing.razorpay.connect-timeout`, `ro.billing.razorpay.read-timeout` | §4.4, FR-026, FR-027, FR-029, FR-032 |
 | `WEBHOOK_MAX_BODY_BYTES` *(v1.1)* | 1,048,576 bytes (1 MB) | `ro.billing.webhook-max-body-bytes` | FR-028 |
 | `WEBHOOK_RESPONSE_BUDGET` *(v1.1)* | 1 s (p99) | **fixed** (NFR target) | FR-028, NFR-019 |
@@ -832,7 +834,7 @@ The browser calls `/api/ro/v1/*` on the **same origin** as the UI; the ALB route
 | CMP-020 | Redis | Shared per-user rate-limit counters across backend tasks (CR-020). Nothing else is stored in Redis. | Amazon ElastiCache for Redis 7, Spring Data Redis (Lettuce) |
 | CMP-021 | SurfingBear Platform auth | External. Issues the JWT and publishes the JWKS. | — |
 | CMP-022 | Anthropic Claude API | External. Runs the analysis model. | HTTPS REST via the official Java SDK |
-| CMP-023 | Observability | Collects logs, metrics and alerts (§4.9). | CloudWatch Logs, Amazon Managed Prometheus scraping `/actuator/prometheus`, Amazon Managed Grafana |
+| CMP-023 | Observability | Collects logs, metrics and alerts (§4.9). | CloudWatch Logs; *(changed in v1.2)* ADOT collector sidecar in each backend task scraping `/actuator/prometheus` and remote-writing to Amazon Managed Service for Prometheus; Amazon Managed Grafana (dashboards, alerting) |
 | CMP-024 *(v1.1)* | Subscription service | Starts checkouts, confirms payments, cancels, returns subscription status, and applies Razorpay state to TBL-013/014 through `syncFromProvider` (FR-026, FR-027, FR-029, FR-030, §4.6.7). TBL-013 is written only by CMP-024, CMP-026 (webhooks) and CMP-028 (through CMP-024's `syncFromProvider`), and rows are deleted only by CMP-015 (retention). | Spring service + JPA, `@Transactional` |
 | CMP-025 *(v1.1)* | Entitlement service | Answers "is this user PRO right now, and until when?" with one indexed query per request (FR-025). Read-only. | Spring service + native SQL |
 | CMP-026 *(v1.1)* | Razorpay webhook handler | Receives API-022, verifies the signature on the raw body, de-duplicates by event id, applies the event to TBL-013/014 (FR-028, §4.6.7). Makes no outbound calls. | Spring MVC controller reading `byte[]`, `RazorpaySignatureVerifier` (`javax.crypto.Mac` HmacSHA256), lenient Jackson `ObjectMapper` |
@@ -1243,7 +1245,7 @@ The user is `PRO` in any state as long as FR-025's `access_until` is in the futu
 | Redis (CMP-020) | Rate-limit counters | TLS, AUTH token, Lettuce, command timeout 200 ms | Fail-open (CR-020): the request proceeds, `WARN` at most once per minute, metric `ro_ratelimit_redis_errors_total`. |
 | Razorpay (CMP-030) *(v1.1)* | Sell and renew Resume Pro | **Outbound** (CMP-027): HTTPS to `https://api.razorpay.com/v1` with HTTP Basic auth `RAZORPAY_KEY_ID:RO_RAZORPAY_KEY_SECRET`, JSON, timeouts `RAZORPAY_TIMEOUT`, calls listed in §4.6.7. **Inbound**: webhooks to API-022, signed with the webhook secret; events subscribed in the dashboard (v1.2: nine, per §1.7 "Razorpay per environment"): `subscription.authenticated`, `subscription.activated`, `subscription.charged`, `subscription.pending`, `subscription.halted`, `subscription.cancelled`, `subscription.completed`, `subscription.paused`, `subscription.resumed`. Razorpay delivers at least once, in no guaranteed order, waits 5 s for a 2xx, retries for 24 h and then disables the webhook (FR-028 criterion 9). **Browser**: Razorpay Checkout script, opened with the key id and the `razorpaySubscriptionId` from API-019. | No automatic retry of outbound calls (creating or cancelling twice is worse than failing once). A failed call on a user request → `502 PAYMENT_PROVIDER_UNAVAILABLE`, nothing changed, the user retries; in the job (FR-032) the row is skipped and retried at the next run (`RECONCILE_INTERVAL`). Metric `ro_billing_provider_errors_total{operation}`. Razorpay down does **not** affect existing Pro users: entitlement is read from our database only (FR-025). Lost webhooks are covered by API-020 and FR-032. Start-up: `fetchPlan(RAZORPAY_PLAN_ID)`; if the plan's amount ≠ `PRO_PRICE_PAISE`, currency ≠ `INR`, period ≠ `monthly` or interval ≠ 1, the application refuses to start; if Razorpay is unreachable at start-up, it logs `ERROR billing_plan_unchecked` and starts, and the reconciliation job repeats the check on each run until it succeeds (FR-032 group d); a mismatch found there logs `ERROR billing_plan_mismatch` and makes API-019 answer `502 PAYMENT_PROVIDER_UNAVAILABLE` until fixed, so nobody is sold the wrong price. |
 | File storage | — | **Not used.** The file is parsed in memory and discarded (CR-025, A-09). | Not applicable. This removes an object store, its access policy, encryption keys, lifecycle rules and a breach surface. |
-| Observability (CMP-023) | Logs and metrics | stdout → CloudWatch Logs via the ECS `awslogs` driver; Prometheus scrape of `/actuator/prometheus` on the internal port 8081 (not routed by the ALB) | Logging and metrics never block requests; a failed scrape only creates a gap. |
+| Observability (CMP-023) | Logs and metrics | stdout → CloudWatch Logs via the ECS `awslogs` driver; *(v1.2)* the ADOT sidecar scrapes `/actuator/prometheus` on `localhost:8081` (not routed by the ALB) and remote-writes to AMP with SigV4 (§4.9 "Metrics pipeline") | Logging and metrics never block requests; a failed scrape or remote write only creates a gap (the collector container is not essential, §1.8). A gap of more than `METRICS_MISSING_ALERT_AFTER` in `staging` or `prod` raises the alert "Metrics missing" (§4.9). |
 
 ### 4.5 Tech stack and reasons
 
@@ -1639,6 +1641,38 @@ A4 portrait, 18 mm margins, Noto Sans 10 pt body. Rendered from `templates/repor
 
 ### 4.9 Observability
 
+*(v1.2)* **Metrics pipeline.** Amazon Managed Service for Prometheus (AMP) cannot scrape an ECS Fargate task itself (its managed collectors support only Amazon EKS and a few AWS services), so every backend task runs an AWS Distro for OpenTelemetry (ADOT) collector as a sidecar container `adot-collector` (§1.8 "Infrastructure"), as the AMP guide for ECS describes. It scrapes `http://localhost:8081/actuator/prometheus` every `METRICS_SCRAPE_INTERVAL` and remote-writes to the environment's AMP workspace, signing with SigV4 under the task role `ro-backend-task-<env>` (policy `AmazonPrometheusRemoteWriteAccess`). Its configuration `infra/adot/adot-config.yaml`, copied into image `ro-adot-collector`:
+
+```yaml
+extensions:
+  health_check: {}
+  sigv4auth: { region: ap-south-1, service: aps }
+receivers:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: ro-backend
+          scrape_interval: 15s          # METRICS_SCRAPE_INTERVAL
+          scrape_timeout: 10s
+          metrics_path: /actuator/prometheus
+          static_configs: [ { targets: ["localhost:8081"] } ]
+exporters:
+  prometheusremotewrite:
+    endpoint: ${env:AMP_REMOTE_WRITE_URL}   # <workspace prometheus_endpoint>api/v1/remote_write, set by Terraform
+    auth: { authenticator: sigv4auth }
+service:
+  extensions: [health_check, sigv4auth]
+  pipelines:
+    metrics: { receivers: [prometheus], exporters: [prometheusremotewrite] }
+```
+
+Every backend metric carries two common tags set in `application.yml`: `env` (`management.metrics.tags.env=${spring.profiles.active}`) and `task` (`management.metrics.tags.task=${ro.worker.instance-id}`, unique per JVM, so series from different tasks never collide). `management.metrics.distribution.percentiles-histogram` is `true` for `http.server.requests`, `ro.analysis.duration` and `ro.ai.call.duration`, so p95 values are computed in PromQL from `_bucket` series. `ro-frontend` exposes no metrics: its health is the ALB target-group metrics in CloudWatch (`HealthyHostCount`, `HTTPCode_Target_5XX_Count`), read by Grafana through its CloudWatch data source, as NFR-005 already uses them.
+
+**Aggregating across tasks.** There are up to 6 backend tasks (§1.7), each exporting its own series:
+- Counters and timers are per task and are summed: `sum without (task) (rate(x[5m]))`; percentiles are `histogram_quantile(0.95, sum by (le) (rate(x_bucket[w])))`.
+- Gauges marked **(DB)** below are computed from the database by every task and are equal in all of them (sampled at slightly different moments); dashboards and alerts always use `max without (task) (x)`, never `sum`, so 2 tasks do not show twice the queue.
+- `ro_ai_circuit_state` is per task (each task has its own circuit breaker); the alert fires when any task has it open (`max without (task)`).
+
 Metrics (Micrometer, exposed at `/actuator/prometheus` on management port 8081):
 
 | Metric | Type | Tags | Meaning |
@@ -1647,8 +1681,8 @@ Metrics (Micrometer, exposed at `/actuator/prometheus` on management port 8081):
 | `ro_upload_rejections_total` | counter | `code` | FR-004 rejections by error code |
 | `ro_analysis_total` | counter | `status` (`COMPLETED`, `FAILED`), `failure_code` | Terminal analyses |
 | `ro_analysis_duration_seconds` | timer (histogram) | `status` | From `created_at` to `completed_at` (NFR-003) |
-| `ro_analysis_queue_depth` | gauge | — | `count(*) WHERE status = 'QUEUED'`, sampled every 15 s |
-| `ro_analysis_stuck` | gauge | — | Count of `QUEUED`/`PROCESSING` older than `MAX_ANALYSIS_LIFETIME` (NFR-011) |
+| `ro_analysis_queue_depth` | gauge **(DB)** | — | `count(*) WHERE status = 'QUEUED'`, sampled every 15 s |
+| `ro_analysis_stuck` | gauge **(DB)** | — | Count of `QUEUED`/`PROCESSING` older than `MAX_ANALYSIS_LIFETIME` (NFR-011) |
 | `ro_ai_call_duration_seconds` | timer | `outcome` (`ok`, `unavailable`, `invalid`, `refused`) | Per AI call |
 | `ro_ai_tokens_total` | counter | `direction` (`input`, `output`), `model` | Cost tracking (NFR-013) |
 | `ro_ai_circuit_state` | gauge | `state` | Resilience4j state |
@@ -1656,8 +1690,8 @@ Metrics (Micrometer, exposed at `/actuator/prometheus` on management port 8081):
 | `ro_ratelimit_rejections_total` / `ro_ratelimit_redis_errors_total` | counter | `bucket` | CR-020 |
 | `ro_retention_deleted_total` / `ro_retention_failures_total` | counter | `table` | FR-022 |
 | `ro_entitlement_lookup_seconds` *(v1.1)* | timer | — | FR-025, NFR-021 |
-| `ro_subscriptions` *(v1.1)* | gauge | `status` (`CREATED`, `ACTIVE`, `PAST_DUE`) | Open subscriptions, sampled every 60 s |
-| `ro_pro_users` *(v1.1)* | gauge | — | Users with `access_until > now`, sampled every 60 s |
+| `ro_subscriptions` *(v1.1)* | gauge **(DB)** | `status` (`CREATED`, `ACTIVE`, `PAST_DUE`) | Open subscriptions, sampled every 60 s |
+| `ro_pro_users` *(v1.1)* | gauge **(DB)** | — | Users with `access_until > now`, sampled every 60 s |
 | `ro_billing_checkouts_total` *(v1.1)* | counter | `result` (`created`, `reused`, `refused`, `provider_error`) | FR-026 funnel |
 | `ro_billing_activations_total` / `ro_billing_cancellations_total` *(v1.1)* | counter | `path` (`verify`, `webhook`, `reconcile`) / `type` (`cycle_end`, `immediate`) | FR-027…029 |
 | `ro_billing_webhook_events_total` *(v1.1)* | counter | `type`, `outcome` (`APPLIED`, `DUPLICATE`, `IGNORED_*`, `BAD_SIGNATURE`) | FR-028, NFR-019 |
