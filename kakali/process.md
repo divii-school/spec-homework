@@ -34,3 +34,18 @@ List every AI conversation you used, with a link and one line on what it was for
 - **Interpretation (A-15):** the change says Pro gets "an analysis history", but free users already had the history list in v1 and must "stay exactly as they are today". I kept the list for everyone and made the score comparison the Pro feature.
 - **"Unlimited" (A-18):** no monthly cap, but the existing abuse limits (1 at a time, 10 per hour) stay, plus a fair-use alert, because AI cost is real.
 - A worked example in API-024 came out with a wrong score on the first draft; I recomputed it by hand before committing.
+
+**Improvement round (v2.2 – v2.7, Nov 2)**
+- Applied the three graded feedback points first (v2.2), then the playbook's missing "401 → platform login" rule (v2.3).
+- Ran the playbook's build test four times. Each run was a **fresh** AI session that read only `spec.md`, with the exact prompt from `PLAYBOOK.md`. I fixed every finding at its source (requirement, constant or table), then ran again.
+
+| Run | Findings | Main themes | Fixed in |
+|---|---|---|---|
+| 1 | 18 | Cancel per subscription status, local fake Razorpay, seed on deploy, web health check and `basePath`, CloudFront, admin flag (`GET /me`), consent text | v2.4 |
+| 2 | 19 | Circuit-breaker probe, metrics behind every alarm, infrastructure topology, a wrong comparison example (recomputed by hand), per-environment auth config | v2.5 |
+| 3 | 12 | Billing retention order vs FK, breaker outcomes, PDF line rule, job trace context, web logging | v2.6 |
+| 4 | 14 | A real bug (system cancel broke a CHECK constraint), health checks that would kill tasks during a Redis outage, image promotion, AI spend-limit handling, origin lockdown | v2.7 |
+
+- What the reviewers got wrong or overreached on: a few findings asked for things the brief leaves to other teams (visual design, legal text, Hindi translations). I recorded those as assumptions (A-20, A-21) rather than inventing content.
+- The counts did not fall steadily, because each fresh reviewer digs one level deeper once the previous level is fixed. The findings did get narrower: run 1 was missing whole features; run 4 was mostly operational detail.
+- After every round, the ID cross-check script confirmed every referenced ID is defined.
