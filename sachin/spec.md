@@ -60,6 +60,7 @@ Rules every Divii / Hanriver project follows, written for this module. Each rule
 | CR-003 | Authentication | The claims the module uses are `sub` (user id, string, max 64 chars) and `roles` (array, contains `USER` and optionally `ADMIN`). *(Changed in v0.4: the `plan` claim is no longer read; any value in it is ignored, and the plan comes from FR-025.)* A missing `sub`, or a `sub` over 64 characters, makes the token invalid → 401 `UNAUTHENTICATED`. On `/api/v1/**` a valid token whose `roles` does not contain `USER` (for example a `PLATFORM_SERVICE` token) → 403 `FORBIDDEN`. | Unit test per case. |
 | CR-004 | Authentication | Service-to-service calls (platform → module, see FR-021) use a separate token whose `roles` contains `PLATFORM_SERVICE`. A user token can never reach `/internal/**`. | Integration test: user token on `/internal/**` → 403 `FORBIDDEN`. |
 | CR-034 | Authentication | *(v0.7)* Local sign-in exists only in `local`. With `APP_ENV=local` the API also serves `GET /local/login` and `GET /local/jwks.json` (4.8.1, "Local sign-in"), which stand in for the platform's login page and JWKS. The controller and the security filter chain for `/local/**` are `@Profile("local")` beans: in `local` that chain runs only the request id filter (no JWT, CSRF or rate-limit check, like `/webhooks/**`); in every other profile neither bean exists, so both paths are unknown routes → 404 `NOT_FOUND`. The local key pair is never used outside `local`. | `LocalLoginIT` with profile `local`: `/local/login?returnTo=/resume-optimizer/pro` → 302 to `http://localhost:3000/resume-optimizer/pro` and a `Set-Cookie: sb_access` whose token passes CR-002 against `/local/jwks.json`; `returnTo=https://evil.example` → 302 to `http://localhost:3000/resume-optimizer`. `LocalLoginAbsentIT` with profile `dev`: both paths → 404. |
+| CR-035 | Authentication | *(v0.7)* A user without a valid token is sent to the platform login page (A-18) and comes back to the page they asked for. (1) **Page request:** `src/middleware.ts` (CMP-023) answers a request for a page under `/resume-optimizer` that carries no `sb_access` cookie with **307** to `PLATFORM_LOGIN_URL?returnTo=<encodeURIComponent(basePath + pathname + search)>` (Next.js removes the basePath from `request.nextUrl.pathname`, so it is added back from `request.nextUrl.basePath`). It only checks that the cookie is present and never validates the token; the API does (CR-001). Not redirected: paths under `/resume-optimizer/_next/` and `/resume-optimizer/api/`, and files of `public/` (a last path segment containing `.`). (2) **API response:** the typed API client in `src/lib/api` is the only code that handles 401. Any API response 401 with `error.code` `UNAUTHENTICATED` aborts every in-flight API request (one shared `AbortController`; their results are dropped) and calls `window.location.assign(PLATFORM_LOGIN_URL + '?returnTo=' + encodeURIComponent(location.pathname + location.search))`. (3) **Loop guard:** before (2) redirects, it reads `sessionStorage['ro:auth-redirect-at']`. If that time is less than 60 s ago (`AUTH_REDIRECT_GUARD_MS`, 4.7), it does not redirect but shows a full-page message "We could not confirm your sign-in." with a button "Sign in again", which removes the key and redirects; otherwise it writes the current time (ms since epoch) and redirects. Every `sessionStorage` access is in try/catch; if it throws, the client redirects. (4) 403 and every other status are not redirects; the UI handles them per `error.code` (CR-013). (5) `returnTo` is always a relative path starting with `/resume-optimizer`. | Vitest on the API client: a 401 `UNAUTHENTICATED` → one `location.assign` with the encoded return path and the in-flight requests aborted; a second 401 within 60 s → the message, no redirect; "Sign in again" → key removed, redirect; `sessionStorage` throwing → redirect; 403 → no redirect. Playwright: open `/resume-optimizer/analyses?status=COMPLETED` with no cookie → the login URL with `returnTo=%2Fresume-optimizer%2Fanalyses%3Fstatus%3DCOMPLETED`; with an expired `sb_access` cookie → the API's 401 → the same login URL. |
 
 ### 1.2 Roles and permissions
 
@@ -139,6 +140,7 @@ Standard error body:
 | CR-022 | Dependencies | CI fails on any dependency with a known Critical or High CVE (OWASP Dependency-Check for Maven, `npm audit --audit-level=high` for the frontend), unless an exception with an expiry date is recorded in `security-exceptions.md`. | CI job. |
 | CR-032 | Payment data | Card, UPI, bank and payer contact details are entered only in Razorpay Checkout and never reach the module's API, database or logs. The module stores only Razorpay ids (`sub_…`, `pay_…`, event ids), amounts in paise, currency, statuses and cycle dates (TBL-016 – TBL-019). Webhook bodies are parsed in memory and never stored (TBL-018 holds only ids). *(Added in v0.4.)* | Code review checklist item (2.4); `RazorpayWebhookIT` asserts no payer email or phone in any table or log line after processing a sample event. |
 | CR-033 | Webhook authentication | A call to `/webhooks/v1/razorpay` is accepted only if `X-Razorpay-Signature` equals the lowercase hex HMAC-SHA256 of the **raw request body bytes** with `RAZORPAY_WEBHOOK_SECRET`, compared in constant time (`MessageDigest.isEqual`). The body is verified before it is parsed. A missing or wrong signature returns 401 `UNAUTHENTICATED` and changes nothing. *(v0.6)* For the checkout signature of FR-024 criterion 7 only the computation is the same: HMAC-SHA256 with `RAZORPAY_KEY_SECRET` over `razorpay_payment_id + "\|" + razorpay_subscription_id`, compared in constant time. Its mismatch is 400 `PAYMENT_VERIFICATION_FAILED` (API-018), not 401: the caller is a logged-in user, and a 401 would send the browser to the login page. *(Added in v0.4.)* | Unit tests with a known body, secret and signature; a body changed by one byte → 401; a wrong checkout signature → 400 `PAYMENT_VERIFICATION_FAILED`. |
+| CR-037 | Web origin | *(v0.7)* Pages reach users only through the platform CDN. The module's public load balancer forwards a request for the host `ro-web-origin.<domain>` to `ro-web` only when it carries the header `X-Origin-Verify` equal to the origin secret (`ro/<env>/web-origin-verify`, 4.8.3), which CloudFront adds as a custom origin header; any other request to that host gets a fixed 403. No page is stored by the CDN, because each one is about one user: every HTML response carries a `Cache-Control` value containing `private` and `no-store`, and the CDN caches only `/resume-optimizer/_next/static/*`. The origin secret is never in the web container (4.8.3). | Staging: `curl https://ro-web-origin.<domain>/resume-optimizer/api/health` → 403; `curl https://www.<domain>/resume-optimizer/api/health` → 200; `curl -I` on a page twice → `Cache-Control` contains `private` and `no-store`, and `X-Cache` is `Miss from cloudfront` both times. |
 
 ### 1.6 Internationalization (i18n)
 
@@ -154,6 +156,7 @@ Standard error body:
 |---|---|---|---|
 | CR-026 | Environments | Four environments: `local`, `dev`, `staging`, `prod`. Configuration is only by environment variables and `application-<env>.yml`; nothing environment-specific is compiled in. The same Docker image is promoted from dev to staging to prod. | Release checklist; image digest compared across environments. |
 | CR-027 | Environments | Real user data exists only in prod. dev and staging use synthetic resumes only. Real money moves only in prod: dev and staging use Razorpay Test Mode keys (`rzp_test_…`), and the prod task (`APP_ENV=prod`, 4.7) refuses to start unless `RAZORPAY_KEY_ID` starts with `rzp_live_`. | Data policy review; startup check test. |
+| CR-036 | Environments | *(v0.7)* The web image is also built once and promoted unchanged (CR-026). It uses no `NEXT_PUBLIC_*` variable and reads nothing environment-specific at build time. The root layout `src/app/layout.tsx` (`export const dynamic = 'force-dynamic'`) reads, at request time, `APP_ENV`, `RO_API_BASE_URL`, `PLATFORM_LOGIN_URL`, `WEB_BILLING_FAKE` and, only when billing is fake, `WEB_FAKE_RAZORPAY_KEY_SECRET` (4.7), and passes them to the client component `RuntimeConfigProvider`; client code reads them only through `useRuntimeConfig()`. `src/instrumentation.ts` `register()` writes one FATAL log line and stops the server (`process.exit(1)`) if `APP_ENV` is missing or not `local`, `dev`, `staging` or `prod`, if `RO_API_BASE_URL` or `PLATFORM_LOGIN_URL` is missing, or if `WEB_BILLING_FAKE=true` while `APP_ENV` is not `local`. | CI: `next build` runs with none of these variables set, and the build fails if any file under `.next/` contains `surfingbear` or `localhost:8080`; Vitest on the startup check (each bad combination exits with 1); the `ro-web` image digest in staging and prod equals the one deployed to dev (4.8.4). |
 
 | | local | dev | staging | prod |
 |---|---|---|---|---|
@@ -249,19 +252,28 @@ resume-optimizer-api/
 
 Dependency rule inside a feature: `Controller → Service → Repository / Client`. Controllers hold no business logic; a feature calls another feature only through its `Service`.
 
-Frontend:
+Frontend *(v0.7: pages moved from `src/app/resume-optimizer/` to `src/app/`, because `basePath` already adds the prefix and the old folder would have produced `/resume-optimizer/resume-optimizer`)*:
 
 ```text
 resume-optimizer-web/
-├── src/app/resume-optimizer/
-│   ├── page.tsx                       # upload + choose role and level
+├── Dockerfile                         # (v0.7) node:22-alpine, multi-stage, standalone output (4.8.3)
+├── next.config.ts                     # (v0.7) output: 'standalone', basePath: '/resume-optimizer'
+├── e2e/docker-compose.yml             # (v0.7) local stack for the Playwright run in CI (4.8.4)
+├── src/middleware.ts                  # (v0.7) no sb_access cookie → 307 to the platform login (CR-035); page Cache-Control (CR-037)
+├── src/instrumentation.ts             # (v0.7) startup check of the runtime variables (CR-036); server error log (4.8.7)
+├── src/app/                           # (v0.7) routes sit directly under app/: basePath adds /resume-optimizer
+│   ├── layout.tsx                     # (v0.7) root layout, force-dynamic, reads the runtime config → RuntimeConfigProvider (CR-036)
+│   ├── page.tsx                       # /resume-optimizer: upload + choose role and level
 │   ├── analyses/page.tsx              # history (Pro: filters, pick two to compare)
 │   ├── analyses/[analysisId]/page.tsx # status + result
 │   ├── analyses/compare/page.tsx      # ?from=<id>&to=<id>, Pro only (FR-027)
 │   ├── pro/page.tsx                   # Resume Pro: price, subscribe, status, cancel (FR-024, FR-028, FR-030)
-│   └── privacy/page.tsx               # consent notice, delete my data
+│   ├── privacy/page.tsx               # consent notice, delete my data
+│   └── api/health/route.ts            # (v0.7) GET /resume-optimizer/api/health → 200 {"status":"UP"} (4.8.3)
 ├── src/components/                    # ScoreGauge, DimensionBars, SuggestionCard, UpgradeBanner, ScoreComparison, RazorpayCheckoutButton ...
-├── src/lib/api/                       # typed fetch client, one file per resource, error-code mapping
+├── src/lib/api/                       # typed fetch client, one file per resource, error-code mapping; the only 401 handler (CR-035)
+├── src/lib/config/                    # (v0.7) RuntimeConfigProvider, useRuntimeConfig (CR-036)
+├── src/lib/log.ts                     # (v0.7) pino logger, server side only (4.8.7)
 ├── src/lib/hooks/                     # useAnalysisPolling, useUsage, useSubscription
 ├── messages/en.json
 └── tests/                             # Vitest unit, Playwright e2e
@@ -385,7 +397,7 @@ ATS scoring dimensions (FR-009):
 | NFR-015 | Cost | AI usage per analysis | Input ≤ 12,000 tokens; output, including the model's reasoning, capped at `max_tokens = 8000` (4.6.2); monthly AI spend alarm at the budget set by finance; *v0.4:* the PRO fair-use signal of FR-007 criterion 8 at 300 analyses per user per period | `ai_tokens_total` metric; provider usage dashboard |
 | NFR-016 | Accessibility | Frontend pages of the module | WCAG 2.1 AA; 0 serious or critical axe violations; score gauge has a text alternative | axe in Playwright e2e tests |
 | NFR-017 | Maintainability | Test coverage | ≥ 80 % line coverage on `*Service` classes and `ai/`, `quota/`, `privacy/`, `billing/` (*v0.4*) packages | JaCoCo gate in CI |
-| NFR-018 | Compatibility | Browsers and screens | Latest 2 versions of Chrome, Edge, Firefox, Safari; usable from 360 px width | Playwright run on Chromium, Firefox, WebKit; mobile viewport |
+| NFR-018 | Compatibility | Browsers and screens | Latest 2 versions of Chrome, Edge, Firefox, Safari; usable from 360 px width | Playwright run on Chromium, Firefox, WebKit; mobile viewport. *(v0.7)* The CI run against the local stack (4.8.4) uses Chromium and Firefox; WebKit runs in the staging run over HTTPS, so the local `Secure` cookie on `http://localhost` (A-17) never decides a WebKit result |
 | NFR-019 | Security | Payment data stays with Razorpay *(added in v0.4)* | 0 card, UPI, bank or payer contact fields in the database or logs (CR-032); 100 % of webhook calls and checkout verifications signature-checked before use (CR-033); Razorpay secrets only from Secrets Manager (CR-015) | `RazorpayWebhookIT` (sample events containing payer email and phone leave no trace in any table or captured log line; a changed byte gives 401); gitleaks rule for `rzp_live_` keys |
 | NFR-020 | Performance | Time to Pro after payment *(added in v0.4)* | Through verification (API-018): plan `PRO` within 5 s p95 of Checkout success. Through the webhook alone: within 60 s p95 of Razorpay's `subscription.charged`. Through reconciliation, at the latest by the next 03:00 IST run | `billing_activation_seconds` histogram with label `path` = `verification`, `webhook` or `reconciliation`: observed once per paid cycle, by whichever path first raises `access_until` to that cycle's `current_end`, with value = commit time − the cycle's `current_start` from Razorpay (the charge time of that cycle, available on every path); staging test in Razorpay Test Mode |
 | NFR-021 | Reliability | Webhook processing *(added in v0.4)* | Webhook answer p99 ≤ 1 s; delivering any event 1 to 5 times, in any order, gives the same subscription and payment rows; after each daily reconciliation every open local row matches Razorpay's status | `RazorpayWebhookIT` (replay and shuffled-order cases); `ReconciliationJobIT` with WireMock; the reconciliation alert of NFR-013 |
@@ -405,7 +417,7 @@ ATS scoring dimensions (FR-009):
 | A-7 | Platform users are 18 or older; the platform enforces this at sign-up. | DPDP requires verifiable parental consent for children; that belongs to the platform's sign-up, not to this module. |
 | A-8 | Uploads go through the backend (multipart), not as direct browser-to-S3 uploads. | Files are at most 5 MB, and the file must be parsed and validated before anything is stored (FR-004 criterion 5). |
 | A-9 | Scores are not guaranteed to be identical between two runs of the same resume and role (AI output varies between runs, and current Claude models do not accept a temperature setting). | Stating it prevents a support ticket from becoming a bug; each run is stored separately. |
-| A-10 | The web UI is served by the platform under `https://www.surfingbear.com/resume-optimizer` (the platform's CDN routes that path to this module's Next.js service); the API is at `https://ro-api.surfingbear.com`. *(v0.7)* These are the prod values; every environment follows the same pattern on its own domain (A-17, 4.8.1). | Same registrable domain, so the platform's `sb_access` cookie (Domain `.surfingbear.com`, SameSite=Lax) reaches the API from the browser, and users never leave the platform's navigation. |
+| A-10 | The web UI is served by the platform under `https://www.surfingbear.com/resume-optimizer` (the platform's CDN routes that path to this module's Next.js service, CMP-023); the API is at `https://ro-api.surfingbear.com`. *(v0.7)* These are the prod values; every environment follows the same pattern on its own domain (A-17, 4.8.1). | Same registrable domain, so the platform's `sb_access` cookie (Domain `.surfingbear.com`, SameSite=Lax) reaches the API from the browser, and users never leave the platform's navigation. |
 | A-11 | *(v0.4)* Resume Pro is sold and billed by this module through Razorpay Subscriptions (one plan per environment, created once by ops in the Razorpay dashboard, id in `RAZORPAY_PLAN_ID`). The platform is not involved. | The change request names the product, the price and the gateway for this module only. Billing here keeps the entitlement next to the features it unlocks, with no new platform contract. Razorpay Subscriptions handles mandates (card, UPI Autopay), retries and receipts, which the module would otherwise have to build. |
 | A-12 | *(v0.4)* ₹299 includes GST. Razorpay's receipts and the Razorpay dashboard are the payment and tax record. The module's billing tables are an operational copy and are erased like any other personal data (FR-019). | Keeps legal and financial records with the payment provider and finance, and keeps erasure in the module complete. |
 | A-13 | *(v0.4)* One paid subscription per user at a time. A cancelled subscription cannot be resumed; the user subscribes again after `access_until`. | An "undo cancellation" path would be a second state machine for a rare case. Allowing a second subscription while the first still gives access would charge twice for overlapping days. |
@@ -441,8 +453,13 @@ One Spring Boot code base runs as two ECS services: **`ro-api`** (`APP_MODE=api`
 
 ```mermaid
 flowchart LR
-  UI["CMP-001 Web UI<br/>Next.js, www.surfingbear.com/resume-optimizer"]
-  PLAT["SurfingBear platform<br/>JWT issuer, JWKS, account deletion"]
+  UI["CMP-001 Web UI in the browser<br/>www.domain/resume-optimizer"]
+  PLAT["SurfingBear platform<br/>login page, JWT issuer, JWKS, account deletion"]
+  CDN["Platform CloudFront<br/>www.domain, behaviours /resume-optimizer*"]
+
+  subgraph WEBS["ECS service ro-web (v0.7)"]
+    WEB["CMP-023 Web server<br/>Next.js standalone, Node 22"]
+  end
 
   subgraph API["ECS service ro-api (APP_MODE=api)"]
     PIPE["CMP-002 Request pipeline"]
@@ -477,6 +494,9 @@ flowchart LR
   AI["Anthropic Messages API"]
   RZ["Razorpay<br/>Subscriptions API, Checkout, webhooks"]
 
+  UI -->|"pages and static files"| CDN
+  CDN -->|"HTTPS + X-Origin-Verify, ALB host ro-web-origin"| WEB
+  UI -.->|"no token or 401: login page with returnTo"| PLAT
   UI -->|"HTTPS, sb_access cookie"| PIPE
   UI -.->|"Razorpay Checkout (checkout.js), payment details"| RZ
   PLAT -.->|"JWKS, cached 10 min"| PIPE
@@ -507,7 +527,7 @@ flowchart LR
 
 | ID | Component | Responsibility | Technology | Runs in | Package (2.2) |
 |---|---|---|---|---|---|
-| CMP-001 | Web UI | Pages for upload, role and level choice, result, history and privacy; polls analysis status (FR-013 criterion 4); never receives hidden suggestions. *v0.4:* Resume Pro page with Razorpay Checkout (`https://checkout.razorpay.com/v1/checkout.js`, loaded only on that page), comparison page, Pro filters on the history page. | Next.js 15, React, next-intl | Browser (served by the platform, see A-10) | `resume-optimizer-web` |
+| CMP-001 | Web UI | Pages for upload, role and level choice, result, history and privacy; polls analysis status (FR-013 criterion 4); never receives hidden suggestions. *v0.4:* Resume Pro page with Razorpay Checkout (`https://checkout.razorpay.com/v1/checkout.js`, loaded only on that page), comparison page, Pro filters on the history page. *v0.7:* reads its environment values from `RuntimeConfigProvider` (CR-036); calls the API from the browser only, with `credentials: 'include'`; sends the user to the platform login on a 401 (CR-035 (2)–(3)). | Next.js 15, React, next-intl | Browser; *(v0.7)* pages and static files served by CMP-023 through the platform CDN (A-10, 4.8.3) | `resume-optimizer-web` |
 | CMP-002 | Request pipeline | Servlet filters and advice applied to every request, in this order: request id (CR-010) → JWT validation (CR-001–CR-004) → CSRF header check (CR-018) → API rate limit (CR-020) → controller → `GlobalExceptionHandler` (CR-012). Builds `CurrentUser { userId, roles }` (*v0.4:* no `plan`; the plan comes from CMP-018). For `/webhooks/v1/**` it runs only the request id filter; the signature check is CMP-020's. | Spring Security 6 OAuth2 resource server (`NimbusJwtDecoder` with JWKS), Spring MVC | ro-api | `common/*` |
 | CMP-003 | Consent service | Records acceptance of the current notice version, answers "has this user consented to the current version", and starts erasure on withdrawal. | Spring service + JPA | ro-api | `consent` |
 | CMP-004 | Catalogue service | Lists active job roles and their skills; validates `jobRoleCode`. Cached in memory for 10 minutes (roles change only by migration). | Spring service + JPA, Caffeine cache | ro-api, ro-worker | `catalog` |
@@ -529,6 +549,7 @@ flowchart LR
 | CMP-020 | Razorpay webhook handler *(v0.4)* | Verifies the signature on the raw body, de-duplicates by event id, applies each event to TBL-016 / TBL-017 / TBL-019 in one transaction, records TBL-018 (4.3.9, FR-029). Makes no outbound calls, so it answers fast. | Spring MVC controller taking `byte[]`, Jackson, JPA | ro-api | `billing.webhook` |
 | CMP-021 | Billing jobs *(v0.4)* | Daily 03:00 IST reconciliation with Razorpay (FR-029 criterion 8). Every 10 minutes: Razorpay cancellations still pending in TBL-019 (FR-019 criterion 7, `subscription.halted`). | `@Scheduled` + ShedLock, CMP-019 | ro-worker | `billing` |
 | CMP-022 | Comparison service *(v0.4)* | Builds the comparison of two completed analyses from stored rows (FR-027); stores nothing. | Spring service, JPA reads | ro-api | `analysis.comparison` |
+| CMP-023 | Web server *(v0.7)* | Serves the pages and static files of CMP-001 under `/resume-optimizer`: renders the root layout with the runtime configuration (CR-036), redirects a page request without the `sb_access` cookie to the platform login (CR-035 (1)), sets `Cache-Control` on pages (CR-037), answers the health route (4.8.3) and logs JSON (4.8.7). It never calls the API, and holds no user data and no secret. | Next.js 15.5+ standalone server (`node server.js`) on Node 22 (`node:22-alpine`), pino | ECS service `ro-web` | `resume-optimizer-web` (`src/middleware.ts`, `src/instrumentation.ts`, `src/app/layout.tsx`, `src/app/api/health/route.ts`) |
 
 Rules that hold for every component:
 
@@ -992,7 +1013,7 @@ The diagram shows the usual paths only. Unlike the analysis status (4.2), it is 
 
 `FakeRazorpayClient` (`BILLING_PROVIDER=fake`, local and e2e only; a task whose `APP_ENV` (4.7) is `dev`, `staging` or `prod` refuses to start with `BILLING_PROVIDER=fake`) *(v0.4)*: keeps subscriptions in memory. `create` returns `sub_` + 14 random characters from `[A-Za-z0-9]` with status `created`. `fetch` returns `active` with `current_start` = the time of the first `fetch` after the subscription was created and `current_end` = that time plus one calendar month (UTC), so verification grants `PRO` at once. `cancel` returns success and marks the in-memory subscription `cancelled`. Ids it never created → HTTP 400, as Razorpay would. If the plan id is `plan_FAKEFAIL000000`, every call fails with a timeout, so the 503 paths can be tried by hand. Local key values: `RAZORPAY_KEY_ID=rzp_test_local0000000`, `RAZORPAY_KEY_SECRET=local_key_secret`, `RAZORPAY_WEBHOOK_SECRET=local_webhook_secret`.
 
-Local payment without Razorpay: when the frontend runs with `NEXT_PUBLIC_BILLING_FAKE=true` (allowed only in `local` and in Playwright), the Pro page does not load `checkout.js`. Its "Subscribe" button calls API-017 and then shows "Simulate payment". That button builds `razorpayPaymentId` = `pay_` + 14 random characters, computes the signature in the browser with `NEXT_PUBLIC_FAKE_RAZORPAY_KEY_SECRET` (= `local_key_secret`), and calls API-018. `scripts/send-test-webhook.sh <event> <razorpaySubscriptionId>` posts the 4.3.9 example body for that event, signed with `local_webhook_secret`, to `http://localhost:8080/webhooks/v1/razorpay` (the API listens on `server.port` 8080 in every environment; management stays on 8081, 6.1) with a random `X-Razorpay-Event-Id`. Integration tests do not use the fake. They use `HttpRazorpayClient` against WireMock (4.5), which covers timeouts, 4xx and 5xx.
+Local payment without Razorpay: when the web server runs with `WEB_BILLING_FAKE=true` (*(v0.7)* allowed only with `APP_ENV=local`, which is also how the Playwright run in CI starts it; the server refuses to start otherwise, CR-036), the Pro page does not load `checkout.js`. Its "Subscribe" button calls API-017 and then shows "Simulate payment". That button builds `razorpayPaymentId` = `pay_` + 14 random characters, computes the signature in the browser with `WEB_FAKE_RAZORPAY_KEY_SECRET` (= `local_key_secret`, handed to the page by `RuntimeConfigProvider` only when billing is fake), and calls API-018. *(v0.7: these two variables replace `NEXT_PUBLIC_BILLING_FAKE` and `NEXT_PUBLIC_FAKE_RAZORPAY_KEY_SECRET`, now **Deprecated**: a `NEXT_PUBLIC_` value is written into the JavaScript at build time, so one image could not serve every environment.)* The staging Playwright run (FR-024) uses the real Checkout in Razorpay Test Mode. `scripts/send-test-webhook.sh <event> <razorpaySubscriptionId>` posts the 4.3.9 example body for that event, signed with `local_webhook_secret`, to `http://localhost:8080/webhooks/v1/razorpay` (the API listens on `server.port` 8080 in every environment; management stays on 8081, 6.1) with a random `X-Razorpay-Event-Id`. Integration tests do not use the fake. They use `HttpRazorpayClient` against WireMock (4.5), which covers timeouts, 4xx and 5xx.
 
 ### 4.5 Tech stack and reasons
 
@@ -1000,7 +1021,7 @@ Local payment without Razorpay: when the frontend runs with `NEXT_PUBLIC_BILLING
 |---|---|---|
 | Backend | Spring Boot 3.4, Java 21 | The team's main stack. PDFBox and POI, the most complete open-source PDF and DOCX parsers, are Java libraries, so extraction needs no second runtime. Java 21 virtual threads let one worker task hold several blocking 45 s AI calls without a thread pool per call. Spring Security's resource-server support does JWKS validation (CR-002) without custom crypto. |
 | Run modes | One image, `APP_MODE=api` or `worker` | The same code and the same migrations, scaled separately: API tasks by request rate, worker tasks by queue depth (NFR-006). One image keeps CR-026 (promote one artefact) simple. |
-| Frontend | Next.js 15 (App Router), TypeScript | Platform standard; served under the platform domain so the `sb_access` cookie reaches the API without a second login (A-1, A-10). |
+| Frontend | Next.js 15 (App Router), TypeScript; *(v0.7)* 15.5 or later, `output: 'standalone'` | Platform standard; served under the platform domain so the `sb_access` cookie reaches the API without a second login (A-1, A-10). *(v0.7)* A Node server (CMP-023), not a static export to S3, because the login redirect (CR-035 (1)) and the request-time configuration of one image (CR-036) both need code that runs per request; 15.5 is the first release whose middleware runs on the Node.js runtime as stable, so it reads `process.env` at request time like the layout. |
 | Database | PostgreSQL 16 | Ownership, quota and erasure need transactions and row locks (4.3.2, 4.3.6); CHECK constraints hold the rules of section 3 in the schema; `percentile_cont` gives the p95 for FR-022 without a separate analytics store; `jsonb` holds the file signals. |
 | Queue | Redis 7 Streams | Consumer groups give at-most-one worker per message with acknowledgement, and Redis is already required for rate limiting. At 5,000 analyses/day (NFR-006) a dedicated broker (SQS, Kafka) adds a system without adding capacity we need. Durability is not needed from the queue because the database row is the source of truth (4.3.4). |
 | Rate limiting | Redis `INCR` + `EXPIRE` | Counted on every request; PostgreSQL would take a write per request for a value that may be lost without harm. |
@@ -1011,7 +1032,7 @@ Local payment without Razorpay: when the frontend runs with `NEXT_PUBLIC_BILLING
 | Plan source *(v0.4)* | Local `subscription.access_until`, not the token | The module sells Pro, so it holds the truth; a lookup on an indexed column costs about a millisecond and has no 15-minute token delay. |
 | PDF report | Thymeleaf + openhtmltopdf | The report is an HTML template that a designer can edit; openhtmltopdf renders it in-process with embedded fonts, without a headless browser in the container. |
 | Scheduled jobs | Spring `@Scheduled` + ShedLock (JDBC) | Exactly one run per schedule across several worker tasks, using the database we already have. |
-| Hosting | AWS ECS Fargate, `ap-south-1` | Containers without servers to patch; same region as data (CR-029, NFR-010). |
+| Hosting | AWS ECS Fargate, `ap-south-1` | Containers without servers to patch; same region as data (CR-029, NFR-010). *(v0.7)* The web server is a third Fargate service, `ro-web`, behind the platform's CloudFront (4.8.3), so it shares the API's deploy pipeline, logs and alarms while the site's CDN stays the platform's. |
 | Observability | Micrometer + Prometheus, OpenTelemetry Java agent, JSON logs (Logback + logstash encoder) | Covers NFR-013, NFR-014 and CR-008 with standard Spring Boot integrations. |
 | Tests | JUnit 5, Testcontainers (PostgreSQL 16, Redis 7, LocalStack S3), WireMock for the AI API | Integration tests against the real engines, so CHECK constraints, locks and stream behaviour are tested, not mocked. |
 
@@ -1204,6 +1225,19 @@ Every value below is a typed `@ConfigurationProperties` field with this default,
 | — | `PLATFORM_JWKS_URL`, `PLATFORM_ISSUER` | none (required) | CR-002; *(v0.7)* values per environment in 4.8.1 (A-18), in `local` the API's own `/local/**` endpoints |
 | — | `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `REDIS_URL`, `REDIS_PASSWORD`, `S3_BUCKET`, `ANTHROPIC_API_KEY`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` (*v0.4*) | none (required; secrets from Secrets Manager) | 4.4 |
 
+*(v0.7)* Web server (`resume-optimizer-web`, CMP-023) variables. They are read at request time by the root layout and the middleware, never at build time (CR-036):
+
+| Env variable | Default | Used by |
+|---|---|---|
+| `APP_ENV` | none (required) | One of `local`, `dev`, `staging`, `prod`, checked at startup (CR-036); pino level `debug` in `local`, `info` otherwise (4.8.7) |
+| `RO_API_BASE_URL` | none (required) | Base URL of every API call made by the browser (the public API of 4.8.1) |
+| `PLATFORM_LOGIN_URL` | none (required) | Login redirect (CR-035) |
+| `WEB_BILLING_FAKE` | `false` | Local payment without Razorpay (4.4); `true` only with `APP_ENV=local` (CR-036) |
+| `WEB_FAKE_RAZORPAY_KEY_SECRET` | none | Read only when `WEB_BILLING_FAKE=true`; signs the simulated checkout (4.4) |
+| `PORT` / `HOSTNAME` | `3000` / `0.0.0.0` | Set in the `Dockerfile` (4.8.3), not per environment |
+| — (constant `AUTH_REDIRECT_GUARD_MS` in `src/lib/api/auth-redirect.ts`) | `60000` (60 s) | Loop guard of CR-035 (3) |
+| `NEXT_PUBLIC_BILLING_FAKE`, `NEXT_PUBLIC_FAKE_RAZORPAY_KEY_SECRET` | — | **Deprecated in v0.7**, replaced by `WEB_BILLING_FAKE` and `WEB_FAKE_RAZORPAY_KEY_SECRET`; no `NEXT_PUBLIC_*` variable exists (CR-036) |
+
 Redis keys (naming per 2.1):
 
 | Key | Type | TTL | Purpose |
@@ -1242,6 +1276,32 @@ How the module is hosted, configured, deployed and watched in each environment. 
 - `GET /local/jwks.json` returns the public key as `{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"local-1","n":"…","e":"AQAB"}]}`.
 - The key pair is `<app.local-login.key-dir>/private.pem` (PKCS#8) and `public.pem`. The directory is git-ignored. When the API starts in `local` and `private.pem` is missing, it creates an RSA 2048 pair and writes both files. Reason: gitleaks blocks a committed private key (CR-015), and a key made on each machine means a local token is worth nothing anywhere else.
 - `scripts/dev-token.sh [--sub <id>] [--roles <comma-separated>]` prints a token signed with the same key, issuer and audience (defaults `--sub local-user-1 --roles USER`), for curl: `curl -b "sb_access=$(scripts/dev-token.sh)" http://localhost:8080/api/v1/usage`, or for the internal erasure call of FR-021: `curl -X POST -H "Authorization: Bearer $(scripts/dev-token.sh --sub platform --roles PLATFORM_SERVICE)" -H 'Content-Type: application/json' -d '{"userId":"local-user-1"}' http://localhost:8080/internal/v1/erasure-requests`. Integration tests do not use this key: each test creates its own RSA key and serves its JWKS from WireMock.
+
+#### 4.8.3 Frontend hosting and load balancers
+
+**Build.** `next.config.ts` sets `output: 'standalone'`, `basePath: '/resume-optimizer'` and `poweredByHeader: false`. The middleware declares `export const config = { runtime: 'nodejs' }`. The `Dockerfile` has three stages on `node:22-alpine` (Node 22 LTS): (1) `npm ci`; (2) `next build`, with no environment-specific variable set (CR-036); (3) the runtime stage copies `.next/standalone/` to the working directory, `.next/static/` to `.next/static/` and `public/` to `public/` (the standalone output leaves those two out), sets `NODE_ENV=production`, `PORT=3000`, `HOSTNAME=0.0.0.0`, runs as user `node`, `EXPOSE 3000`, `CMD ["node", "server.js"]`. One image per commit, tagged with the full git SHA (4.8.4).
+
+**Run.** ECS Fargate service `ro-web` in the environment's private subnets, container port 3000, registered in target group `ro-web` (target type `ip`, HTTP 3000) of the module's public load balancer. Sizes and task counts: 4.8.6.
+
+**The way a page request travels** (dev, staging and prod; locally the browser opens `http://localhost:3000/resume-optimizer` on `next dev` or the container directly):
+
+| Hop | Configuration |
+|---|---|
+| Browser → `https://www.<domain>/resume-optimizer/…` | The platform's CloudFront distribution for `www.<domain>` (A-18). |
+| CloudFront behaviour 1, path pattern `/resume-optimizer/_next/static/*` (ordered before behaviour 2) | Origin `ro-web-origin.<domain>`, HTTPS only, TLS 1.2; custom origin header `X-Origin-Verify: <origin secret>`; viewer protocol policy redirect-to-https; methods `GET, HEAD`; cache policy `Managed-CachingOptimized`, which keeps each file for the `Cache-Control: public, max-age=31536000, immutable` that Next.js sends for these content-hashed files (1 year). |
+| CloudFront behaviour 2, path pattern `/resume-optimizer*` | Same origin and custom header; methods `GET, HEAD`; cache policy `Managed-CachingDisabled`; origin request policy `Managed-AllViewerExceptHostHeader` (forwards every cookie, so the middleware sees `sb_access`, and every query string; does not forward `Host`, so the load balancer sees `ro-web-origin.<domain>`). |
+| Public load balancer `ro-<env>-public` (internet-facing ALB in the public subnets) | Listener 80: redirect to 443 (CR-016). Listener 443, TLS policy `ELBSecurityPolicy-TLS13-1-2-2021-06`, ACM certificates for `ro-api.<domain>` and `ro-web-origin.<domain>`. Rules in this order: (1) host `ro-web-origin.<domain>` and header `X-Origin-Verify` equal to a non-empty value of the origin secret → forward to `ro-web`; (2) host `ro-web-origin.<domain>` → fixed 403, empty body (CR-037); (3) host `ro-api.<domain>` and path `/internal/*` → fixed 404, empty body (6.1); (4) host `ro-api.<domain>` → forward to target group `ro-api` (HTTP 8080); default → fixed 404, empty body. Security group: 80 and 443 from anywhere (browsers and Razorpay webhooks reach `ro-api.<domain>` from the internet). |
+| Internal load balancer `ro-<env>-internal` (internal ALB in the private subnets) | Listener 443, same TLS policy, ACM certificate for `ro-internal.<domain>`. Rule: path `/internal/v1/*` → forward to target group `ro-api-internal` (the same `ro-api` tasks, HTTP 8080); default → fixed 404. Security group: 443 from the VPC CIDR only. |
+| Target group `ro-web` | Health check `GET /resume-optimizer/api/health` on the traffic port, matcher 200, interval 15 s, timeout 5 s, healthy threshold 2, unhealthy threshold 3. |
+| Target groups `ro-api`, `ro-api-internal` | Health check `GET /actuator/health/readiness` on port 8081 (CR-029), matcher 200, interval 15 s, timeout 5 s, healthy threshold 2, unhealthy threshold 3. The security group of the `ro-api` tasks admits 8080 and 8081 from the two load balancers only; 8081 is used only by these health checks, never routed. |
+
+**Origin secret.** Secrets Manager secret `ro/<env>/web-origin-verify`, JSON `{"current": "<64 random hex characters>", "next": ""}`, values set by ops (4.8.5). Terraform reads it and puts every non-empty value into rule (1) (an ALB header condition matches any of its values). The module team hands `current` to the platform team, who put it in the CloudFront custom origin header. Rotation without a refused request: ops set `next` and apply; the platform switches the header to `next`; ops move `next` into `current`, clear `next` and apply. The web container never receives this secret: the load balancer checks it.
+
+**Health route.** `GET /resume-optimizer/api/health` returns 200 `{"status":"UP"}` with `Cache-Control: no-store` as long as the Node process serves requests. It checks nothing else, because the web server depends on nothing: it never calls the API.
+
+**API calls come from the browser only.** No server component, route handler or middleware of CMP-023 calls the API. Every API call is made by the browser to `RO_API_BASE_URL` with `credentials: 'include'`, so the `sb_access` cookie is sent, and with `X-Requested-With: SurfingBear` on `POST` and `DELETE` (CR-018); pages render their data on the client. Reason: the token is checked in one place, the API (CR-001); the web tier holds no user data and no secret; and server-side calls would need the user's cookie forwarded from one host to another.
+
+**Page headers.** The middleware adds `Cache-Control: private, no-store` to every page response it passes on. Next.js itself sends `private, no-cache, no-store, max-age=0, must-revalidate` for dynamically rendered pages (the root layout is `force-dynamic`); either value meets CR-037, so it does not matter which one wins.
 
 ---
 
@@ -2642,7 +2702,7 @@ The `ErrorCode` enum holds exactly these values (CR-013). `message` is the defau
 
 ## 7. Traceability matrix
 
-Every FR and NFR, with the components (4.2), tables (5.2) and endpoints (6.2) that implement it, and how it is verified. Test class names follow 2.1 (`*Test` unit, `*IT` integration with Testcontainers).
+Every FR and NFR, with the components (4.2), tables (5.2) and endpoints (6.2) that implement it, and how it is verified. Test class names follow 2.1 (`*Test` unit, `*IT` integration with Testcontainers). *(v0.7)* Rows that name CMP-001 include CMP-023, which serves its pages (4.8.3); the CRs are checked by the test named in their own row, as before.
 
 ### 7.1 Functional requirements
 
@@ -2698,9 +2758,9 @@ Every FR and NFR, with the components (4.2), tables (5.2) and endpoints (6.2) th
 | NFR-013 Metrics and alerts | CMP-002, CMP-010, CMP-011, CMP-009, CMP-019, CMP-020, CMP-021 | — | all | Synthetic failure on staging fires each alert, including a webhook with a wrong signature and a forced reconciliation fix |
 | NFR-014 Tracing | CMP-002, CMP-009, CMP-010, CMP-011, CMP-015 | — | all | Trace sample review on staging |
 | NFR-015 AI cost | CMP-011, CMP-007 | TBL-006 (`input_tokens`, `output_tokens`), TBL-010 | none | `ai_tokens_total`; provider dashboard; `pro_heavy_use_total` |
-| NFR-016 Accessibility | CMP-001 | — | — | axe in Playwright, 0 serious / critical |
+| NFR-016 Accessibility | CMP-001, CMP-023 | — | — | axe in Playwright, 0 serious / critical |
 | NFR-017 Test coverage | all backend components | — | — | JaCoCo gate in CI |
-| NFR-018 Browsers and screens | CMP-001 | — | — | Playwright on Chromium, Firefox, WebKit, 360 px viewport |
+| NFR-018 Browsers and screens | CMP-001, CMP-023 | — | — | Playwright on Chromium, Firefox, WebKit, 360 px viewport (*v0.7:* WebKit on staging, 4.8.4) |
 | NFR-019 Payment data stays with Razorpay *(v0.4)* | CMP-018, CMP-019, CMP-020 | TBL-016 – TBL-019 | API-017, API-018, API-022 | `RazorpayWebhookIT` (no payer email or phone in any table or log line; one changed byte → 401); gitleaks rule for `rzp_live_` |
 | NFR-020 Time to Pro after payment *(v0.4)* | CMP-018, CMP-020, CMP-021 | TBL-016 | API-018, API-022, API-019 | `billing_activation_seconds` per path; staging test in Razorpay Test Mode |
 | NFR-021 Webhook reliability *(v0.4)* | CMP-020, CMP-021 | TBL-016 – TBL-018 | API-022 | `RazorpayWebhookIT` replay and shuffle cases; `ReconciliationJobIT`; reconciliation alert |
