@@ -20,10 +20,10 @@ Status: **Open** = not fixed yet · **Fixed (vX.Y)** = fixed in that spec versio
 | 2 | CR-011, 6.1, 1.5 | No dev web origin / API base URL; CSP `connect-src` only allows prod API | Per-env table: web origin, API base URL, CSP `connect-src` | Open |
 | 3 | 1.8, 6.1, 4.1 | Hosting of `api.` vs `app.surfingbear.com` unclear: Nginx server names, who routes the UI path, TLS certificates | Define Nginx `server_name` blocks, routing per host, certificate source and renewal | Open |
 | 4 | API-016/017 vs 1.8 | `/readyz` is at the root but Nginx only forwards `/resume-optimizer/v1/*` to `api` | Add Nginx route for health checks to `api` | Open |
-| 5 | 1.8 vs FR-004, CMP-005 | API extracts text, but only the worker image has `poppler-utils` | Install `poppler-utils` in the API image | Open |
+| 5 | 1.8 vs FR-004, CMP-005 | API extracts text, but only the worker image has `poppler-utils` | Install `poppler-utils` in the API image | Fixed (v2.1) |
 | 6 | CR-010, config | No full env var list (Redis, S3 bucket/region/endpoint, Slack webhook, log level, CORS, dev model, frontend API URL) | One config table: name, secret?, required?, value per env | Open |
 | 7 | API-018, NFR-011, CMP-011 | Alert job reads "all processes" on port 9090 but has no way to find them; scaled workers can't share one host port | Processes push counters to Redis, or define scrape targets | Open |
-| 8 | API-018 vs FR-018, NFR-002, 4.4 | Metric names `ro_retention_deleted_total`, `ro_analysis_duration_seconds` and the JWKS alert are not in API-018 | Add fields to API-018 or remove references; say which process alerts | Open |
+| 8 | API-018 vs FR-018, NFR-002, 4.4 | Metric names `ro_retention_deleted_total`, `ro_analysis_duration_seconds` and the JWKS alert are not in API-018 | Add fields to API-018 or remove references; say which process alerts | Fixed (v2.1) |
 | 9 | NFR-002 vs NFR-010 | 10 analyses/s target vs 1,000/hour capacity | Align load numbers | Open |
 | 10 | FR-008 AC4 vs 4.7 | `attempts` incremented twice (on take and on recovery) | Increment only when a worker takes the job | Open |
 | 11 | NFR-013, `stuckAnalyses` | "Stuck > 15 min" has no reference timestamp; conflicts with retry timing | Define by status + `created_at`/`started_at`; align alert | Open |
