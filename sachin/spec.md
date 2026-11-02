@@ -91,10 +91,10 @@ An `ADMIN` is also a normal user of the module; the extra role only adds the sta
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-008 | Logging | Logs are JSON, one object per line, with the fields `timestamp` (ISO-8601 UTC), `level`, `logger`, `requestId`, `userId` (platform `sub`, or `-`), `event`, `message`, and `durationMs` where relevant. | Log sample review in staging. |
-| CR-009 | Logging | Never logged, at any level: resume file contents, extracted text, AI prompts and AI responses, rewrite suggestions, file names, email addresses, phone numbers, tokens, cookies, Razorpay webhook bodies and API responses (they carry the payer's email and phone), Razorpay signatures and keys. File size, page count, MIME type, analysis id, resume id, subscription id, Razorpay subscription, payment and event ids, amounts and Razorpay status values may be logged. | Unit test on the log redaction filter + code review checklist. |
+| CR-008 | Logging | Logs are JSON, one object per line, with the fields `timestamp` (ISO-8601 UTC), `level`, `logger`, `requestId`, `userId` (platform `sub`, or `-`), `event`, `message`, and `durationMs` where relevant. *(v0.7)* The web server (CMP-023) writes the same fields where they apply (4.8.7). | Log sample review in staging. |
+| CR-009 | Logging | Never logged, at any level: resume file contents, extracted text, AI prompts and AI responses, rewrite suggestions, file names, email addresses, phone numbers, tokens, cookies, Razorpay webhook bodies and API responses (they carry the payer's email and phone), Razorpay signatures and keys. File size, page count, MIME type, analysis id, resume id, subscription id, Razorpay subscription, payment and event ids, amounts and Razorpay status values may be logged. *(v0.7)* The rule applies to the web server's logs and to trace attributes too (4.8.7). | Unit test on the log redaction filter + code review checklist. |
 | CR-010 | Logging | Every request gets a `requestId` (UUID v4). If the caller sends `X-Request-Id` in UUID format it is reused; otherwise a new one is generated. It is returned in the `X-Request-Id` response header, written in every log line and in every error response, and passed to background jobs. | Integration test on the header. |
-| CR-011 | Logging | Log levels: ERROR = needs action (unexpected exception, AI provider down); WARN = handled but unusual (retry happened, PRO fair-use signal, billing reconciliation fix; *v0.3's "unknown plan claim" no longer applies*); INFO = one line per request and per job state change; DEBUG is off in staging and prod. Logs are kept 30 days. | Config review per environment. |
+| CR-011 | Logging | Log levels: ERROR = needs action (unexpected exception, AI provider down); WARN = handled but unusual (retry happened, PRO fair-use signal, billing reconciliation fix; *v0.3's "unknown plan claim" no longer applies*); INFO = one line per request and per job state change; DEBUG is off in staging and prod. Logs are kept 30 days (*v0.7:* the retention of each CloudWatch Logs group, 4.8.7). | Config review per environment; Terraform review of the log groups (CR-040). |
 
 ### 1.4 Error handling
 
@@ -187,6 +187,7 @@ Standard error body:
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
 | CR-039 | Infrastructure as code | Every AWS resource of the module is defined in Terraform in the repository `resume-optimizer-infra` (4.8.5), except the one-time manual steps listed there. Nobody changes these resources in the AWS console. `terraform plan` runs on every pull request and is posted on it; `apply` runs only through the GitHub Environment of the target environment. | Review of the plan comment on each infra PR; after an apply, `terraform plan` on `main` shows no changes. |
+| CR-040 | Observability | *(v0.7)* Logs, metrics, traces and alerts go only to the destinations of 4.8.7: logs as JSON on stdout (CR-008) → CloudWatch Logs group `/ro/<env>/<service>`, kept 30 days; metrics → Amazon Managed Service for Prometheus workspace `ro-<env>`; traces → AWS X-Ray; alerts → SNS topics `ro-<env>-alerts-critical` and `ro-<env>-alerts-warning`, then Slack, and PagerDuty for prod critical alerts only. Every alert the spec promises is one row of the alert table in 4.8.7, defined as code in `resume-optimizer-infra` (CR-039); dev and staging never page anyone. No third-party monitoring or error-reporting script is loaded in the browser. | Terraform review; staging drill: each alert of 4.8.7 fired once by a synthetic failure reaches `#ro-alerts-nonprod` (NFR-013); one test alert with severity `critical` in prod opens a PagerDuty incident. |
 
 ---
 
@@ -391,17 +392,17 @@ ATS scoring dimensions (FR-009):
 | NFR-002 | Performance | Upload latency including text extraction | p95 ≤ 3 s for a 5 MB, 5-page PDF | k6 test with a fixed test-file set |
 | NFR-003 | Performance | Analysis time from `QUEUED` to `COMPLETED` | p95 ≤ 45 s; hard limit 120 s, then `FAILED` (FR-008) | `analysis_duration_seconds` histogram in production |
 | NFR-004 | Performance | PDF report generation | p95 ≤ 5 s | k6 test; `report_render_seconds` metric |
-| NFR-005 | Availability | API availability (worker excluded; failed analyses are already handled by FR-008) | 99.5 % per calendar month (≈ 3 h 39 min downtime); RPO ≤ 5 min (RDS point-in-time recovery); RTO ≤ 4 h | Uptime check on `/actuator/health/liveness` every minute; yearly restore drill |
+| NFR-005 | Availability | API availability (worker excluded; failed analyses are already handled by FR-008) | 99.5 % per calendar month (≈ 3 h 39 min downtime); RPO ≤ 5 min (RDS point-in-time recovery); RTO ≤ 4 h | *(v0.7)* Availability = the success rate over the calendar month of the CloudWatch Synthetics canary `ro-<env>-uptime`, which calls `GET /api/v1/job-roles` without a cookie every minute and passes on 401 `UNAUTHENTICATED` (4.8.7; the management port is not public, so the v0.6 "uptime check on `/actuator/health/liveness`" could not be run from outside); yearly restore drill |
 | NFR-006 | Scalability | Capacity | 5,000 analyses/day and 50 analyses processed in parallel, by adding worker tasks only (no code change; *v0.7:* done by the worker autoscaling of 4.8.6, up to 10 tasks). *v0.4:* unchanged by Resume Pro's unlimited analyses, because one user can have at most 2 in progress (FR-006), so heavy PRO use spreads over time instead of adding parallel load | Load test on staging with the fake AI client and 2 s simulated latency |
 | NFR-007 | Security | Encryption | TLS 1.2+ in transit; S3 SSE-KMS and RDS storage encryption with a KMS key per environment; Redis in-transit encryption | AWS Config rules; staging review |
 | NFR-008 | Security | Vulnerabilities | OWASP ZAP baseline scan on staging: 0 High findings; dependency scan: 0 unwaived Critical/High (CR-022) | CI + pre-release scan report |
 | NFR-009 | Privacy | Data sent to the AI provider is minimised | 100 % of AI requests contain redacted text only (no email, phone or URL per the regexes in section 4.6.1); no file bytes are sent | Unit tests on the redactor with a fixed set of 50 sample contact formats; prompt-builder test asserting no match in the output |
 | NFR-010 | Privacy | Data location | Files, DB, Redis and backups in AWS `ap-south-1` only; the only cross-border flow is the redacted text to the AI provider, stated in the notice (FR-001) | Infrastructure-as-code review (*v0.7:* Terraform plan, CR-039) |
-| NFR-011 | Privacy | Retention is enforced | No resume file or text older than 30 days + 24 h, no analysis older than 180 days + 24 h; *v0.4:* no subscription ended more than 180 days + 24 h ago | Daily query in a monitoring job; alert if any row is found |
-| NFR-012 | Privacy | Erasure completes | DB rows deleted within 5 s of the request; S3 objects within 24 h; *v0.4:* an open Razorpay subscription cancelled at Razorpay within 24 h | Integration test; alert on `storage_deletion` or `subscription_cancellation` rows older than 24 h |
-| NFR-013 | Observability | Metrics and alerts | Metrics exported via Micrometer/Prometheus: request rate, latency, error rate by code, queue depth, analysis duration, AI failures by reason, AI tokens used. Alerts: AI failure rate > 10 % over 15 min; queue depth > 100 for 5 min; read p95 > 300 ms for 10 min; any 5xx rate > 1 % for 5 min. *v0.4 billing:* metrics `razorpay_calls_total{operation,outcome}`, `razorpay_webhook_events_total{type,outcome}`, `razorpay_webhook_signature_failures_total`, `billing_reconciliation_fixes_total`, `pro_heavy_use_total`, `billing_activation_seconds{path}` (NFR-020); alerts: more than 5 webhook signature failures in 15 min; any reconciliation fix (an abandoned checkout expiring is not a fix, FR-029 criterion 8, *v0.6*); Razorpay call failure rate > 20 % over 15 min | Alert rules in code, tested by firing a synthetic failure on staging |
-| NFR-014 | Observability | Tracing | Every request and job carries `requestId` (CR-010); OpenTelemetry traces cover API → DB, API → Redis, worker → AI provider, worker → S3 | Trace sample review on staging |
-| NFR-015 | Cost | AI usage per analysis | Input ≤ 12,000 tokens; output, including the model's reasoning, capped at `max_tokens = 8000` (4.6.2); monthly AI spend alarm at the budget set by finance; *v0.4:* the PRO fair-use signal of FR-007 criterion 8 at 300 analyses per user per period | `ai_tokens_total` metric; provider usage dashboard |
+| NFR-011 | Privacy | Retention is enforced | No resume file or text older than 30 days + 24 h, no analysis older than 180 days + 24 h; *v0.4:* no subscription ended more than 180 days + 24 h ago | Daily query in a monitoring job; alert if any row is found (*v0.7:* alert `RetentionViolation`, 4.8.7) |
+| NFR-012 | Privacy | Erasure completes | DB rows deleted within 5 s of the request; S3 objects within 24 h; *v0.4:* an open Razorpay subscription cancelled at Razorpay within 24 h | Integration test; alert on `storage_deletion` or `subscription_cancellation` rows older than 24 h (*v0.7:* alerts `StorageDeletionOverdue` and `RazorpayCancellationOverdue`, measured every minute, 4.8.7) |
+| NFR-013 | Observability | Metrics and alerts | Metrics exported via Micrometer/Prometheus: request rate, latency, error rate by code, queue depth, analysis duration, AI failures by reason, AI tokens used. *v0.4 billing:* metrics `razorpay_calls_total{operation,outcome}`, `razorpay_webhook_events_total{type,outcome}`, `razorpay_webhook_signature_failures_total`, `billing_reconciliation_fixes_total`, `pro_heavy_use_total`, `billing_activation_seconds{path}` (NFR-020). *(v0.7)* Plus `analyses_finished_total{status}`, and the CloudWatch metrics `AnalysisBacklog` (the queue depth), `StorageDeletionOverdue` and `CancellationOverdue` published by CMP-012; label values in 4.8.7. Alerts: *(v0.7)* every alert, with its condition, duration, severity and destination, is one row of the alert table in 4.8.7, the only place their numbers are written. It holds the alerts listed here up to v0.6 (AI failure rate, queue depth, read p95, 5xx rate, webhook signature failures, any reconciliation fix, where an abandoned checkout expiring is not a fix (FR-029 criterion 8), Razorpay call failure rate) and the ones promised in NFR-005, NFR-011, NFR-012, FR-007 criterion 8 and 4.4 | Alert rules in code, tested by firing a synthetic failure on staging |
+| NFR-014 | Observability | Tracing | Every request and job carries `requestId` (CR-010); OpenTelemetry traces cover API → DB, API → Redis, worker → AI provider, worker → S3; *(v0.7)* exported to AWS X-Ray with the sampling of 4.8.7, `requestId` a span attribute | Trace sample review on staging (X-Ray: find the trace of one request by its `requestId`) |
+| NFR-015 | Cost | AI usage per analysis | Input ≤ 12,000 tokens; output, including the model's reasoning, capped at `max_tokens = 8000` (4.6.2); monthly AI spend capped at the budget set by finance (*v0.7:* the monthly spend limit of the environment's Anthropic workspace, set by ops, 4.8.5; when it is reached AI calls fail and alert `AiFailureRateHigh` fires, 4.8.7); *v0.4:* the PRO fair-use signal of FR-007 criterion 8 at 300 analyses per user per period | `ai_tokens_total` metric; provider usage dashboard |
 | NFR-016 | Accessibility | Frontend pages of the module | WCAG 2.1 AA; 0 serious or critical axe violations; score gauge has a text alternative | axe in Playwright e2e tests |
 | NFR-017 | Maintainability | Test coverage | ≥ 80 % line coverage on `*Service` classes and `ai/`, `quota/`, `privacy/`, `billing/` (*v0.4*) packages | JaCoCo gate in CI |
 | NFR-018 | Compatibility | Browsers and screens | Latest 2 versions of Chrome, Edge, Firefox, Safari; usable from 360 px width | Playwright run on Chromium, Firefox, WebKit; mobile viewport. *(v0.7)* The CI run against the local stack (4.8.4) uses Chromium and Firefox; WebKit runs in the staging run over HTTPS, so the local `Secure` cookie on `http://localhost` (A-17) never decides a WebKit result |
@@ -434,6 +435,7 @@ ATS scoring dimensions (FR-009):
 | A-17 | *(v0.7)* Each deployed environment has its own registrable domain: prod `surfingbear.com`, staging `surfingbear-staging.com`, dev `surfingbear-dev.com`. In each, the web UI is `https://www.<domain>/resume-optimizer`, the public API is `https://ro-api.<domain>`, and the platform sets the `sb_access` cookie with Domain `.<domain>`. Locally the web UI is `http://localhost:3000/resume-optimizer`, the API `http://localhost:8080`, and the cookie is host-only on `localhost`. All values per environment: 4.8.1. | Separate registrable domains keep each environment's `sb_access` cookie apart: with one shared `.surfingbear.com`, a dev login and a prod login in the same browser would overwrite each other's cookie, and a dev token would be sent to the prod API. Inside one environment the web UI and the API share the registrable domain, so the SameSite=Lax cookie reaches the API (A-10). Locally, cookies ignore the port, so one host-only cookie on `localhost` reaches both port 3000 and port 8080, and Chrome and Firefox treat `http://localhost` as a secure context, so the `Secure` attribute works without TLS. |
 | A-18 | *(v0.7)* The platform contract is the same in every deployed environment, on that environment's domain: token issuer `https://auth.<domain>` (`iss` = this URL), JWKS at `<issuer>/.well-known/jwks.json`, login page `https://www.<domain>/login?returnTo=<path>`. `returnTo` must be a relative path on the same host (it starts with one `/`); the platform rejects anything else and lands the user on its home page, and after a successful login it redirects the browser to `returnTo`. The platform owns the CloudFront distribution of `www.<domain>` and adds the two behaviours for `/resume-optimizer*` given in 4.8.3, pointing at the module's origin; the module team gives it the origin host name and the origin secret (4.8.3). The platform calls the internal erasure endpoint at `https://ro-internal.<domain>` from inside the environment's VPC (6.1). Values per environment: 4.8.1. | The module only verifies tokens (CR-001), so it needs exactly three things from the platform per environment: who issues tokens, where the keys are, and where to send a user who has none. A relative-only `returnTo` stops the login page from being used as an open redirect. The CDN belongs to the platform because `www.<domain>` is the platform's site; the module only adds an origin behind one path. |
 | A-19 | *(v0.7)* The AWS and company setup the module builds on: one AWS account per environment (`sb-dev`, `sb-staging`, `sb-prod`) plus `sb-tools` for shared build artefacts (ECR). In each environment account the platform already runs a VPC in `ap-south-1` with public subnets and private subnets (with NAT egress) in at least two Availability Zones; the module deploys into it, and the VPC id, subnet ids and VPC CIDR are Terraform inputs (4.8.5). The DNS zones of the three domains, public and private, belong to the platform team, who create the module's records from Terraform outputs. The code lives in the GitHub organisation `surfingbear`. In dev and staging the platform provides test user accounts for automated browser tests. | Separate accounts give hard isolation of data, IAM and spend between environments (CR-027: real data and real money only in prod). Using the platform's VPC lets the platform reach `/internal/**` (FR-021) without peering and keeps one network owner. The zones are the platform's because the domains are. |
+| A-20 | *(v0.7)* Company tools the module plugs into for monitoring: a Slack workspace with the AWS Chatbot app and the channels `#ro-alerts-prod` and `#ro-alerts-nonprod`; a PagerDuty account with an on-call rotation for the module's team; and the Amazon Managed Grafana workspace `surfingbear-observability` in `sb-tools`, owned by the platform team, where each team keeps its dashboards. | These are shared company tools, not part of the module. Using them means alerts reach people where they already work, and one Grafana holds every team's dashboards. |
 
 **Out of scope:**
 
@@ -448,6 +450,7 @@ ATS scoring dimensions (FR-009):
 - A mobile app; the web UI is responsive (NFR-018).
 - An admin UI for editing the role catalogue (catalogue changes are migrations, FR-005).
 - Email or push notifications when an analysis completes; the page polls (FR-013).
+- *(v0.7)* Collecting errors from the browser. No third-party error or monitoring script runs on pages that show resume results and open the payment checkout (CR-040); browser problems show up as API errors and alerts on the server side (4.8.7).
 
 ---
 
@@ -546,7 +549,7 @@ flowchart LR
 | CMP-009 | Analysis queue | Hands analysis ids from the API to workers. Producer: `XADD`. Consumer group `ro-workers`: `XREADGROUP`, `XACK`, `XDEL`. Messages carry only `analysisId` and `requestId`. The database row, not the stream, is the source of truth (4.3.4). | Redis Streams via Spring Data Redis (Lettuce) | both | `analysis.queue` |
 | CMP-010 | Analysis worker | Takes a queued analysis, moves it to `RUNNING`, calls CMP-011, validates and saves the result or marks it `FAILED` and releases the quota unit (FR-008 – FR-011). | Spring service, Java 21 virtual threads, `app.worker.concurrency` per task | ro-worker | `analysis.worker` |
 | CMP-011 | AI client | Builds the prompt, redacts contact data (NFR-009), calls the provider with timeout and no SDK retries, validates the response against 4.6.3 and 4.6.4. `AnthropicAiClient` in dev/staging/prod, `FakeAiClient` when `AI_PROVIDER=fake`. | Anthropic Java SDK (`com.anthropic:anthropic-java`) | ro-worker | `ai` |
-| CMP-012 | Analysis sweeper | Every minute: fails analyses stuck in `RUNNING`, re-queues lost `QUEUED` ones once, fails them if still queued (FR-008 criteria 6–7). *(v0.7)* After each sweep it publishes the CloudWatch metric `AnalysisBacklog` (4.8.6), which scales the workers. | `@Scheduled` + ShedLock | ro-worker | `analysis.worker` |
+| CMP-012 | Analysis sweeper | Every minute: fails analyses stuck in `RUNNING`, re-queues lost `QUEUED` ones once, fails them if still queued (FR-008 criteria 6–7). *(v0.7)* After each sweep it publishes the CloudWatch metrics `AnalysisBacklog` (4.8.6, scales the workers), `StorageDeletionOverdue` and `CancellationOverdue` (NFR-012 alerts, 4.8.7). | `@Scheduled` + ShedLock | ro-worker | `analysis.worker` |
 | CMP-013 | Report renderer | Renders a completed analysis to PDF on request from stored rows only (FR-016). | Thymeleaf template `templates/report.html` → openhtmltopdf 1.1 (PDFBox), Noto Sans embedded | ro-api | `report` |
 | CMP-014 | Privacy service | Erasure for the user (FR-019), on consent withdrawal (FR-002) and for the platform (FR-021): one transaction that deletes the user's rows and writes `storage_deletion` rows, then immediate S3 deletes. *v0.4:* the same transaction deletes the user's billing rows and writes `subscription_cancellation` rows; after the commit it cancels each at Razorpay through CMP-019 (FR-019 criterion 7). | Spring service + JPA | ro-api | `privacy` |
 | CMP-015 | Storage client and deletion retry job | `StorageClient` puts and deletes objects (`resumes/<uuid>`, SSE-KMS). The retry job deletes every pending `storage_deletion` row every 10 minutes until it succeeds (FR-018 criterion 4, FR-019 criterion 3). | AWS SDK for Java v2 (S3), `@Scheduled` + ShedLock | client: both; job: ro-worker | `common.storage`, `privacy` |
@@ -735,7 +738,7 @@ Runs every 60 s in `ro-worker` under ShedLock lock `analysis-sweeper`. Each rule
 
 Stream messages that were read but never acknowledged (worker crash) are not reclaimed with `XAUTOCLAIM`; the stuck-running rule recovers those analyses through the database.
 
-*(v0.7)* After the three rules, the same run counts `SELECT count(*) FROM analysis WHERE status = 'QUEUED'` and publishes it as `AnalysisBacklog` (namespace `ResumeOptimizer/<env>`, unit `Count`) with one `PutMetricData` call, unless `app.metrics.cloudwatch-enabled` is `false` (local). A failed call is logged at WARN and does not fail the sweep. This metric drives the worker autoscaling (4.8.6).
+*(v0.7)* After the three rules, the same run counts `SELECT count(*) FROM analysis WHERE status = 'QUEUED'` (`AnalysisBacklog`), `storage_deletion` rows with `created_at < now() - 24 h` (`StorageDeletionOverdue`) and `subscription_cancellation` rows with `created_at < now() - 24 h` (`CancellationOverdue`), and publishes the three (namespace `ResumeOptimizer/<env>`, unit `Count`) with one `PutMetricData` call, unless `app.metrics.cloudwatch-enabled` is `false` (local). A failed call is logged at WARN and does not fail the sweep. `AnalysisBacklog` drives the worker autoscaling (4.8.6); all three have alerts (4.8.7). They are CloudWatch metrics, not Prometheus gauges, because only the one task holding the ShedLock lock computes them, and a gauge on the other tasks would keep a stale value.
 
 #### 4.3.5 View a result and download the report (FR-012 – FR-014, FR-016)
 
@@ -816,7 +819,7 @@ Daily at 02:00 IST, lock `retention`, batches of 500 rows, each batch its own tr
 5. `erasure_record` rows with `requested_at <= now() - 365 days`, and `analysis_outcome` / `upload_rejection_daily` rows older than 400 days: delete.
 6. *(v0.4)* `subscription` rows with `ended_at <= now() - 180 days` (payments cascade), and `razorpay_webhook_event` rows with `received_at <= now() - 90 days`: delete (FR-020 criterion 7).
 
-Daily at 06:00 IST, lock `retention-audit`: counts `resume_text` rows of resumes uploaded more than 31 days ago, analyses older than 181 days, `storage_deletion` rows older than 24 h and *(v0.4)* subscriptions ended more than 181 days ago and `subscription_cancellation` rows older than 24 h. Any non-zero count is logged at ERROR with event `retention.violation` and increments the metric `retention_violations_total`, which has an alert (NFR-011, NFR-012).
+Daily at 06:00 IST, lock `retention-audit`: counts `resume_text` rows of resumes uploaded more than 31 days ago, analyses older than 181 days and *(v0.4)* subscriptions ended more than 181 days ago. Any non-zero count is logged at ERROR with event `retention.violation` and increments the metric `retention_violations_total`, which has an alert (NFR-011, alert `RetentionViolation` in 4.8.7). *(v0.7: the `storage_deletion` and `subscription_cancellation` rows older than 24 h, counted here until v0.6, are now counted every minute by CMP-012 (4.3.4), so the NFR-012 alerts fire within minutes instead of the next morning.)*
 
 #### 4.3.8 Subscribe to Resume Pro (FR-024) *(added in v0.4)*
 
@@ -1010,11 +1013,11 @@ The diagram shows the usual paths only. Unlike the analysis status (4.2), it is 
 
 | System | Purpose | Protocol / auth | Failure handling |
 |---|---|---|---|
-| SurfingBear platform: JWKS | Public keys to verify access tokens (CR-002) | `GET PLATFORM_JWKS_URL` over HTTPS, no auth; keys cached in memory 10 min, refetched once on an unknown `kid` | If the fetch fails, cached keys keep being used until they are 24 h old; a token whose `kid` is not in the cache gets 401 `UNAUTHENTICATED`; fetch failures are logged at ERROR and counted in `jwks_fetch_failures_total`. |
+| SurfingBear platform: JWKS | Public keys to verify access tokens (CR-002) | `GET PLATFORM_JWKS_URL` over HTTPS, no auth; keys cached in memory 10 min, refetched once on an unknown `kid` | If the fetch fails, cached keys keep being used until they are 24 h old; a token whose `kid` is not in the cache gets 401 `UNAUTHENTICATED`; fetch failures are logged at ERROR and counted in `jwks_fetch_failures_total` (*v0.7:* alert `JwksFetchFailing`, 4.8.7). |
 | SurfingBear platform: account deletion | Erase a deleted platform account (FR-021) | Platform calls `POST /internal/v1/erasure-requests` with a JWT whose `roles` contains `PLATFORM_SERVICE`, `aud` `resume-optimizer` | Idempotent and always 202 for a valid call; on 5xx the platform retries (its responsibility, agreed contract: every 5 min for 24 h). |
-| Anthropic Messages API | Score the resume, list missing skills, write suggestions (FR-008 – FR-011) | `POST https://api.anthropic.com/v1/messages`, header `x-api-key: ANTHROPIC_API_KEY`, through the official Java SDK, details in 4.6 | 45 s timeout; SDK retries set to 0; one retry after 2 s by CMP-011 on timeout, 429, 5xx, 529 or invalid response; then `FAILED` and the quota unit released (FR-008). Metric `ai_failures_total{reason}` with the alert in NFR-013. Monthly spend alarm per NFR-015. |
+| Anthropic Messages API | Score the resume, list missing skills, write suggestions (FR-008 – FR-011) | `POST https://api.anthropic.com/v1/messages`, header `x-api-key: ANTHROPIC_API_KEY`, through the official Java SDK, details in 4.6 | 45 s timeout; SDK retries set to 0; one retry after 2 s by CMP-011 on timeout, 429, 5xx, 529 or invalid response; then `FAILED` and the quota unit released (FR-008). Metric `ai_failures_total{reason}` with the alert in NFR-013 (*v0.7:* `AiFailureRateHigh`, 4.8.7). Monthly spend limit per NFR-015. |
 | AWS S3 | Resume files (FR-003, FR-018 – FR-020) | AWS SDK v2, IAM task role (no keys in the container); bucket `sb-ro-<env>`, Block Public Access on, default encryption SSE-KMS with the environment's key, versioning off (a deleted object must really be gone) | Upload: put fails → 500 `INTERNAL_ERROR`, nothing stored. Delete: fails → `storage_deletion` row, retried every 10 min (4.3.6). Lifecycle rule deletes any object under `resumes/` older than 32 days as a safety net. |
-| Redis (ElastiCache) | Queue (CMP-009) and rate-limit counters (CR-020) | TLS, AUTH password from Secrets Manager | Rate limiter fails **open** (request allowed, WARN log, `ratelimit_unavailable_total`); queue publish failure is recovered by the sweeper (4.3.4); workers retry `XREADGROUP` every 5 s. Redis is not part of the API readiness check, so a Redis outage does not take the API down. |
+| Redis (ElastiCache) | Queue (CMP-009) and rate-limit counters (CR-020) | TLS, AUTH password from Secrets Manager | Rate limiter fails **open** (request allowed, WARN log, `ratelimit_unavailable_total`, *v0.7:* alert `RateLimiterUnavailable`, 4.8.7); queue publish failure is recovered by the sweeper (4.3.4); workers retry `XREADGROUP` every 5 s. Redis is not part of the API readiness check, so a Redis outage does not take the API down. |
 | PostgreSQL (RDS) | All durable data (section 5) | TLS, user `ro_app` (DML only) at runtime; Flyway runs as `ro_owner` in a one-off ECS task before the rolling deploy (*v0.7:* the same image with `APP_MODE=migrate`, 4.8.4; Flyway never runs in `api` or `worker`) | Part of the readiness check: when it is down the task is taken out of the load balancer and requests get 503 from the load balancer. HikariCP pool 20 per API task, 10 per worker task, connection timeout 3 s → 500 `INTERNAL_ERROR`. |
 | Razorpay Subscriptions API *(v0.4)* | Create, fetch and cancel Resume Pro subscriptions (FR-024, FR-028, FR-029, FR-019 criterion 7) | `https://api.razorpay.com/v1` over HTTPS, HTTP Basic auth `RAZORPAY_KEY_ID:RAZORPAY_KEY_SECRET`, through CMP-019. Calls: `POST /subscriptions`, `GET /subscriptions/{id}`, `POST /subscriptions/{id}/cancel`. Connect timeout 3 s, read timeout 10 s | Create: no retry (not idempotent, a retry could make two subscriptions); failure → 503 `PAYMENT_PROVIDER_UNAVAILABLE`. Fetch in verification: failure → 202 (webhook and reconciliation finish the job). Cancel by the user: failure → 503, user retries. Cancel from TBL-019: retried every 10 min; on a 4xx the job fetches the subscription and treats `cancelled`, `completed` or `expired` as done. A Razorpay outage never changes anyone's plan, because the plan is computed from local rows (FR-025). |
 | Razorpay Checkout *(v0.4)* | Collects the payment in the browser (FR-024 criterion 6) | `https://checkout.razorpay.com/v1/checkout.js`, loaded by CMP-001 only on the Pro page, opened with the public `key_id` and the `subscription_id` | If the script fails to load, the Pro page shows "Payment is unavailable right now, try again later"; nothing is created until the user clicks Subscribe again. |
@@ -1043,7 +1046,7 @@ Local payment without Razorpay: when the web server runs with `WEB_BILLING_FAKE=
 | PDF report | Thymeleaf + openhtmltopdf | The report is an HTML template that a designer can edit; openhtmltopdf renders it in-process with embedded fonts, without a headless browser in the container. |
 | Scheduled jobs | Spring `@Scheduled` + ShedLock (JDBC) | Exactly one run per schedule across several worker tasks, using the database we already have. |
 | Hosting | AWS ECS Fargate, `ap-south-1` | Containers without servers to patch; same region as data (CR-029, NFR-010). *(v0.7)* The web server is a third Fargate service, `ro-web`, behind the platform's CloudFront (4.8.3), so it shares the API's deploy pipeline, logs and alarms while the site's CDN stays the platform's. |
-| Observability | Micrometer + Prometheus, OpenTelemetry Java agent, JSON logs (Logback + logstash encoder) | Covers NFR-013, NFR-014 and CR-008 with standard Spring Boot integrations. |
+| Observability | Micrometer + Prometheus, OpenTelemetry Java agent, JSON logs (Logback + logstash encoder); *(v0.7)* destinations: CloudWatch Logs, Amazon Managed Service for Prometheus with its alert manager, AWS X-Ray, Amazon Managed Grafana, CloudWatch Synthetics (4.8.7) | Covers NFR-013, NFR-014 and CR-008 with standard Spring Boot integrations. *(v0.7)* The destinations are AWS-managed services in the same accounts and region as the data (NFR-010), so there is nothing to run or patch, IAM task roles replace API keys, and logs with user ids never leave AWS `ap-south-1`. An ADOT sidecar per task is the one collector for both metrics and traces. |
 | Tests | JUnit 5, Testcontainers (PostgreSQL 16, Redis 7, LocalStack S3), WireMock for the AI API | Integration tests against the real engines, so CHECK constraints, locks and stream behaviour are tested, not mocked. |
 
 ### 4.6 AI integration (CMP-011)
@@ -1400,7 +1403,7 @@ Each `envs/<env>` creates in its account: the KMS key `alias/ro-<env>` (NFR-007:
 2. Per environment, in Razorpay (Test Mode in dev and staging, Live Mode in prod): create the plan of 3.1 in the dashboard and put its id in `envs/<env>/terraform.tfvars` as `razorpay_plan_id`; put the key id in `razorpay_key_id`; create the webhook with the URL of 4.8.1, the events of 4.3.9 and a new secret.
 3. Per environment, after `apply -target=module.secrets`: ops set the values of the six secrets of 4.8.2: the Razorpay key secret and webhook secret from step 2; the API key of the environment's Anthropic workspace `resume-optimizer-<env>`, whose monthly spend limit ops set to the budget from finance (NFR-015); random values of at least 32 characters for the rest.
 4. By the platform team (A-18, A-19), from the Terraform outputs: the two CloudFront behaviours of 4.8.3 with the origin secret; public DNS records `ro-api.<domain>` and `ro-web-origin.<domain>` (alias to the public load balancer); the private-zone record `ro-internal.<domain>` (alias to the internal load balancer); the ACM validation records.
-5. For alerts (4.8.7): the AWS Chatbot app authorised for the company Slack workspace once, and the PagerDuty service "Resume Optimizer" with its Amazon SNS integration.
+5. For alerts and dashboards (4.8.7, A-20): the AWS Chatbot app authorised for the company Slack workspace once; the PagerDuty service "Resume Optimizer" with its Amazon SNS integration, whose URL goes into `envs/prod/terraform.tfvars` as `pagerduty_endpoint`; a Grafana service account token of the workspace `surfingbear-observability` in the `sb-tools` secret `ro/tools/grafana-token`, which `envs/tools` uses to apply the dashboard.
 
 Local runs on `docker compose` only; nothing local is in Terraform.
 
@@ -1440,6 +1443,120 @@ The JVM runs with `-XX:MaxRAMPercentage=75` (in `JAVA_TOOL_OPTIONS`), measured a
 All of them: storage encrypted with the environment's KMS key; RDS with `rds.force_ssl = 1` and the database `resume_optimizer`, owned by the master user `ro_owner`; Redis with in-transit encryption and an AUTH token (4.4). Staging uses the prod sizes (1.7), so the load tests on staging (NFR-001, NFR-006) measure what prod will do.
 
 **Connection budget.** HikariCP pools are 20 connections per `ro-api` task and 10 per `ro-worker` task (4.4); the migration task uses at most 2. RDS PostgreSQL's default `max_connections` is `LEAST(DBInstanceClassMemory / 9531392, 5000)`: roughly 400 for the 4 GiB `db.t4g.medium` and roughly 100 for the 1 GiB `db.t4g.micro` (RDS keeps some memory and a few connections for itself; check with `SHOW max_connections` after creation). Prod at its maxima: 6 × 20 + 10 × 10 = 220 < ~400. A rolling update can double one service for a few minutes (CR-029), but the pipeline deploys `ro-api` and `ro-worker` one after the other (4.8.4), so the peak is 12 × 20 + 10 × 10 = 340 while `ro-api` rolls, or 6 × 20 + 20 × 10 = 320 while `ro-worker` rolls, both < ~400. Dev at its maxima: 2 × 20 + 2 × 10 = 60 < ~100; a deploy while dev is scaled to its maximum peaks at 4 × 20 + 2 × 10 = 100, at the limit, which is accepted in dev only.
+
+#### 4.8.7 Observability destinations and alert routing
+
+Where everything goes (CR-040), per environment `<env>`, all in the environment's own account and `ap-south-1`:
+
+| Signal | Source | Destination | Kept |
+|---|---|---|---|
+| Logs | JSON lines on stdout (CR-008) of every container, through the ECS `awslogs` log driver (`awslogs-region` `ap-south-1`, stream prefix = container name) | CloudWatch Logs groups `/ro/<env>/ro-api`, `/ro/<env>/ro-worker`, `/ro/<env>/ro-web`, `/ro/<env>/ro-migrate`, encrypted with `alias/ro-<env>`; searched with CloudWatch Logs Insights, for example `fields @timestamp, level, event, message \| filter requestId = "<id>" \| sort @timestamp` | 30 days (CR-011) |
+| Metrics | Micrometer Prometheus endpoint `/actuator/prometheus` on the management port 8081 (6.1) of `ro-api` and `ro-worker`, scraped every 30 s by the ADOT collector sidecar of the same task | Amazon Managed Service for Prometheus (AMP) workspace `ro-<env>`, by remote write | AMP default (150 days) |
+| Queue and erasure counts | CMP-012, once a minute (4.3.4) | CloudWatch metrics `AnalysisBacklog`, `StorageDeletionOverdue`, `CancellationOverdue` in namespace `ResumeOptimizer/<env>` | CloudWatch default |
+| Traces | OpenTelemetry Java agent in `ro-api` and `ro-worker`, OTLP gRPC to the sidecar on `localhost:4317` | AWS X-Ray | X-Ray default (30 days) |
+| Uptime | CloudWatch Synthetics canary `ro-<env>-uptime` (below) | CloudWatch metric `SuccessPercent`; run artefacts in S3 bucket `sb-ro-<env>-canary` | artefacts 30 days (lifecycle rule) |
+| Alerts | AMP alerting rules and CloudWatch alarms (alert table below) | SNS topics `ro-<env>-alerts-critical` and `ro-<env>-alerts-warning` → Slack, and PagerDuty for prod critical | — |
+| Dashboards | AMP, CloudWatch and X-Ray of each environment | Amazon Managed Grafana workspace `surfingbear-observability` (A-20), dashboard `Resume Optimizer` | — |
+
+**Application settings for metrics and traces** (in `application.yml`, all environments): `management.server.port: 8081`; `management.endpoints.web.exposure.include: health,prometheus`; common tags on every meter `env` (= `app.env`), `service` (`ro-api` or `ro-worker`, from `app.mode`) and `task_id` (read at startup from `${ECS_CONTAINER_METADATA_URI_V4}/task`, the part of `TaskARN` after the last `/`; `local` when that variable is absent); `management.metrics.distribution.percentiles-histogram` on for `http.server.requests`, `analysis.duration`, `report.render` and `billing.activation`, so p95 can be computed in PromQL. Label values not given elsewhere: `analyses_finished_total{status}` is `COMPLETED` or `FAILED`, counted once per analysis when it reaches that status (CMP-010, CMP-012); `ai_failures_total{reason}` is the `failure_reason` of 4.6, counted once per analysis that ends `FAILED`; `razorpay_calls_total{operation}` is `create`, `fetch` or `cancel` and `{outcome}` is `success`, `timeout` or `error` (connection failure or non-2xx).
+
+**Sidecar.** Each `ro-api` and `ro-worker` task runs a second container `adot`: image `public.ecr.aws/aws-observability/aws-otel-collector` at a release tag pinned in Terraform (never `latest`), 128 CPU units and 256 MiB of the task size (4.8.6), `essential: false` (if it stops, the application keeps serving and only telemetry pauses), logs to the task's log group with stream prefix `adot`. Its configuration is passed in the environment variable `AOT_CONFIG_CONTENT`, rendered by Terraform:
+
+```yaml
+extensions:
+  sigv4auth: { region: ap-south-1, service: aps }
+receivers:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: ro
+          scrape_interval: 30s
+          metrics_path: /actuator/prometheus
+          static_configs: [{ targets: ["localhost:8081"] }]
+  otlp:
+    protocols: { grpc: { endpoint: "localhost:4317" } }
+processors:
+  batch: {}
+exporters:
+  prometheusremotewrite:
+    endpoint: "<remote write URL of the AMP workspace ro-<env>>"
+    auth: { authenticator: sigv4auth }
+  awsxray: { region: ap-south-1 }
+service:
+  extensions: [sigv4auth]
+  pipelines:
+    metrics: { receivers: [prometheus], processors: [batch], exporters: [prometheusremotewrite] }
+    traces: { receivers: [otlp], processors: [batch], exporters: [awsxray] }
+```
+
+The task role allows `aps:RemoteWrite` on that workspace and `xray:PutTraceSegments`, `xray:PutTelemetryRecords`. The migration task and `ro-web` have no sidecar.
+
+**Traces (NFR-014).** The agent (`-javaagent` in `JAVA_TOOL_OPTIONS`) is configured only by the `OTEL_*` variables of 4.8.2: service name `ro-api` or `ro-worker`, OTLP gRPC to `http://localhost:4317`, propagators `tracecontext,baggage`, metric and log export off (metrics go through Micrometer, logs through stdout), sampler `parentbased_traceidratio` with ratio `1.0` in dev and staging and `0.1` in prod. In `local` and in the migration task the agent is loaded but `OTEL_SDK_DISABLED=true`, because there is no collector. X-Ray accepts W3C trace ids, so the agent's ids are used as they are. The request id filter (CR-010) sets the attribute `requestId` on the server span; the worker opens one span per analysis (`@WithSpan("analysis.process")`) with the `requestId` from the stream message; scheduled jobs open one span per run. Span attributes follow CR-009: no SQL parameter values (the agent's default statement sanitising stays on), no request or response bodies, no headers.
+
+**Web server logs.** CMP-023 logs with pino to stdout, one JSON object per line, with the CR-008 field names: `timestamp` (ISO-8601 UTC), `level` (upper-case label), `logger` `ro-web`, `requestId` `-` and `userId` `-` (the web server never reads the token or calls the API, so it has neither), `event`, `message`; level `debug` in `local`, `info` otherwise (4.7). It writes three events only: `web.started` (INFO, with `APP_ENV`), `web.config_invalid` (FATAL, CR-036) and `web.request_error` (ERROR, from `onRequestError` in `src/instrumentation.ts`, with the path without its query string and the error digest). It writes no line per request: CloudFront and the load balancer already see every request, and the web server has no business events. CR-009 applies: no cookie, no query string, no page content.
+
+**Routing.** Every alert has a severity, `critical` or `warning`, and goes to the SNS topic of that severity in its environment:
+
+| Topic | dev, staging | prod |
+|---|---|---|
+| `ro-<env>-alerts-critical` | AWS Chatbot → Slack `#ro-alerts-nonprod` | AWS Chatbot → Slack `#ro-alerts-prod`, and PagerDuty service "Resume Optimizer" (HTTPS subscription to its SNS integration URL, `pagerduty_endpoint`) |
+| `ro-<env>-alerts-warning` | AWS Chatbot → Slack `#ro-alerts-nonprod` | AWS Chatbot → Slack `#ro-alerts-prod` |
+
+Dev and staging never page. Prometheus rules live in the AMP rule groups namespace `ro-alerts` (file `observability/alert-rules.yml` in the infra repository); CloudWatch alarms are Terraform resources with alarm and OK actions on the topic of their severity, so Slack also shows when an alarm clears. The AMP alert manager routes by the `severity` label and formats each message as an AWS Chatbot custom notification, so Slack shows it as text (`observability/alertmanager.yml`):
+
+```yaml
+template_files:
+  chatbot.tmpl: |
+    {{ define "chatbot" }}{"version":"1.0","source":"custom","content":{"textType":"client-markdown","title":"{{ .Status | toUpper }}: {{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})","description":"{{ range .Alerts }}{{ .Annotations.summary }}\n{{ end }}"}}{{ end }}
+alertmanager_config: |
+  templates: ["chatbot.tmpl"]
+  route:
+    receiver: warning
+    group_by: [alertname]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    routes:
+      - matchers: ['severity="critical"']
+        receiver: critical
+  receivers:
+    - name: critical
+      sns_configs:
+        - topic_arn: "arn:aws:sns:ap-south-1:<account id>:ro-<env>-alerts-critical"
+          sigv4: { region: ap-south-1 }
+          message: '{{ template "chatbot" . }}'
+    - name: warning
+      sns_configs:
+        - topic_arn: "arn:aws:sns:ap-south-1:<account id>:ro-<env>-alerts-warning"
+          sigv4: { region: ap-south-1 }
+          message: '{{ template "chatbot" . }}'
+```
+
+The topic policies allow `aps.amazonaws.com` and `cloudwatch.amazonaws.com` to publish. Each rule's `summary` annotation names the alert, the environment and the current value, never a user id (CR-009).
+
+**Alert table.** The only place where alert thresholds are written (NFR-013). AMP workspaces are per environment, so the PromQL needs no `env` filter. Both rate alerts also require a minimum number of events in the window, so one failure out of one does not alert.
+
+| Alert | Condition (PromQL in AMP, or CloudWatch alarm) | For | Severity | Requirement |
+|---|---|---|---|---|
+| `ApiUnavailable` | CloudWatch: `SuccessPercent` of canary `ro-<env>-uptime` < 100 in 3 consecutive 1-minute periods; missing data counts as breaching | 3 min | critical | NFR-005 |
+| `WebUnavailable` | CloudWatch: `HealthyHostCount` (Minimum) of target group `ro-web` < 1 in 3 consecutive 1-minute periods | 3 min | critical | CR-029, 4.8.3 |
+| `Api5xxRateHigh` | `sum(rate(http_server_requests_seconds_count{service="ro-api",status=~"5..",uri!~"/actuator.*"}[5m])) / sum(rate(http_server_requests_seconds_count{service="ro-api",uri!~"/actuator.*"}[5m])) > 0.01` | 5m | critical | NFR-013 |
+| `AiFailureRateHigh` | `sum(increase(analyses_finished_total{status="FAILED"}[15m])) / sum(increase(analyses_finished_total[15m])) > 0.10 and sum(increase(analyses_finished_total[15m])) >= 10` | 0m (the 15-minute window is in the query) | critical | NFR-013, NFR-015 (a reached spend limit shows here) |
+| `ReadLatencyHigh` | `histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{service="ro-api",method="GET",uri=~"/api/v1/.*",uri!="/api/v1/analyses/{analysisId}/report"}[5m]))) > 0.3` | 10m | warning | NFR-001, NFR-013 |
+| `AnalysisBacklogHigh` | CloudWatch: `AnalysisBacklog` (Maximum) > 100 in 5 consecutive 1-minute periods | 5 min | warning | NFR-013 (queue depth), NFR-006 |
+| `RetentionViolation` | `sum(increase(retention_violations_total[1h])) > 0` | 0m | warning | NFR-011 |
+| `StorageDeletionOverdue` | CloudWatch: `StorageDeletionOverdue` (Maximum) > 0 in 5 consecutive 1-minute periods | 5 min | warning | NFR-012 |
+| `RazorpayCancellationOverdue` | CloudWatch: `CancellationOverdue` (Maximum) > 0 in 5 consecutive 1-minute periods | 5 min | critical (a user who erased their data could still be charged) | NFR-012, FR-019 criterion 7 |
+| `WebhookSignatureFailures` | `sum(increase(razorpay_webhook_signature_failures_total[15m])) > 5` | 0m | warning | NFR-013, CR-033 |
+| `BillingReconciliationFix` | `sum(increase(billing_reconciliation_fixes_total[1h])) > 0` (an abandoned checkout is not counted, FR-029 criterion 8) | 0m | warning | NFR-013, NFR-021 |
+| `RazorpayCallFailureRateHigh` | `sum(increase(razorpay_calls_total{outcome!="success"}[15m])) / sum(increase(razorpay_calls_total[15m])) > 0.20 and sum(increase(razorpay_calls_total[15m])) >= 5` | 0m | warning | NFR-013 |
+| `JwksFetchFailing` | `sum(increase(jwks_fetch_failures_total[15m])) > 0` | 15m | warning (cached keys stay valid for 24 h, 4.4) | CR-002, 4.4 |
+| `RateLimiterUnavailable` | `sum(increase(ratelimit_unavailable_total[5m])) > 0` | 5m | warning (requests are allowed meanwhile, 4.4) | CR-020, 4.4 |
+| `ProHeavyUse` | `sum(increase(pro_heavy_use_total[1h])) > 0` | 0m | warning (a signal only, nothing is blocked) | FR-007 criterion 8, NFR-015 |
+
+**Uptime canary (NFR-005).** `ro-<env>-uptime`, a CloudWatch Synthetics canary on the Node.js runtime (version pinned in Terraform), schedule `rate(1 minute)`, run outside the VPC so it takes the users' path. Its script sends `GET https://ro-api.<domain>/api/v1/job-roles` with no cookie and a 10 s timeout, and passes only on HTTP 401 with `error.code` `UNAUTHENTICATED` in the body. That one call proves DNS, TLS, the public load balancer, a running `ro-api` task and its filter chain; the management port is not public, so a liveness URL could not be checked from outside. Availability for NFR-005 = the average `SuccessPercent` over the calendar month, shown on the dashboard. Three failed runs in a row raise `ApiUnavailable`.
+
+**Dashboard.** The Grafana workspace `surfingbear-observability` (A-20) has, per environment, a Prometheus data source on AMP `ro-<env>` (SigV4, assuming the role `ro-grafana-read` that each environment's Terraform creates with read access to that workspace, CloudWatch and X-Ray), a CloudWatch and an X-Ray data source. One dashboard, `Resume Optimizer`, with a variable `env` that picks the data sources, is stored as `observability/dashboards/resume-optimizer.json` and applied by `envs/tools` with the Grafana Terraform provider. Panels: request rate and 5xx rate by `error.code`, read p95 (NFR-001), analysis duration p95 (NFR-003), report render p95 (NFR-004), `AnalysisBacklog` and worker task count, AI failures by reason, AI tokens per day, Razorpay calls by outcome, webhook events by type and outcome, `billing_activation_seconds` p95 by path (NFR-020), canary success rate for the month (NFR-005).
 
 ---
 
@@ -1981,7 +2098,7 @@ Steps 1–3 remove a value from a CHECK, which is the "contract" half of CR-030.
 | `/api/v1/**` | `https://ro-api.surfingbear.com` (A-10) | CMP-001 Web UI, from the browser | `sb_access` cookie only (CR-001); a `Authorization` header on these paths is ignored |
 | `/internal/v1/**` | *(v0.7)* `https://ro-internal.surfingbear.com`: the module's internal load balancer, in private subnets of the environment's VPC, with a DNS record only in that VPC's private zone (4.8.1); not reachable from the internet. The public load balancer answers `/internal/*` on `ro-api.<domain>` with an empty 404 | SurfingBear platform | `Authorization: Bearer <token>` only, `roles` contains `PLATFORM_SERVICE` (CR-004) |
 | `/webhooks/v1/razorpay` *(v0.4)* | same host, public listener (Razorpay calls from the internet) | Razorpay | `X-Razorpay-Signature` only (CR-033); cookies and `Authorization` are ignored |
-| `/actuator/health/liveness`, `/actuator/health/readiness` | management port 8081, not routed by the public load balancer | ECS and the load balancer | none |
+| `/actuator/health/liveness`, `/actuator/health/readiness`, *(v0.7)* `/actuator/prometheus` | management port 8081, not routed by the public load balancer | ECS and the load balancer (health); the ADOT sidecar in the same task on `localhost` (metrics, 4.8.7) | none |
 | `/local/login`, `/local/jwks.json` *(v0.7)* | `http://localhost:8080`, **`local` only** (CR-034); in every other environment these paths do not exist | the developer's browser and the local API itself (JWKS) | none |
 
 The module has no other HTTP endpoints. *(v0.7)* The two `/local/**` paths are a local development aid with no API ID: they are not part of the contract and no deployed client may call them. A path that matches no route returns 404 `NOT_FOUND`; a known path with the wrong method returns 405 `METHOD_NOT_ALLOWED`.
@@ -2885,17 +3002,17 @@ Every FR and NFR, with the components (4.2), tables (5.2) and endpoints (6.2) th
 | NFR-002 Upload latency | CMP-005, CMP-006, CMP-015 | TBL-004, TBL-005 | API-004 | k6 with the fixed test-file set |
 | NFR-003 Analysis time | CMP-009, CMP-010, CMP-011, CMP-012 | TBL-006 | API-007, API-009 | `analysis_duration_seconds` histogram |
 | NFR-004 Report time | CMP-013 | TBL-006 – TBL-009 | API-011 | k6; `report_render_seconds` |
-| NFR-005 Availability | CMP-002 (all API components) | all | all `/api/v1/**` | Uptime check on liveness; restore drill |
+| NFR-005 Availability | CMP-002 (all API components) | all | all `/api/v1/**` | *(v0.7)* Canary `ro-<env>-uptime` success rate per calendar month and alert `ApiUnavailable` (4.8.7); restore drill |
 | NFR-006 Scalability | CMP-009, CMP-010 | TBL-006 | API-007 | Load test with `FakeAiClient`, 2 s latency, 10 worker tasks |
 | NFR-007 Encryption | CMP-015, infrastructure (4.4) | all | all | AWS Config rules |
 | NFR-008 Vulnerabilities | all | — | all | ZAP baseline; dependency scan in CI (CR-022) |
 | NFR-009 AI data minimised | CMP-011 | TBL-005 (stored text is not redacted; only the sent copy is) | none | Redactor test set of 4.6.1 (50 samples); prompt-builder test |
 | NFR-010 Data location | CMP-015, infrastructure (4.4) | all | — | Infrastructure-as-code review (*v0.7:* Terraform plan, CR-039) |
-| NFR-011 Retention enforced | CMP-016 | TBL-004, TBL-005, TBL-006, TBL-016 | none | Retention audit job (06:00 IST), `retention_violations_total` alert |
-| NFR-012 Erasure completes | CMP-014, CMP-015, CMP-019, CMP-021 | TBL-011, TBL-012, TBL-019 | API-003, API-013, API-014 | `ErasureIT` timing (`db_completed_at - requested_at` < 5 s); alert on `storage_deletion` or `subscription_cancellation` rows older than 24 h |
-| NFR-013 Metrics and alerts | CMP-002, CMP-010, CMP-011, CMP-009, CMP-019, CMP-020, CMP-021 | — | all | Synthetic failure on staging fires each alert, including a webhook with a wrong signature and a forced reconciliation fix |
-| NFR-014 Tracing | CMP-002, CMP-009, CMP-010, CMP-011, CMP-015 | — | all | Trace sample review on staging |
-| NFR-015 AI cost | CMP-011, CMP-007 | TBL-006 (`input_tokens`, `output_tokens`), TBL-010 | none | `ai_tokens_total`; provider dashboard; `pro_heavy_use_total` |
+| NFR-011 Retention enforced | CMP-016 | TBL-004, TBL-005, TBL-006, TBL-016 | none | Retention audit job (06:00 IST), `retention_violations_total` alert (*v0.7:* `RetentionViolation`, 4.8.7) |
+| NFR-012 Erasure completes | CMP-014, CMP-015, CMP-019, CMP-021, CMP-012 (*v0.7*) | TBL-011, TBL-012, TBL-019 | API-003, API-013, API-014 | `ErasureIT` timing (`db_completed_at - requested_at` < 5 s); alert on `storage_deletion` or `subscription_cancellation` rows older than 24 h (*v0.7:* `StorageDeletionOverdue`, `RazorpayCancellationOverdue`, 4.8.7) |
+| NFR-013 Metrics and alerts | CMP-002, CMP-010, CMP-011, CMP-009, CMP-019, CMP-020, CMP-021; *(v0.7)* CMP-012 (CloudWatch metrics), CMP-016 | — | all | Synthetic failure on staging fires each alert of the 4.8.7 table, including a webhook with a wrong signature and a forced reconciliation fix, and each reaches `#ro-alerts-nonprod` (CR-040) |
+| NFR-014 Tracing | CMP-002, CMP-009, CMP-010, CMP-011, CMP-015 | — | all | Trace sample review on staging (*v0.7:* in X-Ray, found by `requestId`, 4.8.7) |
+| NFR-015 AI cost | CMP-011, CMP-007 | TBL-006 (`input_tokens`, `output_tokens`), TBL-010 | none | `ai_tokens_total`; provider dashboard; `pro_heavy_use_total` (*v0.7:* alert `ProHeavyUse`); Anthropic workspace spend limit (4.8.5) |
 | NFR-016 Accessibility | CMP-001, CMP-023 | — | — | axe in Playwright, 0 serious / critical |
 | NFR-017 Test coverage | all backend components | — | — | JaCoCo gate in CI |
 | NFR-018 Browsers and screens | CMP-001, CMP-023 | — | — | Playwright on Chromium, Firefox, WebKit, 360 px viewport (*v0.7:* WebKit on staging, 4.8.4) |
