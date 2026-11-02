@@ -221,7 +221,8 @@ Backend (one Spring Boot application, two run modes: `api` and `worker`, selecte
 resume-optimizer-api/
 ├── pom.xml
 ├── Dockerfile
-├── docker-compose.yml                 # local: postgres, redis, localstack
+├── docker-compose.yml                 # local: postgres, redis, localstack; (v0.7) migrate, api, worker under profile app (4.8.2)
+├── .env.example                       # (v0.7) local secret values, copied to the git-ignored .env (4.8.2)
 ├── config/local-jwt/                  # (v0.7) git-ignored; local key pair created on first local start (CR-034, 4.8.1)
 ├── scripts/                           # dev-token.sh, send-test-webhook.sh (4.4, 4.8.1)
 ├── src/main/java/com/surfingbear/resumeoptimizer/
@@ -1196,7 +1197,7 @@ Sent as `output_config.format.schema`. Structured outputs do not support numeric
 
 ### 4.7 Configuration
 
-Every value below is a typed `@ConfigurationProperties` field with this default, overridable by the environment variable shown. Section 3 values are referenced from here, never repeated as literals in code.
+Every value below is a typed `@ConfigurationProperties` field with this default, overridable by the environment variable shown. Section 3 values are referenced from here, never repeated as literals in code. *(v0.7)* This section holds the defaults; the value of every variable in each environment, and where it comes from, is in 4.8.2.
 
 | Property | Env variable | Default | Used by |
 |---|---|---|---|
@@ -1231,6 +1232,7 @@ Every value below is a typed `@ConfigurationProperties` field with this default,
 | `app.ai.timeout` / `retry-delay` | — | `45s` / `2s` | FR-008 |
 | `app.worker.concurrency` | `WORKER_CONCURRENCY` | `5` | CMP-010 (10 tasks × 5 = NFR-006's 50) |
 | `app.sweeper.running-timeout` / `queued-timeout` | — | `120s` / `5m` | FR-008 |
+| `app.storage.endpoint` *(v0.7)* | `S3_ENDPOINT` | empty (the AWS endpoint of the region) | CMP-015; when set (LocalStack in `local`), the S3 client uses it with path-style access |
 | `app.metrics.cloudwatch-enabled` *(v0.7)* | `CLOUDWATCH_METRICS_ENABLED` | `true` (`false` in local) | 4.3.4: the sweeper's CloudWatch metrics (4.8.6, 4.8.7) |
 | `app.cors.allowed-origins` *(v0.7)* | `CORS_ALLOWED_ORIGINS` | none (required) | CR-017; comma-separated list of exact origins, values per environment in 4.8.1 |
 | `app.local-login.key-dir` *(v0.7)* | `LOCAL_JWT_KEY_DIR` | `config/local-jwt` | CR-034; read only in `local` |
@@ -1239,6 +1241,16 @@ Every value below is a typed `@ConfigurationProperties` field with this default,
 | — | `PLATFORM_JWKS_URL`, `PLATFORM_ISSUER` | none (required) | CR-002; *(v0.7)* values per environment in 4.8.1 (A-18), in `local` the API's own `/local/**` endpoints |
 | — | `DB_OWNER_USERNAME`, `DB_OWNER_PASSWORD` *(v0.7)* | none (required in `migrate` mode only; not read in `api` and `worker`) | 4.8.4 migration task: the owner role `ro_owner` that runs Flyway |
 | — | `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `REDIS_URL`, `REDIS_PASSWORD`, `S3_BUCKET`, `ANTHROPIC_API_KEY`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` (*v0.4*) | none (required; secrets from Secrets Manager) | 4.4 |
+
+*(v0.7)* Variables read by the JVM, the OpenTelemetry agent, the AWS SDK and the sidecar, not by Spring (values per environment in 4.8.2):
+
+| Env variable | Default | Used by |
+|---|---|---|
+| `JAVA_TOOL_OPTIONS` | none | JVM options: `-XX:MaxRAMPercentage=75` and the `-javaagent` of the OpenTelemetry agent (4.8.6, 4.8.7) |
+| `OTEL_SDK_DISABLED`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`, `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER`, `OTEL_PROPAGATORS` | the agent's defaults | Traces (NFR-014, 4.8.7) |
+| `AWS_REGION` | none | AWS SDK (S3, CloudWatch) |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | none | Local only (LocalStack); deployed tasks use the IAM task role (4.4) |
+| `AOT_CONFIG_CONTENT` | none | Configuration of the `adot` sidecar (4.8.7) |
 
 *(v0.7)* Web server (`resume-optimizer-web`, CMP-023) variables. They are read at request time by the root layout and the middleware, never at build time (CR-036):
 
@@ -1294,6 +1306,89 @@ How the module is hosted, configured, deployed and watched in each environment. 
 - The key pair is `<app.local-login.key-dir>/private.pem` (PKCS#8) and `public.pem`. The directory is git-ignored. When the API starts in `local` and `private.pem` is missing, it creates an RSA 2048 pair and writes both files. Reason: gitleaks blocks a committed private key (CR-015), and a key made on each machine means a local token is worth nothing anywhere else.
 - `scripts/dev-token.sh [--sub <id>] [--roles <comma-separated>]` prints a token signed with the same key, issuer and audience (defaults `--sub local-user-1 --roles USER`), for curl: `curl -b "sb_access=$(scripts/dev-token.sh)" http://localhost:8080/api/v1/usage`, or for the internal erasure call of FR-021: `curl -X POST -H "Authorization: Bearer $(scripts/dev-token.sh --sub platform --roles PLATFORM_SERVICE)" -H 'Content-Type: application/json' -d '{"userId":"local-user-1"}' http://localhost:8080/internal/v1/erasure-requests`. Integration tests do not use this key: each test creates its own RSA key and serves its JWKS from WireMock.
 
+#### 4.8.2 Runtime configuration per environment
+
+One row per environment variable of every service: `api` = `ro-api`, `wrk` = `ro-worker`, `mig` = the migration task `ro-migrate`, `web` = `ro-web`, `adot` = the sidecar of `api` and `wrk`. Defaults are in 4.7; "default" below means the variable is not set and the 4.7 default applies. A variable is required only in the services named in its row: the application validates required properties per `APP_MODE` (the `migrate` list is in 4.8.4), so for example `ro-api` does not need `ANTHROPIC_API_KEY`.
+
+**Where values come from.** Local: non-secret values are in `docker-compose.yml` (API repository) or the web repository's `.env.example`, and secret values in a git-ignored `.env` (API) or `.env.local` (web) created by copying the committed `.env.example`; the local values below are the ones in the example files, because none of them protects anything outside a laptop. Dev, staging, prod: "TD" = a plain environment variable of the task definition, set by Terraform (4.8.5), with values from `envs/<env>/terraform.tfvars` or from Terraform outputs (RDS and Redis endpoints); "SM `<name>:<key>`" = injected by ECS at task start from that Secrets Manager secret and JSON key (`valueFrom` = `<secret ARN>:<key>::`), which fails the task start if it is missing (4.4).
+
+The local column is for the API run on the host (`./mvnw spring-boot:run`, with `docker compose up postgres redis localstack`) and the web run with `npm run dev`. The compose services `migrate`, `api` and `worker` (and the Playwright stack of 4.8.4) use the same values with the container host names `postgres`, `redis` and `localstack` instead of `localhost` in `DB_URL`, `REDIS_URL` and `S3_ENDPOINT`, and `LOCAL_JWT_KEY_DIR=/app/config/local-jwt` (the folder mounted from the host). Browser-facing URLs stay `localhost`, because the browser runs on the host.
+
+| Variable | Services | local | dev | staging | prod | Source (dev, staging, prod) |
+|---|---|---|---|---|---|---|
+| `APP_MODE` | api, wrk, mig | `api` (`worker`, `migrate` in those compose services) | `api` / `worker` / `migrate` by service | as dev | as dev | TD |
+| `APP_ENV` | api, wrk, mig, web | `local` | `dev` | `staging` | `prod` | TD |
+| `CORS_ALLOWED_ORIGINS` | api | `http://localhost:3000` | `https://www.surfingbear-dev.com` | `https://www.surfingbear-staging.com` | `https://www.surfingbear.com` | TD |
+| `PLATFORM_ISSUER` | api | `http://localhost:8080/local` | `https://auth.surfingbear-dev.com` | `https://auth.surfingbear-staging.com` | `https://auth.surfingbear.com` | TD |
+| `PLATFORM_JWKS_URL` | api | `http://localhost:8080/local/jwks.json` | `https://auth.surfingbear-dev.com/.well-known/jwks.json` | `https://auth.surfingbear-staging.com/.well-known/jwks.json` | `https://auth.surfingbear.com/.well-known/jwks.json` | TD |
+| `LOCAL_JWT_KEY_DIR` | api | default (`config/local-jwt`) | not set (not read) | not set | not set | — |
+| `LOCAL_LOGIN_REDIRECT_ORIGIN` | api | default (`http://localhost:3000`) | not set (not read) | not set | not set | — |
+| `DB_URL` | api, wrk, mig | `jdbc:postgresql://localhost:5432/resume_optimizer` | `jdbc:postgresql://<RDS endpoint>:5432/resume_optimizer?sslmode=require` | as dev, own endpoint | as dev, own endpoint | TD (endpoint from the `rds` module output) |
+| `DB_USERNAME` | api, wrk, mig | `ro_app` | `ro_app` | `ro_app` | `ro_app` | SM `ro/<env>/db-app:username` |
+| `DB_PASSWORD` | api, wrk, mig | `ro_app_local` (`.env`) | secret | secret | secret | SM `ro/<env>/db-app:password` |
+| `DB_OWNER_USERNAME` | mig | `ro_owner` | `ro_owner` | `ro_owner` | `ro_owner` | SM `ro/<env>/db-owner:username` |
+| `DB_OWNER_PASSWORD` | mig | `ro_owner_local` (`.env`; also the `POSTGRES_PASSWORD` of the compose `postgres` service) | secret | secret | secret | SM `ro/<env>/db-owner:password` |
+| `REDIS_URL` | api, wrk | `redis://localhost:6379` | `rediss://<primary endpoint>:6379` | as dev, own endpoint | as dev, own endpoint | TD (endpoint from the `redis` module output) |
+| `REDIS_PASSWORD` | api, wrk | `ro_redis_local` (`.env`; also `--requirepass` of the compose `redis` service) | secret | secret | secret | SM `ro/<env>/redis:password` |
+| `S3_BUCKET` | api, wrk | `sb-ro-local` (created by the LocalStack init script) | `sb-ro-dev` | `sb-ro-staging` | `sb-ro-prod` | TD |
+| `S3_ENDPOINT` | api, wrk | `http://localhost:4566` | not set (AWS) | not set | not set | — |
+| `AWS_REGION` | api, wrk | `ap-south-1` | `ap-south-1` | `ap-south-1` | `ap-south-1` | TD |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | api, wrk | `test` / `test` (`.env`; LocalStack accepts any value) | not set (IAM task role) | not set | not set | — |
+| `AI_PROVIDER` | wrk | `fake` | default (`anthropic`) | default | default | — |
+| `ANTHROPIC_API_KEY` | wrk | `local-unused` (`.env`; required, never read by `FakeAiClient`) | secret of workspace `resume-optimizer-dev` | secret of `resume-optimizer-staging` | secret of `resume-optimizer-prod` | SM `ro/<env>/anthropic:api_key` |
+| `ANTHROPIC_MODEL`, `ANTHROPIC_EFFORT` | wrk | default | default | default | default | — |
+| `WORKER_CONCURRENCY` | wrk | default (5) | default | default | default | — |
+| `CLOUDWATCH_METRICS_ENABLED` | wrk | `false` | default (`true`) | default | default | — |
+| `BILLING_PROVIDER` | api, wrk | `fake` | default (`razorpay`) | default | default | — |
+| `RAZORPAY_BASE_URL` | api, wrk | default (not called by the fake) | default | default | default | — |
+| `RAZORPAY_KEY_ID` | api, wrk | `rzp_test_local0000000` | `rzp_test_…` of the dev Test Mode account | `rzp_test_…` of the staging Test Mode account | `rzp_live_…` (CR-027) | TD (tfvars `razorpay_key_id`) |
+| `RAZORPAY_PLAN_ID` | api, wrk | `plan_local000000` (any id but `plan_FAKEFAIL000000` works with the fake, 4.4) | the dev plan id | the staging plan id | the prod plan id | TD (tfvars `razorpay_plan_id`) |
+| `RAZORPAY_KEY_SECRET` | api, wrk | `local_key_secret` (`.env`) | secret | secret | secret | SM `ro/<env>/razorpay:key_secret` |
+| `RAZORPAY_WEBHOOK_SECRET` | api | `local_webhook_secret` (`.env`) | secret | secret | secret | SM `ro/<env>/razorpay:webhook_secret` |
+| `UPLOAD_MAX_BYTES` | api | default | default | default | default | — (a change is a spec change, 7.3) |
+| `UPLOAD_MAX_PDF_PAGES` | api | default | default | default | default | — (a change is a spec change, 7.3) |
+| `UPLOAD_HOURLY_LIMIT` | api | default | default | default | default | — (a change is a spec change, 7.3) |
+| `API_PER_MINUTE_LIMIT` | api | default | default | default | default | — (a change is a spec change, 7.3) |
+| `TEXT_MIN_CHARS` | api | default | default | default | default | — (a change is a spec change, 7.3) |
+| `TEXT_MAX_CHARS` | api | default | default | default | default | — (a change is a spec change, 7.3) |
+| `QUOTA_FREE` | api, wrk | default | default | default | default | — (a change is a spec change, 7.3) |
+| `FREE_VISIBLE_SUGGESTIONS` | api | default | default | default | default | — (a change is a spec change, 7.3) |
+| `MAX_IN_PROGRESS` | api | default | default | default | default | — (a change is a spec change, 7.3) |
+| `RETENTION_RESUME_DAYS` | api, wrk | default | default | default | default | — (a change is a spec change, 7.3) |
+| `RETENTION_ANALYSIS_DAYS` | api, wrk | default | default | default | default | — (a change is a spec change, 7.3) |
+| `PRIVACY_NOTICE_VERSION` | api | default | default | default | default | — (a change is a spec change, 7.3) |
+| `QUOTA_PREMIUM` | — | never set (deprecated in v0.4, ignored) | never set | never set | never set | — |
+| `JAVA_TOOL_OPTIONS` | api, wrk, mig | not set on the host; in compose `-XX:MaxRAMPercentage=75 -javaagent:/opt/otel/opentelemetry-javaagent.jar` | `-XX:MaxRAMPercentage=75 -javaagent:/opt/otel/opentelemetry-javaagent.jar` | as dev | as dev | TD |
+| `OTEL_SDK_DISABLED` | api, wrk, mig | `true` | `false` in api and wrk, `true` in mig | as dev | as dev | TD |
+| `OTEL_SERVICE_NAME` | api, wrk | not set | `ro-api` / `ro-worker` | as dev | as dev | TD |
+| `OTEL_RESOURCE_ATTRIBUTES` | api, wrk | not set | `deployment.environment=dev` | `deployment.environment=staging` | `deployment.environment=prod` | TD |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | api, wrk | not set | `http://localhost:4317` | as dev | as dev | TD |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | api, wrk | not set | `grpc` | `grpc` | `grpc` | TD |
+| `OTEL_TRACES_SAMPLER` | api, wrk | not set | `parentbased_traceidratio` | as dev | as dev | TD |
+| `OTEL_TRACES_SAMPLER_ARG` | api, wrk | not set | `1.0` | `1.0` | `0.1` | TD |
+| `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER` | api, wrk | not set | `none` | `none` | `none` | TD |
+| `OTEL_PROPAGATORS` | api, wrk | not set | `tracecontext,baggage` | as dev | as dev | TD |
+| `AOT_CONFIG_CONTENT` | adot | no sidecar | the configuration of 4.8.7 with the `ro-dev` workspace URL | with `ro-staging` | with `ro-prod` | TD |
+| `RO_API_BASE_URL` | web | `http://localhost:8080` | `https://ro-api.surfingbear-dev.com` | `https://ro-api.surfingbear-staging.com` | `https://ro-api.surfingbear.com` | TD |
+| `PLATFORM_LOGIN_URL` | web | `http://localhost:8080/local/login` | `https://www.surfingbear-dev.com/login` | `https://www.surfingbear-staging.com/login` | `https://www.surfingbear.com/login` | TD |
+| `WEB_BILLING_FAKE` | web | `true` | not set (`false`) | not set | not set | — |
+| `WEB_FAKE_RAZORPAY_KEY_SECRET` | web | `local_key_secret` | not set | not set | not set | — |
+| `PORT`, `HOSTNAME`, `NODE_ENV` | web | `next dev` defaults (port 3000) | `3000`, `0.0.0.0`, `production` from the `Dockerfile` | as dev | as dev | image |
+
+**Secrets** (created empty by Terraform, values set by ops, 4.8.5):
+
+| Secret | JSON keys | Read by |
+|---|---|---|
+| `ro/<env>/db-app` | `username` (`ro_app`), `password` | `ro-api`, `ro-worker`, `ro-migrate` |
+| `ro/<env>/db-owner` | `username` (`ro_owner`), `password` | `ro-migrate` only; Terraform (RDS master user) |
+| `ro/<env>/redis` | `password` (16–128 printable characters without `/`, `"` or `@`, the ElastiCache AUTH rule) | `ro-api`, `ro-worker`; Terraform (AUTH token) |
+| `ro/<env>/anthropic` | `api_key` | `ro-worker` |
+| `ro/<env>/razorpay` | `key_secret`, `webhook_secret` | `ro-api` (both), `ro-worker` (`key_secret`) |
+| `ro/<env>/web-origin-verify` | `current`, `next` (4.8.3) | Terraform only (load balancer rule); never a container |
+
+Each task execution role may call `secretsmanager:GetSecretValue` only on the secrets of its own row, and `kms:Decrypt` with `alias/ro-<env>`.
+
+**Local stack.** `docker-compose.yml` (API repository): `postgres` (`postgres:16`, `POSTGRES_USER=ro_owner`, `POSTGRES_PASSWORD=${DB_OWNER_PASSWORD}`, `POSTGRES_DB=resume_optimizer`, port 5432, the same shape as RDS), `redis` (`redis:7`, `redis-server --requirepass ${REDIS_PASSWORD}`, port 6379), `localstack` (pinned release tag, `SERVICES=s3`, port 4566, init script `localstack/init/ready.d/10-bucket.sh` that runs `awslocal s3 mb s3://sb-ro-local`); and under the compose profile `app`: `migrate` (exits after the migration), `api` (ports 8080 and 8081, starts after `migrate` completed successfully) and `worker`, all built from the `Dockerfile`. Local passwords are not secrets: they protect containers bound to `localhost`.
 #### 4.8.3 Frontend hosting and load balancers
 
 **Build.** `next.config.ts` sets `output: 'standalone'`, `basePath: '/resume-optimizer'` and `poweredByHeader: false`. The middleware declares `export const config = { runtime: 'nodejs' }`. The `Dockerfile` has three stages on `node:22-alpine` (Node 22 LTS): (1) `npm ci`; (2) `next build`, with no environment-specific variable set (CR-036); (3) the runtime stage copies `.next/standalone/` to the working directory, `.next/static/` to `.next/static/` and `public/` to `public/` (the standalone output leaves those two out), sets `NODE_ENV=production`, `PORT=3000`, `HOSTNAME=0.0.0.0`, runs as user `node`, `EXPOSE 3000`, `CMD ["node", "server.js"]`. One image per commit, tagged with the full git SHA (4.8.4).
