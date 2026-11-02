@@ -224,6 +224,11 @@ Retention (CR-022). All periods are in §3.4:
 | PostgreSQL | Docker `postgres:16` via `docker compose` | RDS single-AZ `db.t4g.small` | RDS single-AZ `db.t4g.medium` | RDS Multi-AZ `db.m7g.large` |
 | Redis | Docker `redis:7` | ElastiCache single node | ElastiCache single node | ElastiCache primary + 1 replica |
 | Backend tasks (ECS Fargate) | 1 process | 1 | 2 | 2 minimum, autoscale to 6 |
+| Backend task size *(v1.2)* | — | 1 vCPU / 2 GB (task level; containers `backend` and `adot-collector`, §1.8 "Infrastructure") | same | same |
+| Frontend tasks (ECS Fargate) *(v1.2)* | `next dev` process | 1 | 2 | 2 minimum, autoscale to 4 (average CPU > 60% for 3 minutes out, < 30% for 15 minutes in) |
+| Frontend task size *(v1.2)* | — | 0.5 vCPU / 1 GB (container `frontend`, Node 22, Next.js `output: "standalone"`) | same | same |
+| AWS account *(v1.2)* | none | Platform non-prod account | Platform non-prod account | Platform prod account (A-17) |
+| Alerts (§4.9) *(v1.2)* | none | none | Slack `#ro-alerts-staging`, never paged | Slack `#ro-alerts`; P1 also pages (PagerDuty) |
 | Swagger UI `/api/ro/swagger-ui.html` | on | on | off | off |
 | Log level root | `DEBUG` for `com.surfingbear` | `INFO` | `INFO` | `INFO` |
 | Data | Synthetic | Synthetic | Synthetic | Real |
@@ -289,6 +294,47 @@ Retention (CR-022). All periods are in §3.4:
 | CR-037 | Release | Deployments are rolling with zero downtime: ECS `minimumHealthyPercent=100`, `maximumPercent=200`; a task receives traffic only after `GET /actuator/health/readiness` returns 200. On shutdown the backend stops claiming analyses, finishes or releases in-flight work within `SHUTDOWN_TIMEOUT` (`server.shutdown=graceful`, `spring.lifecycle.timeout-per-shutdown-phase`); unfinished analyses are picked up again via the lease (FR-019). | Staging deploy during a load test shows no 5xx. |
 | CR-038 | Database changes | Schema changes are Flyway migrations in `backend/src/main/resources/db/migration`, applied at application start (`spring.flyway.enabled=true`; `spring.jpa.hibernate.ddl-auto=validate`). *(v1.2)* Flyway connects as `ro_migrator` (DDL owner); the application runs as `ro_app` (DML only); the database, schema and both users come from the bootstrap script of §5 "Database bootstrap and users", never from a migration. Because tasks start in parallel, Flyway's own lock on its history table makes only one of them apply a migration. A migration must keep the previous application version working (expand/contract): columns are added nullable or with a default, and a column is dropped only one release after the code stopped using it. | Code review checklist; CI boots the previous release image against the new schema in the `migration-compat` job. |
 | CR-039 | Rollback | Rollback = redeploy the previous ECS task-definition revision (`cd.yml` job `rollback`, input: target environment). It must complete within 15 minutes. Migrations are never rolled back; because of CR-038 the previous version runs on the new schema. | Rollback drill in `staging` before go-live, timed. |
+| CR-043 | Infrastructure as code *(new in v1.2)* | Every AWS resource of the Module is created and changed only by Terraform in `infra/` (table "Infrastructure" below). Nothing is created by hand in the AWS console, except: the values of the externally issued secrets (Anthropic key, Razorpay key secret and webhook secret, PagerDuty and Slack keys), which an engineer puts into the Terraform-created secret with `aws secretsmanager put-secret-value` following `docs/runbooks/secrets.md`; and the Platform-owned VPC, subnets, NAT gateways and ALB (A-17). | CI workflow `infra.yml` runs `terraform fmt -check`, `terraform validate`, `tflint` and `terraform plan` for `dev`, `staging` and `prod` on every PR that touches `infra/**`; a weekly scheduled `terraform plan -detailed-exitcode` per environment raises the P3 alert "Infrastructure drift" (§4.9) on exit code 2. |
+
+**Infrastructure (Terraform)** *(v1.2)*. Terraform `~> 1.13` with the `hashicorp/aws` provider `~> 6.0` and the `grafana/grafana` provider (for the §4.9 dashboards, alert rules and contact points); versions pinned in `infra/versions.tf` and `.terraform.lock.hcl`.
+
+```text
+infra/
+├── versions.tf
+├── modules/ro-stack/          # every per-environment resource of the table below; input variable env
+│   ├── network.tf  ecs.tf  alb.tf  rds.tf  redis.tf  iam.tf  secrets.tf  logs.tf  observability.tf
+│   ├── variables.tf  outputs.tf
+│   └── grafana/               # dashboards/*.json, alert-rules.yaml (§4.9), applied with the grafana provider
+├── adot/                      # Dockerfile (FROM the pinned ADOT collector release) + adot-config.yaml (§4.9)
+├── envs/dev/ envs/staging/ envs/prod/   # main.tf (module call + the env values of §1.7), backend.tf, providers.tf
+└── shared/                    # non-prod account only: the four ECR repositories, the GitHub OIDC provider
+```
+
+State: one S3 bucket per account, `surfingbear-ro-tfstate-<account id>` (versioning on, SSE-KMS, public access blocked, readable only by the roles `ro-terraform-<env>` and `ro-deploy-<env>`), key `ro/<env>/terraform.tfstate` (`shared/` uses `ro/shared/terraform.tfstate`), locking with an S3 lock file (`use_lockfile = true`; DynamoDB locking is deprecated in Terraform's S3 backend). The generated secrets (table below) are in the state, which is why the bucket is restricted this way.
+
+Who applies: `infra.yml` on merge to `main` applies `dev`; `staging` and `prod` apply after an approval in the GitHub environments `staging-infra` / `prod-infra` (approver: tech lead or engineering manager). GitHub Actions assumes `ro-terraform-<env>` through OIDC (`aws-actions/configure-aws-credentials`); there are no AWS access keys in GitHub. An infrastructure-only apply passes the currently deployed image digests (`terraform output -raw backend_image`, `frontend_image`), so it never changes the running version; images are changed only by `cd.yml` (CR-044).
+
+| Resource (Terraform type) | Name (`<env>` = `dev`, `staging`, `prod`) | Settings |
+|---|---|---|
+| ECR repositories (`aws_ecr_repository`, `shared/`) | `ro-backend`, `ro-frontend`, `ro-adot-collector`, `ro-db-bootstrap` | Immutable tags, scan on push, repository policy lets the prod account's execution role pull, lifecycle: keep the last 50 images. |
+| ECS cluster (`aws_ecs_cluster`) | `ro-<env>` | Fargate only. |
+| Backend task definition (`aws_ecs_task_definition`) | family `ro-backend-<env>` | `awsvpc`, 1 vCPU / 2 GB, Linux x86_64, execution role `ro-exec-<env>`, task role `ro-backend-task-<env>`. Container `backend`: image `ro-backend@<digest>`, ports 8080 (API) and 8081 (management), environment and secrets exactly as §1.7 "Configuration per environment", `stopTimeout` = `ECS_STOP_TIMEOUT`, `awslogs` to `/ro/<env>/backend`, essential. Container `adot-collector` (§4.9): image `ro-adot-collector@<digest>`, 128 CPU units, 256 MB, environment `AMP_REMOTE_WRITE_URL` and `RO_ENV`, `awslogs` to `/ro/<env>/adot`, **not** essential (a collector crash leaves a metrics gap and never stops the API). |
+| Frontend task definition | family `ro-frontend-<env>` | `awsvpc`, 0.5 vCPU / 1 GB, execution role `ro-exec-<env>`, no task role. Container `frontend`: image `ro-frontend@<digest>`, port 3000, environment of §1.7 (`RO_WEB_LOGIN_URL`, `PORT`), `stopTimeout` = `ECS_STOP_TIMEOUT`, `awslogs` to `/ro/<env>/frontend`. |
+| DB bootstrap task definition | family `ro-db-bootstrap-<env>` | Image `ro-db-bootstrap@<digest>` (`db/bootstrap/Dockerfile`: `FROM postgres:16`, copies `db/bootstrap/` and the RDS CA bundle), command `00-bootstrap.sh` against the RDS endpoint with `sslmode=verify-full`, secrets `ro/<env>/db-master`, `ro/<env>/db-migrator-password`, `ro/<env>/db-app-password`, `awslogs` to `/ro/<env>/db-bootstrap`. Started by hand with `aws ecs run-task` (§5 "Database bootstrap and users") in the backend's private subnets with security group `ro-db-bootstrap-<env>`. |
+| ECS services (`aws_ecs_service`) | `ro-backend`, `ro-frontend` in cluster `ro-<env>` | Task counts of §1.7; private subnets, no public IP; `deployment_minimum_healthy_percent = 100`, `deployment_maximum_percent = 200` (CR-037); `deployment_circuit_breaker { enable = true, rollback = true }`; `health_check_grace_period_seconds` = `HEALTH_CHECK_GRACE` of the service; `wait_for_steady_state = true`; `ro-frontend` has `depends_on = [aws_ecs_service.backend]` (deploy order, CR-044); `lifecycle { ignore_changes = [desired_count] }` because autoscaling owns the count. |
+| Autoscaling (`aws_appautoscaling_target`, `aws_appautoscaling_policy`, `aws_cloudwatch_metric_alarm`) | `ro-backend-<env>`, `ro-frontend-<env>` | Step scaling on the service's average `CPUUtilization`: +1 task when > 60% for 3 consecutive 1-minute periods, −1 task when < 30% for 15 periods, between the minimum and maximum of §1.7 (NFR-006). In `dev` and `staging` minimum = maximum. |
+| Target groups (`aws_lb_target_group`) | `ro-be-<env>`, `ro-fe-<env>` | Target type `ip`, protocol HTTP. `ro-be`: port 8080, health check `GET /actuator/health/readiness` on port **8081** (§6.1 management endpoints); `ro-fe`: port 3000, health check `GET /resume-optimizer/healthz` on the traffic port (§4.7). Both: matcher `200` and the timings of `ALB_HEALTH_CHECK`; `deregistration_delay` = `ALB_DEREGISTRATION_DELAY`. |
+| Listener rules (`aws_lb_listener_rule`) | on the Platform's HTTPS listener (A-17) | Host header = the environment host of §1.7 **and** path `/api/ro/*` → `ro-be-<env>`; same host and path `/resume-optimizer` or `/resume-optimizer/*` → `ro-fe-<env>`; the two priorities from the Platform team. |
+| Security groups (`aws_security_group`) | `ro-be-<env>`, `ro-fe-<env>`, `ro-db-<env>`, `ro-redis-<env>`, `ro-db-bootstrap-<env>` | Inbound: `ro-be` TCP 8080 and 8081 from the ALB security group; `ro-fe` TCP 3000 from the ALB security group; `ro-db` TCP 5432 from `ro-be` and `ro-db-bootstrap`; `ro-redis` TCP 6379 from `ro-be`; `ro-db-bootstrap` none. Outbound: TCP 443 to `0.0.0.0/0` from `ro-be`, `ro-fe` and `ro-db-bootstrap` (ECR, CloudWatch Logs, Secrets Manager, AMP, Platform JWKS, Anthropic, Razorpay); TCP 5432 to `ro-db` and 6379 to `ro-redis` from `ro-be`; TCP 5432 to `ro-db` from `ro-db-bootstrap`. |
+| RDS (`aws_db_instance`, `aws_db_parameter_group`, `aws_db_subnet_group`) | `ro-<env>` | PostgreSQL 16, instance class and Multi-AZ per §1.7, gp3 50 GB with storage autoscaling to 200 GB (§5.5), storage encrypted, not publicly accessible, parameter `rds.force_ssl = 1`, automated backups `BACKUP_RETENTION` (point-in-time recovery, NFR-012), deletion protection and a final snapshot in `staging` and `prod`, master user `ro_master` with the password of `ro/<env>/db-master`. |
+| ElastiCache (`aws_elasticache_replication_group`, subnet group) | `ro-<env>` | Redis 7, `cache.t4g.micro` in `dev` and `staging` (one node), `cache.t4g.small` in `prod` (primary + 1 replica, automatic failover, Multi-AZ); transit encryption on (CR-017), at-rest encryption on, auth token from `ro/<env>/redis-auth-token`. |
+| Secrets (`aws_secretsmanager_secret`, `random_password`, `aws_secretsmanager_secret_version`) | the `ro/<env>/…` names of §1.7 | Generated by Terraform (`random_password`, 32 characters, no symbols): `db-master`, `db-migrator-password`, `db-app-password`, `redis-auth-token`; rotated with `terraform apply -replace=random_password.<name>`, then the bootstrap task (database users) or a redeploy. Created empty, value put by hand (CR-043): `anthropic-api-key`, `razorpay-key-secret`, `razorpay-webhook-secret`, and per account `ro/<account>/pagerduty-integration-key`, `ro/<account>/slack-webhook-url` (read by the grafana provider for §4.9). |
+| CloudWatch log groups (`aws_cloudwatch_log_group`) | `/ro/<env>/backend`, `/ro/<env>/frontend`, `/ro/<env>/adot`, `/ro/<env>/db-bootstrap` | Retention `LOG_RETENTION` (CR-022). |
+| IAM (`aws_iam_role`, policies) | `ro-exec-<env>`, `ro-backend-task-<env>`, `ro-terraform-<env>`, `ro-deploy-<env>` | `ro-exec`: AWS managed `AmazonECSTaskExecutionRolePolicy` plus `secretsmanager:GetSecretValue` on `ro/<env>/*` only. `ro-backend-task`: AWS managed `AmazonPrometheusRemoteWriteAccess` (§4.9) and nothing else (the backend calls no other AWS API). `ro-terraform`: assumed by `infra.yml`. `ro-deploy`: assumed by `cd.yml` for image deploys (CR-044). |
+| Amazon Managed Service for Prometheus (`aws_prometheus_workspace`) | `ro-<env>` (one per environment) | Remote-write target of the collector (§4.9). Alert rules read only the `staging` and `prod` workspaces (§1.7 "Alerts" row). |
+| Amazon Managed Grafana (`aws_grafana_workspace`) | `ro-nonprod` (created by `envs/staging`), `ro-prod` | Grafana alerting on; one Prometheus data source per environment workspace; dashboards, alert rules, contact points and notification policies of §4.9 from `modules/ro-stack/grafana/`. |
+
+Images: `backend/Dockerfile` is `eclipse-temurin:21-jre` with the Spring Boot layered jar and the AWS RDS CA bundle at `/etc/ssl/rds/global-bundle.pem` (§1.7), running as a non-root user with `-XX:MaxRAMPercentage=75`. `frontend/Dockerfile` builds with `node:22-alpine`: `next build` with `output: "standalone"` in `next.config.ts`, then the runtime stage copies `.next/standalone`, `.next/static` (to `.next/static`) and `public/`, sets `HOSTNAME=0.0.0.0` and `PORT=3000`, and runs `node server.js` as a non-root user (Next.js documents that the standalone server does not copy `public` and `.next/static` itself).
 
 ---
 
@@ -331,7 +377,7 @@ One Git repository, `surfingbear-resume-optimizer`, with two deployables:
 ```text
 surfingbear-resume-optimizer/
 ├── backend/
-│   ├── pom.xml
+│   ├── pom.xml, Dockerfile (v1.2, §1.8 "Infrastructure")
 │   ├── mvnw, mvnw.cmd, .mvn/
 │   ├── checkstyle.xml
 │   └── src/
@@ -379,7 +425,7 @@ surfingbear-resume-optimizer/
 │           ├── java/com/surfingbear/resumeoptimizer/   # mirrors main; a test sits in its subject's package
 │           └── resources/fixtures/                      # synthetic resumes, §2.6
 ├── frontend/
-│   ├── package.json, next.config.ts, tsconfig.json, eslint.config.mjs, .prettierrc.json,
+│   ├── package.json, next.config.ts, Dockerfile (v1.2), tsconfig.json, eslint.config.mjs, .prettierrc.json,
 │   │   .env.development (v1.2, `local` values only, no secrets)
 │   ├── messages/en-IN.json
 │   ├── src/
@@ -392,9 +438,10 @@ surfingbear-resume-optimizer/
 │   │   └── types/        # api.ts — TypeScript types matching §6 exactly
 │   └── tests/            # Vitest unit tests, Playwright e2e in tests/e2e
 ├── docker-compose.yml    # local PostgreSQL 16 + Redis 7
-├── db/bootstrap/         # (v1.2) bootstrap.sql, 00-bootstrap.sh: database, schema, users, grants (§5)
+├── db/bootstrap/         # (v1.2) bootstrap.sql, 00-bootstrap.sh: database, schema, users, grants (§5); Dockerfile of image ro-db-bootstrap
+├── infra/                # (v1.2) Terraform, ADOT collector image, Grafana dashboards and alert rules (§1.8 "Infrastructure", §4.9)
 ├── docs/runbooks/
-└── .github/workflows/ci.yml, cd.yml
+└── .github/workflows/ci.yml, cd.yml, infra.yml (v1.2, CR-043)
 ```
 
 Layering rules (backend):
@@ -554,6 +601,7 @@ Priorities: **Must** = needed for go-live; **Should** = planned for go-live, may
 | A-14 *(v1.1)* | `PRO_PRICE_PAISE` (§3.4) is the price the user pays, including 18% GST (net = price ÷ 1.18). Razorpay issues the GST invoice for each charge and e-mails it to the payer. The Razorpay plan (`period = monthly`, `interval = 1`, `amount = 29900`, `currency = INR`) is created once per environment in the Razorpay dashboard and its id is configuration (`RAZORPAY_PLAN_ID`). | Indian consumer prices are quoted including GST. Creating the plan by hand keeps price changes a deliberate, reviewed action; the Module checks at start-up that the configured plan really has this amount (§4.6.7). |
 | A-15 *(v1.1)* | Divii's Razorpay account has Subscriptions enabled, with UPI Autopay, cards and e-mandate as payment methods, and Razorpay sends the RBI-required pre-debit notifications (`customer_notify = 1`). `PRO_PRICE_PAISE` is below the ₹15,000 limit for recurring debits without extra authentication. | These are Razorpay account settings, not Module code; the Module only needs the plan, keys and webhook secret. |
 | A-16 *(v1.1)* | Billing cycles follow Razorpay: monthly from the first charge date (a subscription bought on 26 Oct renews on 26 Nov). They are not aligned to the calendar-month quota period. | This is how Razorpay subscriptions work, and it is what "Pro access continues until the end of the paid month" means for a user who bought mid-month. |
+| A-17 *(v1.2)* | The Module runs in the Platform's AWS accounts in `ap-south-1` (one non-prod account for `dev` and `staging`, one prod account for `prod`), inside the Platform's VPC and private subnets (at least two Availability Zones, outbound internet through the Platform's NAT gateways), and the Platform team gives these inputs per environment: VPC id, private subnet ids, the ALB's HTTPS listener ARN and security group id, and two free listener-rule priorities. SurfingBear's on-call engineers are paged through PagerDuty. Both are confirmed in writing with the Platform team before `dev` is set up; if paging uses another tool, only the Grafana contact point changes (§4.9). | A-04 puts the Module behind the Platform's ALB, so its target groups and tasks must live where that ALB can reach them; reusing the Platform's network and on-call avoids a second VPC and a second paging rota for one module. |
 
 **Out of scope** (this spec deliberately does not cover):
 
@@ -757,7 +805,7 @@ The browser calls `/api/ro/v1/*` on the **same origin** as the UI; the ALB route
 
 | ID | Component | Responsibility (one each) | Technology |
 |---|---|---|---|
-| CMP-001 | ro-frontend | Renders the screens of §4.7 (since v1.1 also `/pro` and `/compare`) and talks only to `/api/ro/v1`, plus (v1.1) Razorpay Checkout in the browser for the payment step. | Next.js 15 App Router, React 19, TypeScript 5, TanStack Query 5, next-intl, Tailwind CSS 4 |
+| CMP-001 | ro-frontend | Renders the screens of §4.7 (since v1.1 also `/pro` and `/compare`) and talks only to `/api/ro/v1`, plus (v1.1) Razorpay Checkout in the browser for the payment step. | Next.js 15 App Router, React 19, TypeScript 5, TanStack Query 5, next-intl, Tailwind CSS 4; *(v1.2)* standalone Node 22 server on ECS Fargate (§1.8 "Infrastructure") |
 | CMP-002 | Platform ALB | Terminates TLS and routes `/resume-optimizer*` to CMP-001 and `/api/ro/*` to ro-backend. Owned by the Platform team; this Module only registers two target groups. | AWS Application Load Balancer |
 | CMP-003 | Security filters | Per request, in this order: request id (CR-011), security headers (CR-021), JWT validation and role mapping (CR-001…006), plan resolution through CMP-025 (v1.1), CSRF header (CR-005), then hands over to the rate limiter (CMP-016). API-022 uses a separate filter chain (see §4.1). | Spring Security 6 OAuth2 Resource Server, servlet filters |
 | CMP-004 | Consent service | Stores and checks privacy-notice acceptance (FR-002). | Spring service + JPA |
@@ -1215,6 +1263,7 @@ The user is `PRO` in any state as long as FR-025's `access_until` is in the futu
 | Frontend i18n | next-intl | Message files per locale (CR-029) with ICU plurals for "{count} more suggestions". |
 | Frontend styling | Tailwind CSS 4 | Fast, consistent responsive layouts (NFR-016) without a separate design system dependency. |
 | Hosting | AWS ap-south-1 (Mumbai), ECS Fargate, ALB, RDS, ElastiCache, ECR | Data stays in India except for the AI call; Fargate removes server management; same platform as SurfingBear (A-04). |
+| Infrastructure as code *(v1.2)* | Terraform with the AWS and Grafana providers, state in S3 (CR-043, §1.8 "Infrastructure") | Three near-identical environments are one module with three variable sets, so `staging` really is `prod` in miniature; `plan` on every PR makes infrastructure changes reviewable like code; one tool covers AWS and the Grafana alert rules. |
 | CI/CD | GitHub Actions | Repository is on GitHub; environments with required reviewers give the manual `prod` gate (CR-036). |
 | Testing | JUnit 5, Testcontainers, WireMock, Vitest, Playwright | Testcontainers runs the real PostgreSQL features the design relies on (partial indexes, `SKIP LOCKED`); WireMock simulates provider failures (§4.4). |
 
@@ -1561,6 +1610,7 @@ Base path `/resume-optimizer`. Every page except `/dev-login` first loads API-00
 | `/privacy` | all | Notice summary and version accepted; button "Download my data" (API-012); "Delete all my data" → dialog that requires typing `DELETE` (and, since v1.1, shows the FR-021 criterion 6a Resume Pro note when it applies) → API-013 with `{"confirm":"DELETE_MY_DATA"}` → success message with counts → redirect to `/`. |
 | `/admin/job-roles` | ADMIN (`isAdmin` from API-001; others see a 403 page) | Table of all roles (API-014) with active toggle; "New role" and "Edit" forms (name, description, active, skills list editor with importance) → API-015 / API-016; shows field errors from `fieldErrors`. |
 | `/dev-login` *(v1.2)* | developers, `local` only | `LOGIN_URL` of `local` (CR-004). When runtime config `devLoginEnabled` is false (every environment except `local`) the page calls `notFound()`. Does **not** load API-001 first (there is no session yet). Form: "User id" (pre-filled with `crypto.randomUUID()`, editable, must be a UUID), checkbox "Admin (RO_ADMIN)", button "Sign in" → API-017 `{userId, roles}` → on `204` navigates to `returnTo` when it is a path under `/resume-optimizer` on the same origin, otherwise to `/`. Texts under message keys `devLogin.*` (CR-029). Playwright tests sign in through this page. |
+| `/healthz` *(v1.2)* | the ALB health check only | Route handler `src/app/healthz/route.ts` (not a page, so it has no layout and no API-001 call), full path `/resume-optimizer/healthz`. It calls `connection()`, runs the same validation of the runtime configuration as the root layout and answers `200` with `{"status":"ok"}` when it passes, `503` with `{"status":"misconfigured"}` when it does not (the variable name is logged, never its value). So a task started with a wrong `RO_WEB_LOGIN_URL` never becomes healthy, and the deployment circuit breaker rolls it back (CR-044) instead of serving `500`s. `Cache-Control: no-store`. Tested by `RuntimeConfigTest`. |
 
 **Runtime configuration** *(v1.2)*. The same `ro-frontend` image runs in `dev`, `staging` and `prod` (CR-033), so no environment-specific value may be built into it. Next.js inlines every `NEXT_PUBLIC_*` variable into the browser bundle at `next build` time, so the frontend uses **none**. Instead the root layout `src/app/layout.tsx` (a server component) calls `await connection()` from `next/server` (which makes it render per request), reads the variables below from `process.env`, and passes them to the client component `RuntimeConfigProvider` (`src/lib/runtimeConfig.tsx`); `apiClient.ts` reads `loginUrl` from it for the CR-004 redirect. A missing or invalid required value makes the layout throw, so every page answers `500` (visible at the first deploy check) instead of redirecting users to a wrong host.
 
@@ -1570,7 +1620,7 @@ Base path `/resume-optimizer`. Every page except `/dev-login` first loads API-00
 | `RO_WEB_DEV_LOGIN` | no (default `false`) | `true` enables `/dev-login`; set only in `local` | `true` or `false` |
 | `RO_WEB_DEV_API_ORIGIN` | `local` only | target of the `local` rewrite (§4.1); read by `next.config.ts` when `next dev` starts, not by the layout | absolute `http(s)` URL |
 
-CI fails if the string `NEXT_PUBLIC_` appears in `frontend/src/**`, `frontend/next.config.ts` or `frontend/.env*` (step `no-build-time-env` in `ci.yml`). `RuntimeConfigTest` (Vitest) renders the layout with and without `RO_WEB_LOGIN_URL`. Razorpay values reach the browser only through API-019, never through the frontend environment.
+CI fails if the string `NEXT_PUBLIC_` appears in `frontend/src/**`, `frontend/next.config.ts` or `frontend/.env*` (step `no-build-time-env` in `ci.yml`). `RuntimeConfigTest` (Vitest) renders the layout with and without `RO_WEB_LOGIN_URL`. Razorpay values reach the browser only through API-019, never through the frontend environment. *(v1.2)* The same validation runs in `/healthz` (table above), so a misconfigured task fails its ALB health check.
 
 ### 4.8 PDF report layout (FR-018)
 
@@ -1650,7 +1700,7 @@ PostgreSQL 16, database `resume_optimizer`, one schema `ro`. *(changed in v1.2)*
 | Environment | Who runs it, when | Passwords |
 |---|---|---|
 | `local` | `docker compose up` on an empty volume: the `postgres` service mounts `db/bootstrap/` at `/docker-entrypoint-initdb.d/`, where `00-bootstrap.sh` runs `psql -v migrator_password=local-migrator -v app_password=local-app -f bootstrap.sql` | the two literals, also in `application-local.yml` (not secrets) |
-| `dev`, `staging`, `prod` | The engineer creating the environment, once, and again to rotate a password, following `docs/runbooks/database-setup.md`: a one-off ECS task `ro-db-bootstrap` (image `postgres:16`, same private subnets as the backend) runs the script against the RDS endpoint with the RDS master user. Then the backend is deployed and Flyway creates the tables | Secrets Manager `ro/<env>/db-master` (RDS master, used only by this task), `ro/<env>/db-migrator-password`, `ro/<env>/db-app-password` |
+| `dev`, `staging`, `prod` | The engineer creating the environment, once, and again to rotate a password, following `docs/runbooks/database-setup.md`: a one-off ECS task `ro-db-bootstrap` (image `ro-db-bootstrap`, which is `postgres:16` plus `db/bootstrap/`; same private subnets as the backend; §1.8 "Infrastructure") runs the script against the RDS endpoint with the RDS master user. Then the backend is deployed and Flyway creates the tables | Secrets Manager `ro/<env>/db-master` (RDS master, used only by this task), `ro/<env>/db-migrator-password`, `ro/<env>/db-app-password` |
 | Integration tests | The shared Testcontainers `postgres:16` container runs the same script with test passwords before the Spring context starts, so every `*IT` uses the real users and grants | test literals |
 
 The backend connects twice: the application pool as `ro_app` (`spring.datasource.username=ro_app`, password `RO_DB_PASSWORD`), and Flyway, at start-up only, as `ro_migrator` (`spring.flyway.user=ro_migrator`, `spring.flyway.password=${RO_DB_MIGRATOR_PASSWORD}`; Spring Boot then gives Flyway its own connection and takes the URL from `spring.datasource.url`). `BootstrapGrantsIT` asserts that after migration `ro_app` can read and write every table, cannot `CREATE TABLE ro.x`, and cannot change `flyway_schema_history`. Extension `pgcrypto` is not needed (`gen_random_uuid()` is built in since PostgreSQL 13).
