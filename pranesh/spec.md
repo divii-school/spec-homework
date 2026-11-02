@@ -210,7 +210,7 @@ Retention (CR-022). All periods are in §3.4:
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-033 | Environments | Four environments exist with the differences in the table below. All differences are in `application-<profile>.yml` and environment variables; the same Docker image runs in `dev`, `staging` and `prod`. Since v1.1 the application refuses to start if `ro.billing.mode=stub` under any profile other than `local`, or if the `prod` profile has a Razorpay key id that does not start with `rzp_live_` (and any other profile one that does), so test and live money can never be mixed. | Deployment review; the image digest in `prod` equals the one tested in `staging`; `BillingConfigValidationTest` covers the three start-up refusals. |
+| CR-033 | Environments | Four environments exist with the differences in the table below. All differences are in `application-<profile>.yml` and environment variables; the same Docker image runs in `dev`, `staging` and `prod`. *(v1.2)* This holds for **both** images: the frontend reads its environment values at request time and uses no `NEXT_PUBLIC_*` variable (§4.7 "Runtime configuration"); the complete list of values per environment is §1.7 "Configuration per environment". Since v1.1 the application refuses to start if `ro.billing.mode=stub` under any profile other than `local`, or if the `prod` profile has a Razorpay key id that does not start with `rzp_live_` (and any other profile one that does), so test and live money can never be mixed. | Deployment review; the image digest in `prod` equals the one tested in `staging`; `BillingConfigValidationTest` covers the three start-up refusals. |
 | CR-034 | Environments | Production data is never copied to `local`, `dev` or `staging`. Test data is synthetic only (the `fixtures/` resumes, §2.6). | Code review; RDS snapshot sharing is disabled in the `prod` account. |
 
 | Aspect | local | dev | staging | prod |
@@ -353,14 +353,16 @@ surfingbear-resume-optimizer/
 │           ├── java/com/surfingbear/resumeoptimizer/   # mirrors main; a test sits in its subject's package
 │           └── resources/fixtures/                      # synthetic resumes, §2.6
 ├── frontend/
-│   ├── package.json, next.config.ts, tsconfig.json, eslint.config.mjs, .prettierrc.json
+│   ├── package.json, next.config.ts, tsconfig.json, eslint.config.mjs, .prettierrc.json,
+│   │   .env.development (v1.2, `local` values only, no secrets)
 │   ├── messages/en-IN.json
 │   ├── src/
 │   │   ├── app/          # routes, §4.7 (basePath /resume-optimizer)
 │   │   ├── components/   # shared UI components
 │   │   ├── features/     # consent/, upload/, analysis/, history/, privacy/, admin/, pro/ (v1.1), compare/ (v1.1) — screen-specific components + hooks
 │   │   │                 # pro/ loads Razorpay Checkout with lib/loadRazorpay.ts (script https://checkout.razorpay.com/v1/checkout.js)
-│   │   ├── lib/          # apiClient.ts, errors.ts, formatDate.ts, queryClient.ts, limits.ts (v1.2, §3.4 copy of MAX_FILE_BYTES)
+│   │   ├── lib/          # apiClient.ts, errors.ts, formatDate.ts, queryClient.ts, limits.ts (v1.2, §3.4 copy of MAX_FILE_BYTES),
+│   │   │                 #   runtimeConfig.tsx (v1.2, §4.7 "Runtime configuration")
 │   │   └── types/        # api.ts — TypeScript types matching §6 exactly
 │   └── tests/            # Vitest unit tests, Playwright e2e in tests/e2e
 ├── docker-compose.yml    # local PostgreSQL 16 + Redis 7
@@ -643,6 +645,7 @@ The single source for every number used in more than one place. Property names a
 | `PAYMENT_RETENTION` *(v1.1)* | 8 years after the subscription ends | `ro.retention.payment-years` | CR-022, CR-042, FR-022 |
 | `WEBHOOK_EVENT_RETENTION` *(v1.1)* | 90 days | `ro.retention.webhook-event` | CR-022, CR-042, FR-022 |
 | `PRO_PAGE_PATH` *(v1.1)* | `/resume-optimizer/pro` | **fixed** (route, §4.7) | FR-024, FR-030, §4.8 |
+| `PUBLIC_BASE_URL` *(v1.2)* | Per environment, the URL row of §1.7: `http://localhost:3000`, `https://dev.app.surfingbear.com`, `https://staging.app.surfingbear.com`, `https://app.surfingbear.com` (no trailing slash) | `ro.app.public-base-url` in `application-<profile>.yml`; start-up fails if it is empty, ends with `/`, or is not `https://` outside `local` | §4.8 |
 | `EVAL_SET_SIZE` *(v1.2)* | 20 synthetic resumes in `backend/src/test/eval/` | **fixed** | NFR-003, NFR-017 |
 | `CONFIRM_POLL` *(v1.1)* | every 3 s for 60 s, then every 10 s up to 10 minutes in total | frontend constant in `src/lib/limits.ts` | FR-027 criteria 5 and 8 |
 
@@ -721,7 +724,7 @@ flowchart LR
 
 API-022 (`/api/ro/v1/webhooks/razorpay`) does not pass through the JWT, CSRF and rate-limit filters of CMP-003; it is matched first by its own security filter chain, which only adds the request id and the response headers (CR-001, CR-005, CR-020), and CMP-026 checks the signature.
 
-The browser calls `/api/ro/v1/*` on the **same origin** as the UI; the ALB routes it to `ro-backend`. In `local`, the Next.js dev server rewrites `/api/ro/v1/:path*` to `http://localhost:8080/api/ro/v1/:path*` so the origin is still shared.
+The browser calls `/api/ro/v1/*` on the **same origin** as the UI; the ALB routes it to `ro-backend`. In `local`, the Next.js dev server rewrites `/api/ro/v1/:path*` to `http://localhost:8080/api/ro/v1/:path*` so the origin is still shared. *(v1.2)* `next.config.ts` adds that rewrite only when `RO_WEB_DEV_API_ORIGIN` is set; it is set only in `frontend/.env.development` (committed, no secrets), which `next dev` loads and `next build` ignores, so the production image has no rewrite and relies on ALB path routing.
 
 ### 4.2 Components
 
@@ -1504,7 +1507,7 @@ A row is found by `s.id`; if `s` is absent (not a subscription event) the event 
 
 **Checkout in the browser.** `features/pro` loads `https://checkout.razorpay.com/v1/checkout.js` once and opens `new Razorpay({ key: keyId, subscription_id: razorpaySubscriptionId, name, description, theme: { color: "#0F62FE" }, handler, modal: { ondismiss } })`. No `prefill` (CR-042). `handler` posts the three returned values to API-020.
 
-**Stub gateway** (`ro.billing.mode=stub`, `local` only, CR-033): keeps subscriptions in a `ConcurrentHashMap`. `createSubscription` returns `sub_` + 14 random `[A-Za-z0-9]` and immediately records one paid invoice (`pay_` + 14 random characters, amount `PRO_PRICE_PAISE`, `billing_start = now`, `billing_end = now + 1 month` in `QUOTA_TIME_ZONE`). `fetchSubscription` returns `active`, `paid_count = 1`; `fetchInvoices` returns that invoice; `cancelSubscription` sets `cancelled`; `listSubscriptions` (v1.2) returns the stored subscriptions whose creation time is in the window, with their `notes`; `fetchPlan` returns a plan matching §3.4. In stub mode API-019 also returns `stubPayment = { razorpayPaymentId, razorpaySignature }`, the signature computed with the local key secret, and the frontend (built with `NEXT_PUBLIC_BILLING_MODE=stub`) skips Razorpay Checkout and posts those values to API-020. So the full verify path, including the HMAC check, runs locally without network.
+**Stub gateway** (`ro.billing.mode=stub`, `local` only, CR-033): keeps subscriptions in a `ConcurrentHashMap`. `createSubscription` returns `sub_` + 14 random `[A-Za-z0-9]` and immediately records one paid invoice (`pay_` + 14 random characters, amount `PRO_PRICE_PAISE`, `billing_start = now`, `billing_end = now + 1 month` in `QUOTA_TIME_ZONE`). `fetchSubscription` returns `active`, `paid_count = 1`; `fetchInvoices` returns that invoice; `cancelSubscription` sets `cancelled`; `listSubscriptions` (v1.2) returns the stored subscriptions whose creation time is in the window, with their `notes`; `fetchPlan` returns a plan matching §3.4. In stub mode API-019 also returns `stubPayment = { razorpayPaymentId, razorpaySignature }`, the signature computed with the local key secret, and the frontend skips Razorpay Checkout whenever API-019 returns a non-null `stubPayment` and posts those values to API-020 *(changed in v1.2; was a build-time `NEXT_PUBLIC_BILLING_MODE`, removed: the frontend image is the same in every environment, §4.7 "Runtime configuration")*. `stubPayment` is always `null` outside `local`, because `ro.billing.mode=stub` cannot start there (CR-033). So the full verify path, including the HMAC check, runs locally without network.
 
 #### 4.6.8 Comparison rules (FR-031) *(v1.1)*
 
@@ -1516,7 +1519,7 @@ A row is found by `s.id`; if `s` is absent (not a subscription event) the event 
 
 ### 4.7 Frontend screens
 
-Base path `/resume-optimizer`. Every page first loads API-001; while it loads, a skeleton is shown. All texts come from `en-IN.json` (CR-029).
+Base path `/resume-optimizer`. Every page except `/dev-login` first loads API-001; while it loads, a skeleton is shown. All texts come from `en-IN.json` (CR-029).
 
 | Route | Shown to | Content and behaviour |
 |---|---|---|
@@ -1530,6 +1533,17 @@ Base path `/resume-optimizer`. Every page first loads API-001; while it loads, a
 | `/resumes` | all | Table of stored resumes (API-005): filename, type, uploaded, expires, analyses count; "Delete" with confirm dialog (API-006), showing the `ANALYSIS_IN_PROGRESS` text on 409. |
 | `/privacy` | all | Notice summary and version accepted; button "Download my data" (API-012); "Delete all my data" → dialog that requires typing `DELETE` (and, since v1.1, shows the FR-021 criterion 6a Resume Pro note when it applies) → API-013 with `{"confirm":"DELETE_MY_DATA"}` → success message with counts → redirect to `/`. |
 | `/admin/job-roles` | ADMIN (`isAdmin` from API-001; others see a 403 page) | Table of all roles (API-014) with active toggle; "New role" and "Edit" forms (name, description, active, skills list editor with importance) → API-015 / API-016; shows field errors from `fieldErrors`. |
+| `/dev-login` *(v1.2)* | developers, `local` only | `LOGIN_URL` of `local` (CR-004). When runtime config `devLoginEnabled` is false (every environment except `local`) the page calls `notFound()`. Does **not** load API-001 first (there is no session yet). Form: "User id" (pre-filled with `crypto.randomUUID()`, editable, must be a UUID), checkbox "Admin (RO_ADMIN)", button "Sign in" → API-017 `{userId, roles}` → on `204` navigates to `returnTo` when it is a path under `/resume-optimizer` on the same origin, otherwise to `/`. Texts under message keys `devLogin.*` (CR-029). Playwright tests sign in through this page. |
+
+**Runtime configuration** *(v1.2)*. The same `ro-frontend` image runs in `dev`, `staging` and `prod` (CR-033), so no environment-specific value may be built into it. Next.js inlines every `NEXT_PUBLIC_*` variable into the browser bundle at `next build` time, so the frontend uses **none**. Instead the root layout `src/app/layout.tsx` (a server component) calls `await connection()` from `next/server` (which makes it render per request), reads the variables below from `process.env`, and passes them to the client component `RuntimeConfigProvider` (`src/lib/runtimeConfig.tsx`); `apiClient.ts` reads `loginUrl` from it for the CR-004 redirect. A missing or invalid required value makes the layout throw, so every page answers `500` (visible at the first deploy check) instead of redirecting users to a wrong host.
+
+| Variable (frontend container) | Required | Meaning | Validation |
+|---|---|---|---|
+| `RO_WEB_LOGIN_URL` | yes | `LOGIN_URL` (§1.7 "Platform auth per environment") | absolute URL; `https://` unless the host is `localhost` |
+| `RO_WEB_DEV_LOGIN` | no (default `false`) | `true` enables `/dev-login`; set only in `local` | `true` or `false` |
+| `RO_WEB_DEV_API_ORIGIN` | `local` only | target of the `local` rewrite (§4.1); read by `next.config.ts` when `next dev` starts, not by the layout | absolute `http(s)` URL |
+
+CI fails if the string `NEXT_PUBLIC_` appears in `frontend/src/**`, `frontend/next.config.ts` or `frontend/.env*` (step `no-build-time-env` in `ci.yml`). `RuntimeConfigTest` (Vitest) renders the layout with and without `RO_WEB_LOGIN_URL`. Razorpay values reach the browser only through API-019, never through the frontend environment.
 
 ### 4.8 PDF report layout (FR-018)
 
@@ -1538,7 +1552,7 @@ A4 portrait, 18 mm margins, Noto Sans 10 pt body. Rendered from `templates/repor
 2. Overall score: the number, "/ 100", and the band label (`Needs work`, `Fair`, `Good`, `Excellent`).
 3. Table "Score breakdown": columns Dimension (label), Weight (%), Score, Rationale — six rows in the §4.6.4 order.
 4. "Skills found" and "Skills missing", each a comma-separated list with `(required)` after REQUIRED skills; "None" if empty.
-5. "Suggested rewrites": for each visible suggestion, numbered by priority: **Before:** original, **After:** suggested, **Why:** reason. For FREE with `lockedCount > 0`, a box: "{lockedCount} more suggestions are available with Resume Pro: https://app.surfingbear.com/resume-optimizer/pro" (v1.1; was "SurfingBear Premium" and the Platform pricing URL). For PRO all suggestions are listed and there is no box.
+5. "Suggested rewrites": for each visible suggestion, numbered by priority: **Before:** original, **After:** suggested, **Why:** reason. For FREE with `lockedCount > 0`, a box: "{lockedCount} more suggestions are available with Resume Pro: {PUBLIC_BASE_URL}{PRO_PAGE_PATH}" (v1.1; was "SurfingBear Premium" and the Platform pricing URL; *v1.2*: the host comes from `PUBLIC_BASE_URL` of the environment, so a `staging` report links to `https://staging.app.surfingbear.com/resume-optimizer/pro`, never to `prod`). For PRO all suggestions are listed and there is no box.
 6. Footer on every page: "Generated by AI. Review every suggestion before using it. · Page {n} of {total}".
 
 ### 4.9 Observability
@@ -2856,7 +2870,7 @@ Calling it with no data left still succeeds with counts `0` and creates a new TB
 | 409 | `JOB_ROLE_NAME_TAKEN` | Another role has the name |
 
 #### API-017 `POST /api/ro/v1/dev/token`
-- **Purpose:** Local development only — sign in as any test user without the Platform.
+- **Purpose:** Local development only — sign in as any test user without the Platform. *(v1.2)* Called by the `/dev-login` page (§4.7), which is `LOGIN_URL` in `local`.
 - **Auth / role:** none (exempt from CR-001). The controller and its key exist **only** under the `local` profile (`@Profile("local")`); in every other profile this path answers `404 ENDPOINT_NOT_FOUND`, and application start fails if `local` is combined with `prod`.
 - **Implements:** CR-001 (exception), CR-033.
 
