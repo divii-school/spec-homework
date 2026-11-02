@@ -5,7 +5,7 @@ Exported transcript, 2026-11-02. Claude Code agent run on its own, reading only 
 ## Prompt
 
 ```text
-You are a senior developer doing a build test of one spec. Read ONLY this file: sachin/spec.md. Do NOT open, list or grep any other file or folder under C:\Users\user\spec-homework (other people's work is there and must not be read). Do not edit anything.
+You are a senior developer doing a build test of one spec. Read ONLY this file: sachin/spec.md. Do NOT open, list or grep any other file or folder under spec-homework (other people's work is there and must not be read). Do not edit anything.
 
 Focus on the parts changed in version v0.7 (marked *(v0.7)*): CR-034 to CR-040 (sections 1.1, 1.5, 1.7, 1.8, 1.9), assumptions A-17 to A-20 (3.3), CMP-023 and the component diagram (4.1, 4.2), 4.3.4, 4.3.7, 4.4, 4.5, 4.7, the whole of section 4.8 (4.8.1 to 4.8.7), 6.1, NFR-005, NFR-013, NFR-014, NFR-015, and sections 7.2, 7.3 and the v0.7 change-log row. Read the rest of the spec as needed for context.
 

@@ -5,7 +5,7 @@ Exported transcript, 2026-10-22. Claude Code agent run on its own, reading only 
 ## Prompt
 
 ```text
-You are simulating the "build test" of a spec-writing homework. Read ONLY the file sachin/spec.md (do not read any other folder in C:\Users\user\spec-homework — other participants' folders are off limits; you may read RUBRIC.md for context). Do not edit any file.
+You are simulating the "build test" of a spec-writing homework. Read ONLY the file sachin/spec.md (do not read any other folder in spec-homework — other participants' folders are off limits; you may read RUBRIC.md for context). Do not edit any file.
 
 Pretend you are Claude Code asked to build the backend API layer (Spring Boot) from this spec alone with no other context. Focus on section 6 (API design) and how it connects to sections 1–5 and 7. List every place where you would have to GUESS or ASSUME something the spec does not state, or where two parts of the spec contradict each other (e.g. a status code, field name, validation rule, error code, check order, response shape, header, or limit that differs between sections).
 

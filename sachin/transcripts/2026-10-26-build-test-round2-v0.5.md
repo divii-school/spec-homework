@@ -7,7 +7,7 @@ Exported transcript, 2026-10-26. Claude Code agent run on its own, reading only 
 ```text
 You are simulating tomorrow's scored "build test": a Claude Code agent will be asked to build the SurfingBear Resume Optimizer (Spring Boot 3 / Java 21 backend, Next.js frontend, PostgreSQL, Redis, Razorpay) from ONE spec file alone, and every point where the builder has to guess, or where two parts of the spec contradict each other, costs the author points.
 
-Read ONLY this file: sachin/spec.md (about 2,700 lines; read all of it, in chunks). You may also read BRIEF.md and RUBRIC.md for the scoring rules. Do NOT open any other participant's folder in C:\Users\user\spec-homework (copying scores zero) and do not modify any file. Do not use git.
+Read ONLY this file: sachin/spec.md (about 2,700 lines; read all of it, in chunks). You may also read BRIEF.md and RUBRIC.md for the scoring rules. Do NOT open any other participant's folder in spec-homework (copying scores zero) and do not modify any file. Do not use git.
 
 Pretend you must implement it end to end tomorrow. Walk through it as a builder would: project setup and configuration, the DB migrations (V1..V3) in order, every entity, every endpoint in section 6 (request validation order, status codes, response bodies, error codes), the worker/queue and AI call, the Razorpay subscription flows and webhooks, scheduled jobs, erasure, the frontend pages the spec describes, and the tests named in the traceability matrix.
 
@@ -21,7 +21,7 @@ Report, as your final message, a numbered list. For each item:
 Only report real, specific issues you can point to in the text - no style comments, no "could add more detail" items. If you find fewer than 3 real issues, say so plainly. Put HIGH items first. End with a one-line count by type and severity.
 ```
 
-- *tool:* Bash `wc -l /c/Users/user/spec-homework/sachin/spec.md /c/Users/user/spec-homework/BRIEF.md /c/Users/user/spec-homework/RUBRIC.md`
+- *tool:* Bash `wc -l sachin/spec.md BRIEF.md RUBRIC.md`
 - *tool:* Read `BRIEF.md`
 - *tool:* Read `RUBRIC.md`
 - *tool:* Read `spec.md` lines 1-400

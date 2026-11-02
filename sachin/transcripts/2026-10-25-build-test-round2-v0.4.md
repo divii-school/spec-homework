@@ -5,7 +5,7 @@ Exported transcript, 2026-10-25. Claude Code agent run on its own, reading only 
 ## Prompt
 
 ```text
-You are simulating the "build test" of a spec-writing homework. Read ONLY this one file: sachin/spec.md (about 2,700 lines; read all of it, in chunks). Do NOT open any other file or folder in C:\Users\user\spec-homework (other participants' folders must not be read; copying is penalised). Do not edit any file.
+You are simulating the "build test" of a spec-writing homework. Read ONLY this one file: sachin/spec.md (about 2,700 lines; read all of it, in chunks). Do NOT open any other file or folder in spec-homework (other participants' folders must not be read; copying is penalised). Do not edit any file.
 
 Pretend you are Claude Code asked to build the whole system (Spring Boot 3.4 / Java 21 backend, Next.js frontend, PostgreSQL, Redis) from this spec alone, and to log every place where you would have to GUESS or ASSUME something the spec does not state, and every CONTRADICTION between two places in the spec. The scoring counts guesses: 0–3 is best, more than 20 is worst, so be strict but fair. A guess is a decision a builder must make that changes code or behaviour and is not answered anywhere in the spec. It is not a guess if the spec answers it somewhere, even in another section; check before logging. Generic framework defaults (e.g. how to configure Jackson) are not guesses unless behaviour visible to a client or tester depends on them.
 
