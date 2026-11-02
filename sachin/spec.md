@@ -162,7 +162,7 @@ Standard error body:
 |---|---|---|---|---|
 | Purpose | One developer's machine | Integration of merged work | Release candidate, production-like | Real users |
 | Deployed from | `docker compose up` | every merge to `main` | manual promotion of a dev image | manual promotion of a staging image |
-| PostgreSQL / Redis | Docker containers | AWS RDS / ElastiCache (small) | same sizes as prod | RDS Multi-AZ / ElastiCache with replica |
+| PostgreSQL / Redis | Docker containers | AWS RDS / ElastiCache (small) | same sizes as prod | RDS Multi-AZ / ElastiCache with replica (*v0.7:* instance classes in 4.8.6) |
 | File storage | LocalStack S3 | S3 bucket `sb-ro-dev` | S3 `sb-ro-staging` | S3 `sb-ro-prod` |
 | AI provider | `FakeAiClient` returning a fixed valid response (`AI_PROVIDER=fake`) | Real Anthropic API, separate key, spend limit | Real Anthropic API | Real Anthropic API |
 | Platform auth | *(v0.7)* Local sign-in of the API itself (`/local/login`, `/local/jwks.json`, CR-034); `scripts/dev-token.sh` for curl | platform dev (A-18) | platform staging (A-18) | platform prod (A-18) |
@@ -177,9 +177,16 @@ Standard error body:
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
 | CR-028 | CI | GitHub Actions runs on every pull request: format check, lint, unit + integration tests (Testcontainers), coverage gate (NFR-017), dependency scan, secret scan, Docker build. A red check blocks the merge. | Branch protection settings on `main`. |
-| CR-029 | Release | Images are tagged with the git commit SHA. Deploy target is AWS ECS Fargate in `ap-south-1` (Mumbai) with a rolling update (minimum healthy 100%, maximum 200%). A task counts as healthy only after `/actuator/health/readiness` returns 200. | ECS service config review. |
+| CR-029 | Release | Images are tagged with the git commit SHA (*v0.7:* the full 40 characters). Deploy target is AWS ECS Fargate in `ap-south-1` (Mumbai) with a rolling update (minimum healthy 100%, maximum 200%). A task counts as healthy only after `/actuator/health/readiness` returns 200. *(v0.7)* The same holds for `ro-web` with its health route (4.8.3); `ro-worker` has no load balancer and counts as healthy while it runs (4.8.6). The ECS deployment circuit breaker with automatic rollback is on for `ro-api`, `ro-worker` and `ro-web`. | ECS service config review (Terraform, 4.8.5). |
 | CR-030 | Database changes | Schema changes are Flyway migrations (`V<n>__<description>.sql`) and are backward compatible with the previous release (expand → migrate → contract over two releases), so a rollback never needs a down-migration. | Code review checklist item. |
-| CR-031 | Rollback | Rollback = redeploy the previous image SHA through the same pipeline; target under 10 minutes. Practised once on staging before the first prod release. | Staging rollback drill record. |
+| CR-031 | Rollback | Rollback = redeploy the previous image SHA through the same pipeline; target under 10 minutes. Practised once on staging before the first prod release. *(v0.7)* The `deploy` workflow with `rollback: true` (4.8.4) skips the promotion check and the migration step, and accepts only a SHA that the same service has run before in that environment. | Staging rollback drill record. |
+| CR-038 | Pipeline | *(v0.7)* Deploys happen only through the GitHub Actions workflows of 4.8.4, which reach AWS by GitHub OIDC; no AWS access key is stored anywhere. Every merge to `main` builds, tests (CR-028), pushes one image tagged with the full SHA to ECR (tag immutability on) and deploys it to dev. Staging and prod are deployed only by `workflow_dispatch` with `image_sha`, through the GitHub Environment of the same name (one required reviewer: the tech lead), and only with the SHA that is running in the previous environment (dev → staging → prod), except a rollback (CR-031). An API deploy runs the migration task first and stops on its non-zero exit. A smoke check ends every deploy; any failed step fails the run. When an API change and a web change belong together, the API is deployed first. | GitHub settings review (Environments, reviewer, OIDC trust conditions of 4.8.4); a staging run with a SHA that is not running in dev fails at its first step; IAM credential report shows no access keys for CI. |
+
+### 1.9 Infrastructure and operations *(added in v0.7)*
+
+| ID | Area | Rule | How it is checked |
+|---|---|---|---|
+| CR-039 | Infrastructure as code | Every AWS resource of the module is defined in Terraform in the repository `resume-optimizer-infra` (4.8.5), except the one-time manual steps listed there. Nobody changes these resources in the AWS console. `terraform plan` runs on every pull request and is posted on it; `apply` runs only through the GitHub Environment of the target environment. | Review of the plan comment on each infra PR; after an apply, `terraform plan` on `main` shows no changes. |
 
 ---
 
@@ -207,7 +214,7 @@ Standard error body:
 
 ### 2.2 Folder / module structure
 
-Backend (one Spring Boot application, two run modes: `api` and `worker`, selected by `APP_MODE`):
+Backend (one Spring Boot application, two run modes: `api` and `worker`, selected by `APP_MODE`; *(v0.7)* plus `migrate`, a one-off task that runs the migrations and exits, 4.8.4):
 
 ```text
 resume-optimizer-api/
@@ -385,11 +392,11 @@ ATS scoring dimensions (FR-009):
 | NFR-003 | Performance | Analysis time from `QUEUED` to `COMPLETED` | p95 ≤ 45 s; hard limit 120 s, then `FAILED` (FR-008) | `analysis_duration_seconds` histogram in production |
 | NFR-004 | Performance | PDF report generation | p95 ≤ 5 s | k6 test; `report_render_seconds` metric |
 | NFR-005 | Availability | API availability (worker excluded; failed analyses are already handled by FR-008) | 99.5 % per calendar month (≈ 3 h 39 min downtime); RPO ≤ 5 min (RDS point-in-time recovery); RTO ≤ 4 h | Uptime check on `/actuator/health/liveness` every minute; yearly restore drill |
-| NFR-006 | Scalability | Capacity | 5,000 analyses/day and 50 analyses processed in parallel, by adding worker tasks only (no code change). *v0.4:* unchanged by Resume Pro's unlimited analyses, because one user can have at most 2 in progress (FR-006), so heavy PRO use spreads over time instead of adding parallel load | Load test on staging with the fake AI client and 2 s simulated latency |
+| NFR-006 | Scalability | Capacity | 5,000 analyses/day and 50 analyses processed in parallel, by adding worker tasks only (no code change; *v0.7:* done by the worker autoscaling of 4.8.6, up to 10 tasks). *v0.4:* unchanged by Resume Pro's unlimited analyses, because one user can have at most 2 in progress (FR-006), so heavy PRO use spreads over time instead of adding parallel load | Load test on staging with the fake AI client and 2 s simulated latency |
 | NFR-007 | Security | Encryption | TLS 1.2+ in transit; S3 SSE-KMS and RDS storage encryption with a KMS key per environment; Redis in-transit encryption | AWS Config rules; staging review |
 | NFR-008 | Security | Vulnerabilities | OWASP ZAP baseline scan on staging: 0 High findings; dependency scan: 0 unwaived Critical/High (CR-022) | CI + pre-release scan report |
 | NFR-009 | Privacy | Data sent to the AI provider is minimised | 100 % of AI requests contain redacted text only (no email, phone or URL per the regexes in section 4.6.1); no file bytes are sent | Unit tests on the redactor with a fixed set of 50 sample contact formats; prompt-builder test asserting no match in the output |
-| NFR-010 | Privacy | Data location | Files, DB, Redis and backups in AWS `ap-south-1` only; the only cross-border flow is the redacted text to the AI provider, stated in the notice (FR-001) | Infrastructure-as-code review |
+| NFR-010 | Privacy | Data location | Files, DB, Redis and backups in AWS `ap-south-1` only; the only cross-border flow is the redacted text to the AI provider, stated in the notice (FR-001) | Infrastructure-as-code review (*v0.7:* Terraform plan, CR-039) |
 | NFR-011 | Privacy | Retention is enforced | No resume file or text older than 30 days + 24 h, no analysis older than 180 days + 24 h; *v0.4:* no subscription ended more than 180 days + 24 h ago | Daily query in a monitoring job; alert if any row is found |
 | NFR-012 | Privacy | Erasure completes | DB rows deleted within 5 s of the request; S3 objects within 24 h; *v0.4:* an open Razorpay subscription cancelled at Razorpay within 24 h | Integration test; alert on `storage_deletion` or `subscription_cancellation` rows older than 24 h |
 | NFR-013 | Observability | Metrics and alerts | Metrics exported via Micrometer/Prometheus: request rate, latency, error rate by code, queue depth, analysis duration, AI failures by reason, AI tokens used. Alerts: AI failure rate > 10 % over 15 min; queue depth > 100 for 5 min; read p95 > 300 ms for 10 min; any 5xx rate > 1 % for 5 min. *v0.4 billing:* metrics `razorpay_calls_total{operation,outcome}`, `razorpay_webhook_events_total{type,outcome}`, `razorpay_webhook_signature_failures_total`, `billing_reconciliation_fixes_total`, `pro_heavy_use_total`, `billing_activation_seconds{path}` (NFR-020); alerts: more than 5 webhook signature failures in 15 min; any reconciliation fix (an abandoned checkout expiring is not a fix, FR-029 criterion 8, *v0.6*); Razorpay call failure rate > 20 % over 15 min | Alert rules in code, tested by firing a synthetic failure on staging |
@@ -426,6 +433,7 @@ ATS scoring dimensions (FR-009):
 | A-16 | *(v0.4)* No grace period after a failed renewal: the plan becomes `FREE` at `access_until`, and comes back as soon as a Razorpay retry succeeds. | "Pro access continues until the end of the paid month" says access is tied to paid time. One rule (`access_until` > now) then covers cancelled, failing and halted subscriptions alike. |
 | A-17 | *(v0.7)* Each deployed environment has its own registrable domain: prod `surfingbear.com`, staging `surfingbear-staging.com`, dev `surfingbear-dev.com`. In each, the web UI is `https://www.<domain>/resume-optimizer`, the public API is `https://ro-api.<domain>`, and the platform sets the `sb_access` cookie with Domain `.<domain>`. Locally the web UI is `http://localhost:3000/resume-optimizer`, the API `http://localhost:8080`, and the cookie is host-only on `localhost`. All values per environment: 4.8.1. | Separate registrable domains keep each environment's `sb_access` cookie apart: with one shared `.surfingbear.com`, a dev login and a prod login in the same browser would overwrite each other's cookie, and a dev token would be sent to the prod API. Inside one environment the web UI and the API share the registrable domain, so the SameSite=Lax cookie reaches the API (A-10). Locally, cookies ignore the port, so one host-only cookie on `localhost` reaches both port 3000 and port 8080, and Chrome and Firefox treat `http://localhost` as a secure context, so the `Secure` attribute works without TLS. |
 | A-18 | *(v0.7)* The platform contract is the same in every deployed environment, on that environment's domain: token issuer `https://auth.<domain>` (`iss` = this URL), JWKS at `<issuer>/.well-known/jwks.json`, login page `https://www.<domain>/login?returnTo=<path>`. `returnTo` must be a relative path on the same host (it starts with one `/`); the platform rejects anything else and lands the user on its home page, and after a successful login it redirects the browser to `returnTo`. The platform owns the CloudFront distribution of `www.<domain>` and adds the two behaviours for `/resume-optimizer*` given in 4.8.3, pointing at the module's origin; the module team gives it the origin host name and the origin secret (4.8.3). The platform calls the internal erasure endpoint at `https://ro-internal.<domain>` from inside the environment's VPC (6.1). Values per environment: 4.8.1. | The module only verifies tokens (CR-001), so it needs exactly three things from the platform per environment: who issues tokens, where the keys are, and where to send a user who has none. A relative-only `returnTo` stops the login page from being used as an open redirect. The CDN belongs to the platform because `www.<domain>` is the platform's site; the module only adds an origin behind one path. |
+| A-19 | *(v0.7)* The AWS and company setup the module builds on: one AWS account per environment (`sb-dev`, `sb-staging`, `sb-prod`) plus `sb-tools` for shared build artefacts (ECR). In each environment account the platform already runs a VPC in `ap-south-1` with public subnets and private subnets (with NAT egress) in at least two Availability Zones; the module deploys into it, and the VPC id, subnet ids and VPC CIDR are Terraform inputs (4.8.5). The DNS zones of the three domains, public and private, belong to the platform team, who create the module's records from Terraform outputs. The code lives in the GitHub organisation `surfingbear`. In dev and staging the platform provides test user accounts for automated browser tests. | Separate accounts give hard isolation of data, IAM and spend between environments (CR-027: real data and real money only in prod). Using the platform's VPC lets the platform reach `/internal/**` (FR-021) without peering and keeps one network owner. The zones are the platform's because the domains are. |
 
 **Out of scope:**
 
@@ -445,7 +453,7 @@ ATS scoring dimensions (FR-009):
 
 ## 4. Architecture
 
-One Spring Boot code base runs as two ECS services: **`ro-api`** (`APP_MODE=api`) answers HTTP requests, **`ro-worker`** (`APP_MODE=worker`) processes analyses and runs every scheduled job. They share PostgreSQL, Redis and S3, and never call each other directly. The split exists because an analysis holds a thread for up to 2 × 45 s of AI calls (FR-008); keeping that out of the API keeps read latency inside NFR-001 and lets workers scale on their own (NFR-006).
+One Spring Boot code base runs as two ECS services: **`ro-api`** (`APP_MODE=api`) answers HTTP requests, **`ro-worker`** (`APP_MODE=worker`) processes analyses and runs every scheduled job. They share PostgreSQL, Redis and S3, and never call each other directly. *(v0.7)* The same image also runs as a one-off task with `APP_MODE=migrate` before each API deploy (4.8.4), and the web server runs as a third service, `ro-web` (CMP-023). The split exists because an analysis holds a thread for up to 2 × 45 s of AI calls (FR-008); keeping that out of the API keeps read latency inside NFR-001 and lets workers scale on their own (NFR-006).
 
 *v0.4 (Resume Pro):* billing stays in the same two services. User-facing subscription calls and the Razorpay webhook run in `ro-api`. Reconciliation and cancellation retries run in `ro-worker`. Only CMP-019 talks to Razorpay. Every other component asks CMP-018 for the plan instead of reading the token.
 
@@ -538,7 +546,7 @@ flowchart LR
 | CMP-009 | Analysis queue | Hands analysis ids from the API to workers. Producer: `XADD`. Consumer group `ro-workers`: `XREADGROUP`, `XACK`, `XDEL`. Messages carry only `analysisId` and `requestId`. The database row, not the stream, is the source of truth (4.3.4). | Redis Streams via Spring Data Redis (Lettuce) | both | `analysis.queue` |
 | CMP-010 | Analysis worker | Takes a queued analysis, moves it to `RUNNING`, calls CMP-011, validates and saves the result or marks it `FAILED` and releases the quota unit (FR-008 – FR-011). | Spring service, Java 21 virtual threads, `app.worker.concurrency` per task | ro-worker | `analysis.worker` |
 | CMP-011 | AI client | Builds the prompt, redacts contact data (NFR-009), calls the provider with timeout and no SDK retries, validates the response against 4.6.3 and 4.6.4. `AnthropicAiClient` in dev/staging/prod, `FakeAiClient` when `AI_PROVIDER=fake`. | Anthropic Java SDK (`com.anthropic:anthropic-java`) | ro-worker | `ai` |
-| CMP-012 | Analysis sweeper | Every minute: fails analyses stuck in `RUNNING`, re-queues lost `QUEUED` ones once, fails them if still queued (FR-008 criteria 6–7). | `@Scheduled` + ShedLock | ro-worker | `analysis.worker` |
+| CMP-012 | Analysis sweeper | Every minute: fails analyses stuck in `RUNNING`, re-queues lost `QUEUED` ones once, fails them if still queued (FR-008 criteria 6–7). *(v0.7)* After each sweep it publishes the CloudWatch metric `AnalysisBacklog` (4.8.6), which scales the workers. | `@Scheduled` + ShedLock | ro-worker | `analysis.worker` |
 | CMP-013 | Report renderer | Renders a completed analysis to PDF on request from stored rows only (FR-016). | Thymeleaf template `templates/report.html` → openhtmltopdf 1.1 (PDFBox), Noto Sans embedded | ro-api | `report` |
 | CMP-014 | Privacy service | Erasure for the user (FR-019), on consent withdrawal (FR-002) and for the platform (FR-021): one transaction that deletes the user's rows and writes `storage_deletion` rows, then immediate S3 deletes. *v0.4:* the same transaction deletes the user's billing rows and writes `subscription_cancellation` rows; after the commit it cancels each at Razorpay through CMP-019 (FR-019 criterion 7). | Spring service + JPA | ro-api | `privacy` |
 | CMP-015 | Storage client and deletion retry job | `StorageClient` puts and deletes objects (`resumes/<uuid>`, SSE-KMS). The retry job deletes every pending `storage_deletion` row every 10 minutes until it succeeds (FR-018 criterion 4, FR-019 criterion 3). | AWS SDK for Java v2 (S3), `@Scheduled` + ShedLock | client: both; job: ro-worker | `common.storage`, `privacy` |
@@ -726,6 +734,8 @@ Runs every 60 s in `ro-worker` under ShedLock lock `analysis-sweeper`. Each rule
 | Lost twice | `status = 'QUEUED' AND requeue_count = 1 AND requeued_at < now() - 5 min` | `FAILED`, `AI_TIMEOUT`, release unit |
 
 Stream messages that were read but never acknowledged (worker crash) are not reclaimed with `XAUTOCLAIM`; the stuck-running rule recovers those analyses through the database.
+
+*(v0.7)* After the three rules, the same run counts `SELECT count(*) FROM analysis WHERE status = 'QUEUED'` and publishes it as `AnalysisBacklog` (namespace `ResumeOptimizer/<env>`, unit `Count`) with one `PutMetricData` call, unless `app.metrics.cloudwatch-enabled` is `false` (local). A failed call is logged at WARN and does not fail the sweep. This metric drives the worker autoscaling (4.8.6).
 
 #### 4.3.5 View a result and download the report (FR-012 – FR-014, FR-016)
 
@@ -1005,7 +1015,7 @@ The diagram shows the usual paths only. Unlike the analysis status (4.2), it is 
 | Anthropic Messages API | Score the resume, list missing skills, write suggestions (FR-008 – FR-011) | `POST https://api.anthropic.com/v1/messages`, header `x-api-key: ANTHROPIC_API_KEY`, through the official Java SDK, details in 4.6 | 45 s timeout; SDK retries set to 0; one retry after 2 s by CMP-011 on timeout, 429, 5xx, 529 or invalid response; then `FAILED` and the quota unit released (FR-008). Metric `ai_failures_total{reason}` with the alert in NFR-013. Monthly spend alarm per NFR-015. |
 | AWS S3 | Resume files (FR-003, FR-018 – FR-020) | AWS SDK v2, IAM task role (no keys in the container); bucket `sb-ro-<env>`, Block Public Access on, default encryption SSE-KMS with the environment's key, versioning off (a deleted object must really be gone) | Upload: put fails → 500 `INTERNAL_ERROR`, nothing stored. Delete: fails → `storage_deletion` row, retried every 10 min (4.3.6). Lifecycle rule deletes any object under `resumes/` older than 32 days as a safety net. |
 | Redis (ElastiCache) | Queue (CMP-009) and rate-limit counters (CR-020) | TLS, AUTH password from Secrets Manager | Rate limiter fails **open** (request allowed, WARN log, `ratelimit_unavailable_total`); queue publish failure is recovered by the sweeper (4.3.4); workers retry `XREADGROUP` every 5 s. Redis is not part of the API readiness check, so a Redis outage does not take the API down. |
-| PostgreSQL (RDS) | All durable data (section 5) | TLS, user `ro_app` (DML only) at runtime; Flyway runs as `ro_owner` in a one-off ECS task before the rolling deploy | Part of the readiness check: when it is down the task is taken out of the load balancer and requests get 503 from the load balancer. HikariCP pool 20 per API task, 10 per worker task, connection timeout 3 s → 500 `INTERNAL_ERROR`. |
+| PostgreSQL (RDS) | All durable data (section 5) | TLS, user `ro_app` (DML only) at runtime; Flyway runs as `ro_owner` in a one-off ECS task before the rolling deploy (*v0.7:* the same image with `APP_MODE=migrate`, 4.8.4; Flyway never runs in `api` or `worker`) | Part of the readiness check: when it is down the task is taken out of the load balancer and requests get 503 from the load balancer. HikariCP pool 20 per API task, 10 per worker task, connection timeout 3 s → 500 `INTERNAL_ERROR`. |
 | Razorpay Subscriptions API *(v0.4)* | Create, fetch and cancel Resume Pro subscriptions (FR-024, FR-028, FR-029, FR-019 criterion 7) | `https://api.razorpay.com/v1` over HTTPS, HTTP Basic auth `RAZORPAY_KEY_ID:RAZORPAY_KEY_SECRET`, through CMP-019. Calls: `POST /subscriptions`, `GET /subscriptions/{id}`, `POST /subscriptions/{id}/cancel`. Connect timeout 3 s, read timeout 10 s | Create: no retry (not idempotent, a retry could make two subscriptions); failure → 503 `PAYMENT_PROVIDER_UNAVAILABLE`. Fetch in verification: failure → 202 (webhook and reconciliation finish the job). Cancel by the user: failure → 503, user retries. Cancel from TBL-019: retried every 10 min; on a 4xx the job fetches the subscription and treats `cancelled`, `completed` or `expired` as done. A Razorpay outage never changes anyone's plan, because the plan is computed from local rows (FR-025). |
 | Razorpay Checkout *(v0.4)* | Collects the payment in the browser (FR-024 criterion 6) | `https://checkout.razorpay.com/v1/checkout.js`, loaded by CMP-001 only on the Pro page, opened with the public `key_id` and the `subscription_id` | If the script fails to load, the Pro page shows "Payment is unavailable right now, try again later"; nothing is created until the user clicks Subscribe again. |
 | Razorpay webhooks *(v0.4)* | Charges, renewals, failures and cancellations (FR-029) | Razorpay → `POST /webhooks/v1/razorpay` on the public load balancer, signed with the webhook secret (CR-033) | Razorpay retries deliveries that do not get a 2xx (per its documentation, for up to 24 h). Duplicates are no-ops (TBL-018). Anything still missed is corrected by the daily reconciliation (FR-029 criterion 8). |
@@ -1020,7 +1030,7 @@ Local payment without Razorpay: when the web server runs with `WEB_BILLING_FAKE=
 | Layer | Choice | Why this choice |
 |---|---|---|
 | Backend | Spring Boot 3.4, Java 21 | The team's main stack. PDFBox and POI, the most complete open-source PDF and DOCX parsers, are Java libraries, so extraction needs no second runtime. Java 21 virtual threads let one worker task hold several blocking 45 s AI calls without a thread pool per call. Spring Security's resource-server support does JWKS validation (CR-002) without custom crypto. |
-| Run modes | One image, `APP_MODE=api` or `worker` | The same code and the same migrations, scaled separately: API tasks by request rate, worker tasks by queue depth (NFR-006). One image keeps CR-026 (promote one artefact) simple. |
+| Run modes | One image, `APP_MODE=api` or `worker` (*v0.7:* or `migrate` for the one-off migration task) | The same code and the same migrations, scaled separately: API tasks by request rate, worker tasks by queue depth (NFR-006). One image keeps CR-026 (promote one artefact) simple. |
 | Frontend | Next.js 15 (App Router), TypeScript; *(v0.7)* 15.5 or later, `output: 'standalone'` | Platform standard; served under the platform domain so the `sb_access` cookie reaches the API without a second login (A-1, A-10). *(v0.7)* A Node server (CMP-023), not a static export to S3, because the login redirect (CR-035 (1)) and the request-time configuration of one image (CR-036) both need code that runs per request; 15.5 is the first release whose middleware runs on the Node.js runtime as stable, so it reads `process.env` at request time like the layout. |
 | Database | PostgreSQL 16 | Ownership, quota and erasure need transactions and row locks (4.3.2, 4.3.6); CHECK constraints hold the rules of section 3 in the schema; `percentile_cont` gives the p95 for FR-022 without a separate analytics store; `jsonb` holds the file signals. |
 | Queue | Redis 7 Streams | Consumer groups give at-most-one worker per message with acknowledgement, and Redis is already required for rate limiting. At 5,000 analyses/day (NFR-006) a dedicated broker (SQS, Kafka) adds a system without adding capacity we need. Durability is not needed from the queue because the database row is the source of truth (4.3.4). |
@@ -1187,7 +1197,7 @@ Every value below is a typed `@ConfigurationProperties` field with this default,
 
 | Property | Env variable | Default | Used by |
 |---|---|---|---|
-| `app.mode` | `APP_MODE` | `api` | 4 (run mode) |
+| `app.mode` | `APP_MODE` | `api` | 4 (run mode): `api`, `worker` or *(v0.7)* `migrate`, which runs the migrations and exits (4.8.4); any other value → the task refuses to start |
 | `app.env` *(v0.6)* | `APP_ENV` | none (required) | The environment name, one of `local`, `dev`, `staging`, `prod` (CR-026); any other value → the task refuses to start. `spring.profiles.active` is set to the same value, which selects `application-<env>.yml`. Read by: the prod key check (CR-027), the fake-billing guard (4.4), `<env>` in the Redis keys below and in the S3 bucket name `sb-ro-<env>` (4.4) |
 | `app.upload.max-bytes` | `UPLOAD_MAX_BYTES` | `5242880` | FR-003; `spring.servlet.multipart.max-file-size` = this, `spring.servlet.multipart.max-request-size` = this + 65536 |
 | `app.upload.max-pdf-pages` | `UPLOAD_MAX_PDF_PAGES` | `5` | FR-003 |
@@ -1218,11 +1228,13 @@ Every value below is a typed `@ConfigurationProperties` field with this default,
 | `app.ai.timeout` / `retry-delay` | — | `45s` / `2s` | FR-008 |
 | `app.worker.concurrency` | `WORKER_CONCURRENCY` | `5` | CMP-010 (10 tasks × 5 = NFR-006's 50) |
 | `app.sweeper.running-timeout` / `queued-timeout` | — | `120s` / `5m` | FR-008 |
+| `app.metrics.cloudwatch-enabled` *(v0.7)* | `CLOUDWATCH_METRICS_ENABLED` | `true` (`false` in local) | 4.3.4: the sweeper's CloudWatch metrics (4.8.6, 4.8.7) |
 | `app.cors.allowed-origins` *(v0.7)* | `CORS_ALLOWED_ORIGINS` | none (required) | CR-017; comma-separated list of exact origins, values per environment in 4.8.1 |
 | `app.local-login.key-dir` *(v0.7)* | `LOCAL_JWT_KEY_DIR` | `config/local-jwt` | CR-034; read only in `local` |
 | `app.local-login.redirect-origin` *(v0.7)* | `LOCAL_LOGIN_REDIRECT_ORIGIN` | `http://localhost:3000` | CR-034; read only in `local` |
 | `app.local-login.token-ttl` *(v0.7)* | — | `8h` | CR-034; read only in `local` |
 | — | `PLATFORM_JWKS_URL`, `PLATFORM_ISSUER` | none (required) | CR-002; *(v0.7)* values per environment in 4.8.1 (A-18), in `local` the API's own `/local/**` endpoints |
+| — | `DB_OWNER_USERNAME`, `DB_OWNER_PASSWORD` *(v0.7)* | none (required in `migrate` mode only; not read in `api` and `worker`) | 4.8.4 migration task: the owner role `ro_owner` that runs Flyway |
 | — | `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `REDIS_URL`, `REDIS_PASSWORD`, `S3_BUCKET`, `ANTHROPIC_API_KEY`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` (*v0.4*) | none (required; secrets from Secrets Manager) | 4.4 |
 
 *(v0.7)* Web server (`resume-optimizer-web`, CMP-023) variables. They are read at request time by the root layout and the middleware, never at build time (CR-036):
@@ -1257,6 +1269,8 @@ How the module is hosted, configured, deployed and watched in each environment. 
 | | local | dev | staging | prod |
 |---|---|---|---|---|
 | `<domain>` | `localhost` | `surfingbear-dev.com` | `surfingbear-staging.com` | `surfingbear.com` |
+| AWS account (A-19) | none (`docker compose`) | `sb-dev` | `sb-staging` | `sb-prod` |
+| How it is deployed | `docker compose up` (4.8.2) | every merge to `main` (4.8.4) | `workflow_dispatch` with the SHA running in dev | `workflow_dispatch` with the SHA running in staging |
 | Web UI, as the browser sees it | `http://localhost:3000/resume-optimizer` | `https://www.surfingbear-dev.com/resume-optimizer` | `https://www.surfingbear-staging.com/resume-optimizer` | `https://www.surfingbear.com/resume-optimizer` |
 | Web origin = the one CORS origin (CR-017) | `http://localhost:3000` | `https://www.surfingbear-dev.com` | `https://www.surfingbear-staging.com` | `https://www.surfingbear.com` |
 | Public API (`/api/v1/**`, `/webhooks/v1/**`) | `http://localhost:8080` | `https://ro-api.surfingbear-dev.com` | `https://ro-api.surfingbear-staging.com` | `https://ro-api.surfingbear.com` |
@@ -1302,6 +1316,130 @@ How the module is hosted, configured, deployed and watched in each environment. 
 **API calls come from the browser only.** No server component, route handler or middleware of CMP-023 calls the API. Every API call is made by the browser to `RO_API_BASE_URL` with `credentials: 'include'`, so the `sb_access` cookie is sent, and with `X-Requested-With: SurfingBear` on `POST` and `DELETE` (CR-018); pages render their data on the client. Reason: the token is checked in one place, the API (CR-001); the web tier holds no user data and no secret; and server-side calls would need the user's cookie forwarded from one host to another.
 
 **Page headers.** The middleware adds `Cache-Control: private, no-store` to every page response it passes on. Next.js itself sends `private, no-cache, no-store, max-age=0, must-revalidate` for dynamically rendered pages (the root layout is `force-dynamic`); either value meets CR-037, so it does not matter which one wins.
+
+#### 4.8.4 Pipeline
+
+**Images.** `ro-api` (API, worker and migration task): `eclipse-temurin:21-jre` base, the Spring Boot layered jar, the OpenTelemetry Java agent at `/opt/otel/opentelemetry-javaagent.jar` (version pinned in `pom.xml` and copied by `maven-dependency-plugin`, 4.8.7), a non-root user, `EXPOSE 8080 8081`, `ENTRYPOINT ["java", "-jar", "/app/app.jar"]`; JVM options come from `JAVA_TOOL_OPTIONS` (4.8.2). `ro-web`: 4.8.3. Both are pushed to ECR repositories `ro-api` and `ro-web` in the `sb-tools` account (A-19): tag = full git SHA, tag immutability on, scan on push, no lifecycle expiry (any earlier SHA stays deployable, CR-031), and a repository policy that lets the task execution roles of `sb-dev`, `sb-staging` and `sb-prod` pull.
+
+**Workflows** (GitHub Actions, GitHub-hosted runners):
+
+| Repository | Pull request | Merge to `main` | `workflow_dispatch` |
+|---|---|---|---|
+| `resume-optimizer-api` | CR-028 checks and a Docker build (no push) | CR-028 checks, push `ro-api:<sha>`, then `deploy` to dev | `deploy` with inputs `environment` (`staging` or `prod`), `image_sha` (40 hex characters), `rollback` (default `false`) |
+| `resume-optimizer-web` | Prettier, ESLint, `tsc --noEmit`, Vitest, `npm audit --audit-level=high` (CR-022), gitleaks, Docker build, the build-output check of CR-036, Playwright against `e2e/docker-compose.yml` (below) | the same, push `ro-web:<sha>`, then `deploy` to dev | `deploy` with the same three inputs; `e2e-staging` (below) |
+| `resume-optimizer-infra` | `terraform fmt -check`, `terraform validate`, `terraform plan` for each environment, each plan posted as a PR comment | `terraform plan` for each environment | `apply` with input `environment` (`dev`, `staging`, `prod`, `tools`), through the GitHub Environment of that name |
+
+GitHub Environments `dev`, `staging`, `prod` exist in the three repositories (and `tools` in the infra repository); `staging`, `prod` and `tools` require one approval by the tech lead before a job that uses them starts. Each deploy job has `concurrency: deploy-<env>` with `cancel-in-progress: false`, so two deploys of one repository to one environment queue instead of overlapping. An infra `apply` to an environment is not started while a deploy to it is running (operating rule; the two are in different repositories).
+
+**AWS access by OIDC.** Each of the four accounts has the GitHub OIDC identity provider (`token.actions.githubusercontent.com`, audience `sts.amazonaws.com`). Each role trusts only the `sub` values listed:
+
+| Role | Account | Trusted `sub` | Allowed to |
+|---|---|---|---|
+| `ro-ci-ecr-push` | `sb-tools` | `repo:surfingbear/resume-optimizer-api:ref:refs/heads/main`, `repo:surfingbear/resume-optimizer-web:ref:refs/heads/main` | push to `ro-api` / `ro-web` |
+| `ro-ci-ecr-pull` | `sb-tools` | `repo:surfingbear/resume-optimizer-web:*` | pull `ro-api` (the Playwright stack) |
+| `ro-ci-deploy-dev` | `sb-dev` | the two `main` subjects above | register task definitions, run the migration task, update the services, read and write `/ro/dev/*-image-sha`, read `/ro/dev/migrate/network`, `iam:PassRole` on the task and execution roles |
+| `ro-ci-deploy-staging`, `ro-ci-deploy-prod` | `sb-staging`, `sb-prod` | `repo:surfingbear/resume-optimizer-api:environment:<env>`, `repo:surfingbear/resume-optimizer-web:environment:<env>` | the same in that account |
+| `ro-ci-read-dev`, `ro-ci-read-staging` | `sb-dev`, `sb-staging` | the `environment:staging` subjects (in `sb-dev`), the `environment:prod` subjects (in `sb-staging`) | `ecs:DescribeServices`, `ecs:DescribeTaskDefinition` (promotion check) |
+| `ro-ci-tf-plan-<env>` | each environment account, and `sb-tools` (`<env>` = `tools`) | `repo:surfingbear/resume-optimizer-infra:pull_request`, `repo:surfingbear/resume-optimizer-infra:ref:refs/heads/main` | read-only access, Terraform state read and lock |
+| `ro-ci-tf-apply-<env>` | each environment account, and `sb-tools` | `repo:surfingbear/resume-optimizer-infra:environment:<env>` | apply |
+
+**API deploy** (`deploy` workflow of `resume-optimizer-api`; dev runs it after every merge, staging and prod by hand). Steps in order; a failing step fails the run and no later step runs:
+
+0. Checks (staging and prod): `image_sha` is 40 hex characters and exists in ECR `ro-api`. Without `rollback`, the image of the PRIMARY deployment of service `ro-api` in the previous environment (dev for staging, staging for prod), read with `ro-ci-read-<previous>`, must be `ro-api:<image_sha>`. With `rollback: true`, a task definition revision of family `ro-api` in the target environment must already have used `ro-api:<image_sha>` (CR-031).
+1. Migration (skipped when `rollback: true`; the newer schema still works with the older image, CR-030): register a revision of family `ro-migrate` = its latest ACTIVE revision with the `app` container's image replaced; `aws ecs run-task` on cluster `ro-<env>` (Fargate, with the private subnets and the security group `ro-migrate` read from the SSM parameter `/ro/<env>/migrate/network`, which Terraform writes); wait until the task stops (at most 10 minutes); the `app` container's exit code must be 0.
+2. `ro-api`: register a revision of family `ro-api` the same way, update the service, wait for steady state (at most 15 minutes).
+3. `ro-worker`: the same with family and service `ro-worker`.
+4. Write `<image_sha>` to the SSM parameter `/ro/<env>/api-image-sha` (Terraform's revisions use it, 4.8.5).
+5. Smoke: `GET https://ro-api.<domain>/api/v1/job-roles` without a cookie must return 401 with `error.code` `UNAUTHENTICATED`. This proves DNS, TLS, the load balancer, a running task and the filter chain (CR-001).
+
+What the migration task does (`APP_MODE=migrate`): it connects with `DB_OWNER_USERNAME` / `DB_OWNER_PASSWORD` (`ro_owner`); creates the login role named `DB_USERNAME` (`ro_app`) if it does not exist and sets its password to `DB_PASSWORD` (a `DO` block with `format('ALTER ROLE %I PASSWORD %L', …)`, so a new value in `ro/<env>/db-app` takes effect at the next deploy); runs Flyway (`classpath:db/migration`); and exits 0, or 1 on any failure. It starts no web server and creates no Redis, S3, AI or Razorpay client, so in this mode only `APP_ENV`, `DB_URL`, `DB_OWNER_USERNAME`, `DB_OWNER_PASSWORD`, `DB_USERNAME` and `DB_PASSWORD` are required. `ro-api` and `ro-worker` run with `spring.flyway.enabled=false`, because `ro_app` cannot run DDL. Locally the same mode runs as the `migrate` service of `docker-compose.yml`, or as `APP_MODE=migrate ./mvnw spring-boot:run` before the API is started from the IDE.
+
+**Web deploy** (`deploy` workflow of `resume-optimizer-web`): step 0 as above with service `ro-web` and ECR `ro-web`; register a revision of family `ro-web`, update the service, wait for steady state (at most 15 minutes); write `/ro/<env>/web-image-sha`; smoke: `GET https://www.<domain>/resume-optimizer/api/health` through the CDN must return 200 `{"status":"UP"}`.
+
+All three services use the ECS deployment circuit breaker with rollback (CR-029): a deployment whose tasks do not become healthy is rolled back by ECS to the last steady revision, and the wait step then fails. A failed smoke step does not roll back by itself: the person on call decides, and a rollback is a `deploy` with `rollback: true` (CR-031). When an API change and a web change belong together, the API is deployed to each environment first; the older web keeps working against it because the API only adds fields and its clients ignore unknown ones (6.1, CR-030).
+
+**Playwright in CI.** On every web pull request and merge, `e2e/docker-compose.yml` starts `postgres:16`, `redis:7`, LocalStack, `migrate`, `api` and `worker` from the `ro-api` image whose SHA is in `e2e/api-image-sha.txt` (pulled with `ro-ci-ecr-pull`; a web change that needs newer API behaviour updates this file in the same PR), and `web` built from the PR. Everything runs with the local column of 4.8.2 (`APP_ENV=local`, `AI_PROVIDER=fake`, `BILLING_PROVIDER=fake`, `WEB_BILLING_FAKE=true`). Browsers: Chromium and Firefox (NFR-018). Sign-in is `/local/login` (CR-034).
+
+**Playwright on staging.** The `e2e-staging` workflow, started by hand after a staging deploy through the GitHub Environment `staging`, runs the same suite against `https://www.surfingbear-staging.com/resume-optimizer` on Chromium, Firefox and WebKit. It signs in on the platform's staging login page with a platform test account (A-19; credentials in the Environment secrets `E2E_USER_EMAIL` and `E2E_USER_PASSWORD`) and pays in Razorpay Test Mode with Razorpay's documented test card (FR-024). A green run is a release checklist item for prod.
+
+#### 4.8.5 Infrastructure as code
+
+**Tool.** Terraform 1.9 with the AWS provider `~> 5.70` (CR-039), in the repository `resume-optimizer-infra`:
+
+```text
+resume-optimizer-infra/
+├── bootstrap/                 # applied once per account by an admin with local credentials: state bucket, lock table, OIDC provider, ro-ci-* roles
+├── modules/
+│   ├── alb/                   # public and internal load balancers, listeners, rules, target groups, ACM certificates (4.8.3)
+│   ├── ecs-service/           # task definition family, service, task and execution roles, security group, log group, autoscaling (4.8.6)
+│   ├── rds/                   # PostgreSQL 16 instance, subnet and parameter groups (rds.force_ssl = 1)
+│   ├── redis/                 # ElastiCache replication group, subnet group
+│   ├── s3/                    # bucket sb-ro-<env>: Block Public Access, SSE-KMS default, versioning off, 32-day rule on resumes/ (4.4)
+│   ├── observability/         # AMP workspace, rules, alert manager, SNS, Chatbot, canary, alarms, X-Ray, Grafana dashboard (4.8.7)
+│   └── secrets/               # the six empty Secrets Manager secrets of 4.8.2
+├── envs/
+│   ├── dev/                   # main.tf, backend.tf, terraform.tfvars
+│   ├── staging/
+│   ├── prod/
+│   └── tools/                 # sb-tools: ECR repositories ro-api, ro-web
+├── observability/             # alert rules (YAML), alert manager configuration, dashboard JSON (4.8.7)
+└── RUNBOOK.md                 # the manual steps below, with the date each was done per environment
+```
+
+Each `envs/<env>` creates in its account: the KMS key `alias/ro-<env>` (NFR-007: S3, RDS, Redis at rest, CloudWatch Logs, Secrets Manager), the ECS cluster `ro-<env>`, the services `ro-api`, `ro-worker`, `ro-web`, the task definition family `ro-migrate`, and every module above. **Inputs** in `terraform.tfvars`: `vpc_id`, `private_subnet_ids`, `public_subnet_ids`, `vpc_cidr` (A-19), `domain` (4.8.1), `razorpay_key_id`, `razorpay_plan_id`, `initial_image_sha`, and the task counts of 4.8.6. **Outputs**: the DNS names of the two load balancers and the ACM validation records.
+
+**State.** S3 backend, bucket `sb-tfstate-<env>` in the environment's account (`sb-tfstate-tools` for `envs/tools`), versioned and SSE-KMS encrypted, key `resume-optimizer/terraform.tfstate`, lock table DynamoDB `sb-tf-locks` in the same account. The state holds the three secret values Terraform must read (below); only the `ro-ci-tf-*` roles and admins can read the bucket.
+
+**Images and task definitions.** Terraform owns every task definition family (sizes, containers, environment, secrets, log configuration, roles), with `track_latest = true`, and the services, with `lifecycle { ignore_changes = [desired_count] }` (autoscaling owns the count). The image of Terraform's revisions comes from the SSM parameters `/ro/<env>/api-image-sha` and `/ro/<env>/web-image-sha`, created by Terraform with the value of `initial_image_sha` (an image already in ECR) and `ignore_changes = [value]`; after that only the pipeline writes them (4.8.4). So a Terraform change to a task definition (a new variable, a new size) registers a revision with the image that is running and rolls it out at once, and a deploy leaves `terraform plan` clean.
+
+**Secrets.** Terraform creates the six secrets of 4.8.2 empty. It reads three values itself: `ro/<env>/db-owner` (the RDS master user `ro_owner` and its password), `ro/<env>/redis` (the ElastiCache AUTH token) and `ro/<env>/web-origin-verify` (rule (1) of 4.8.3). A new environment is therefore applied in two passes: `terraform apply -target=module.secrets`, then ops set every value, then the full `terraform apply`.
+
+**Not in Terraform: done once by hand, in this order, and recorded in `RUNBOOK.md`:**
+
+1. Per account: `bootstrap/` applied by an admin (state bucket, lock table, OIDC provider, the `ro-ci-*` roles of 4.8.4).
+2. Per environment, in Razorpay (Test Mode in dev and staging, Live Mode in prod): create the plan of 3.1 in the dashboard and put its id in `envs/<env>/terraform.tfvars` as `razorpay_plan_id`; put the key id in `razorpay_key_id`; create the webhook with the URL of 4.8.1, the events of 4.3.9 and a new secret.
+3. Per environment, after `apply -target=module.secrets`: ops set the values of the six secrets of 4.8.2: the Razorpay key secret and webhook secret from step 2; the API key of the environment's Anthropic workspace `resume-optimizer-<env>`, whose monthly spend limit ops set to the budget from finance (NFR-015); random values of at least 32 characters for the rest.
+4. By the platform team (A-18, A-19), from the Terraform outputs: the two CloudFront behaviours of 4.8.3 with the origin secret; public DNS records `ro-api.<domain>` and `ro-web-origin.<domain>` (alias to the public load balancer); the private-zone record `ro-internal.<domain>` (alias to the internal load balancer); the ACM validation records.
+5. For alerts (4.8.7): the AWS Chatbot app authorised for the company Slack workspace once, and the PagerDuty service "Resume Optimizer" with its Amazon SNS integration.
+
+Local runs on `docker compose` only; nothing local is in Terraform.
+
+#### 4.8.6 Task sizes and scaling
+
+**Task sizes** (per task, including the observability sidecar of 4.8.7):
+
+| Task | Fargate size | Containers (CPU units / memory) |
+|---|---|---|
+| `ro-api` | 1 vCPU / 2 GB | `app` 896 / 1,792 MiB; `adot` sidecar 128 / 256 MiB |
+| `ro-worker` | 0.5 vCPU / 1 GB | `app` 384 / 768 MiB; `adot` sidecar 128 / 256 MiB |
+| `ro-web` | 0.25 vCPU / 0.5 GB | `app` 256 / 512 MiB (no sidecar) |
+| `ro-migrate` | 0.5 vCPU / 1 GB | `app` 512 / 1,024 MiB |
+
+The JVM runs with `-XX:MaxRAMPercentage=75` (in `JAVA_TOOL_OPTIONS`), measured against the `app` container's memory limit: heap at most 1,344 MiB in `ro-api`, 576 MiB in `ro-worker`, 768 MiB in `ro-migrate`. No task has a container health check: `ro-api` and `ro-web` are judged by their target groups (4.8.3), `ro-worker` by staying running; analyses held by a hung worker are failed and their units released by the sweeper, which any other worker task runs (FR-008 criterion 6).
+
+**Task counts** (desired / minimum / maximum; the desired count is only the starting value, autoscaling owns it afterwards):
+
+| Service | dev | staging | prod |
+|---|---|---|---|
+| `ro-api` | 1 / 1 / 2 | 2 / 2 / 4 | 2 / 2 / 6 |
+| `ro-worker` | 1 / 1 / 2 | 2 / 2 / 10 | 2 / 2 / 10 |
+| `ro-web` | 1 / 1 / 2 | 2 / 2 / 4 | 2 / 2 / 4 |
+
+**Scaling policies.**
+
+- `ro-api` and `ro-web`: target tracking on `ECSServiceAverageCPUUtilization`, target 60 %, scale-out cooldown 60 s, scale-in cooldown 300 s.
+- `ro-worker`: step scaling on the CloudWatch metric `AnalysisBacklog` in namespace `ResumeOptimizer/<env>`: the number of analyses in `QUEUED`. CMP-012 publishes it once a minute, during its sweep, with `cloudwatch:PutMetricData`, which only the worker task role is allowed (IAM condition on `cloudwatch:namespace`). Alarm `ro-<env>-backlog-high`: maximum ≥ 20 in 2 consecutive 1-minute periods → policy `ro-<env>-worker-out`: +2 tasks while the backlog is below 100, +4 tasks at 100 or more, cooldown 120 s. Alarm `ro-<env>-backlog-empty`: maximum = 0 in 15 consecutive 1-minute periods → policy `ro-<env>-worker-in`: −1 task, cooldown 300 s; while the backlog stays at 0 one more task is removed every 5 minutes, never below the minimum. Missing data counts as not breaching for both alarms. Check against NFR-006: 10 tasks × `WORKER_CONCURRENCY` 5 = 50 analyses in parallel.
+
+**Database and cache.**
+
+| | dev | staging | prod |
+|---|---|---|---|
+| RDS PostgreSQL 16 (latest minor, automatic minor upgrades) | `db.t4g.micro`, single-AZ, 20 GB gp3, no storage autoscaling, backups 1 day | `db.t4g.medium`, Multi-AZ, 100 GB gp3, storage autoscaling up to 500 GB, backups 7 days with point-in-time recovery (NFR-005 RPO), deletion protection on | as staging |
+| ElastiCache Redis 7 | `cache.t4g.micro`, one node | `cache.t4g.small`, primary + 1 replica, Multi-AZ with automatic failover | as staging |
+
+All of them: storage encrypted with the environment's KMS key; RDS with `rds.force_ssl = 1` and the database `resume_optimizer`, owned by the master user `ro_owner`; Redis with in-transit encryption and an AUTH token (4.4). Staging uses the prod sizes (1.7), so the load tests on staging (NFR-001, NFR-006) measure what prod will do.
+
+**Connection budget.** HikariCP pools are 20 connections per `ro-api` task and 10 per `ro-worker` task (4.4); the migration task uses at most 2. RDS PostgreSQL's default `max_connections` is `LEAST(DBInstanceClassMemory / 9531392, 5000)`: roughly 400 for the 4 GiB `db.t4g.medium` and roughly 100 for the 1 GiB `db.t4g.micro` (RDS keeps some memory and a few connections for itself; check with `SHOW max_connections` after creation). Prod at its maxima: 6 × 20 + 10 × 10 = 220 < ~400. A rolling update can double one service for a few minutes (CR-029), but the pipeline deploys `ro-api` and `ro-worker` one after the other (4.8.4), so the peak is 12 × 20 + 10 × 10 = 340 while `ro-api` rolls, or 6 × 20 + 20 × 10 = 320 while `ro-worker` rolls, both < ~400. Dev at its maxima: 2 × 20 + 2 × 10 = 60 < ~100; a deploy while dev is scaled to its maximum peaks at 4 × 20 + 2 × 10 = 100, at the limit, which is accepted in dev only.
 
 ---
 
@@ -2752,7 +2890,7 @@ Every FR and NFR, with the components (4.2), tables (5.2) and endpoints (6.2) th
 | NFR-007 Encryption | CMP-015, infrastructure (4.4) | all | all | AWS Config rules |
 | NFR-008 Vulnerabilities | all | — | all | ZAP baseline; dependency scan in CI (CR-022) |
 | NFR-009 AI data minimised | CMP-011 | TBL-005 (stored text is not redacted; only the sent copy is) | none | Redactor test set of 4.6.1 (50 samples); prompt-builder test |
-| NFR-010 Data location | CMP-015, infrastructure (4.4) | all | — | Infrastructure-as-code review |
+| NFR-010 Data location | CMP-015, infrastructure (4.4) | all | — | Infrastructure-as-code review (*v0.7:* Terraform plan, CR-039) |
 | NFR-011 Retention enforced | CMP-016 | TBL-004, TBL-005, TBL-006, TBL-016 | none | Retention audit job (06:00 IST), `retention_violations_total` alert |
 | NFR-012 Erasure completes | CMP-014, CMP-015, CMP-019, CMP-021 | TBL-011, TBL-012, TBL-019 | API-003, API-013, API-014 | `ErasureIT` timing (`db_completed_at - requested_at` < 5 s); alert on `storage_deletion` or `subscription_cancellation` rows older than 24 h |
 | NFR-013 Metrics and alerts | CMP-002, CMP-010, CMP-011, CMP-009, CMP-019, CMP-020, CMP-021 | — | all | Synthetic failure on staging fires each alert, including a webhook with a wrong signature and a forced reconciliation fix |
