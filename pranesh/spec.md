@@ -364,7 +364,7 @@ Layering rules (backend):
 | Entities never leave the service layer; controllers return DTO records only. Mapping is manual in the service (no MapStruct). | ArchUnit test: no controller method returns a type annotated `@Entity`. |
 | A feature package may call another feature's **service**, never its repository. `common` must not import any feature package. | ArchUnit test. |
 | Services throw `ApiException(ErrorCode, details)`; only `GlobalExceptionHandler` builds error responses. No `try/catch` that swallows an exception. | Code review; ArchUnit forbids `ResponseEntity` construction in services. |
-| Time is read only from an injected `java.time.Clock` (bean `Clock.systemUTC()`), never `Instant.now()` without it, so tests can fix time. | Checkstyle `RegexpSinglelineJava` forbidding `Instant.now()` and `LocalDateTime.now()` outside `common/config`. |
+| Time is read only from an injected `java.time.Clock` (bean `Clock.systemUTC()`), never `Instant.now()` without it, so tests can fix time. *(v1.2)* Application SQL never reads the database clock: no `now()`, `CURRENT_TIMESTAMP` or `LOCALTIMESTAMP` in queries; a time comparison binds `:now` from the `Clock` or is done in Java (TBL-013 entitlement query). The column `DEFAULT now()` of §5.2 is DDL, not a query. | Checkstyle `RegexpSinglelineJava` forbidding `Instant.now()` and `LocalDateTime.now()` outside `common/config`; *(v1.2)* unit test `NoDatabaseClockInSqlTest` scans `backend/src/main/java/**` for those three SQL functions (case-insensitive) and fails on a match. |
 | Constructor injection only; no field `@Autowired`. | Checkstyle rule. |
 | Logging via SLF4J `private static final Logger log = LoggerFactory.getLogger(X.class);`; no `System.out`/`printStackTrace`. | Checkstyle rule. |
 
@@ -1990,7 +1990,7 @@ FROM ro.subscriptions
 WHERE user_id = :userId;
 ```
 
-`PRO` if `access_until > now()` (rows with a null `paid_through` give null and are ignored by `max`).
+*(changed in v1.2)* The query has no `now()`: CMP-025 compares the returned `access_until` with `clock.instant()` of the injected `Clock` in Java (`accessUntil != null && accessUntil.isAfter(now)`). `PRO` if `access_until` is later than that instant (rows with a null `paid_through` give null and are ignored by `max`). This keeps the fixed-clock tests of CR-006, FR-025 and NFR-018 exact (rule "time from the Clock", §2.2).
 
 #### TBL-014 `subscription_payments` *(v1.1)*
 Purpose: one row per paid billing cycle; the accounting record and the only source of `paid_through` (FR-027, FR-028, CR-042).
