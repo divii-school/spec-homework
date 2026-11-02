@@ -144,7 +144,7 @@ API-022 (Razorpay webhook) is not a user permission: it is called by Razorpay an
 
 | ID | Area | Rule | How it is checked |
 |---|---|---|---|
-| CR-016 | Secrets | Secrets (DB password, Redis auth token, Anthropic API key, and since v1.1 the Razorpay key secret `RO_RAZORPAY_KEY_SECRET` and webhook secret `RO_RAZORPAY_WEBHOOK_SECRET`) exist only as environment variables injected by ECS from AWS Secrets Manager. No secret is in the repository, in `application*.yml` (they reference `${RO_DB_PASSWORD}` etc.), in Docker images, or in logs. | CI runs `gitleaks detect` on every PR and fails on a finding; code review. |
+| CR-016 | Secrets | Secrets (DB passwords of `ro_app` and, since v1.2, `ro_migrator` and the RDS master user, Redis auth token, Anthropic API key, and since v1.1 the Razorpay key secret `RO_RAZORPAY_KEY_SECRET` and webhook secret `RO_RAZORPAY_WEBHOOK_SECRET`) exist only as environment variables injected by ECS from AWS Secrets Manager. No secret is in the repository, in `application*.yml` (they reference `${RO_DB_PASSWORD}` etc.), in Docker images, or in logs. | CI runs `gitleaks detect` on every PR and fails on a finding; code review. |
 | CR-017 | Transport | Public traffic is HTTPS only (TLS 1.2 or higher) terminated at the AWS ALB; HTTP is redirected to HTTPS. Responses carry `Strict-Transport-Security: max-age=31536000; includeSubDomains`. Backend → PostgreSQL uses TLS (`sslmode=verify-full`); backend → Redis uses TLS. | `curl -I http://…` returns 301; staging config review; `testssl.sh` scan before go-live shows no TLS 1.0/1.1. |
 | CR-018 | Input validation | Every request body, path variable, query parameter and header used by a controller is validated with Jakarta Bean Validation before the service runs. JSON with unknown properties or wrong types is rejected with `400 MALFORMED_REQUEST` (ERR-005) (`spring.jackson.deserialization.fail-on-unknown-properties=true`). **One exception:** the Razorpay webhook (API-022) reads its body as raw bytes, checks the signature on those bytes, and only then parses it with a separate lenient `ObjectMapper` (`FAIL_ON_UNKNOWN_PROPERTIES = false`) into a `JsonNode`, because Razorpay adds fields without notice. | Integration test posts `{"jobRoleId":"…","extra":1}` → 400 `MALFORMED_REQUEST`; `RazorpayWebhookIT` posts a valid event with an extra unknown field → 200 and processed. |
 | CR-019 | File safety | Uploaded files are identified by their **content** (magic bytes and container structure), never by filename extension or the `Content-Type` part header. Parsing runs with the limits in §3.4 (`MAX_FILE_BYTES`, `MAX_PDF_PAGES`, `PARSE_TIMEOUT`) and with Apache POI zip-bomb protection (`ZipSecureFile.setMinInflateRatio(0.01)`, `ZipSecureFile.setMaxEntrySize(20 MB)`). The file is processed in memory and discarded when the request ends. | Tests: a `.pdf`-named DOCX is accepted as DOCX; a `.docx`-named PNG gets `UNSUPPORTED_FILE_TYPE`; a zip bomb DOCX gets `FILE_CORRUPT` within `PARSE_TIMEOUT`. |
@@ -253,6 +253,32 @@ Retention (CR-022). All periods are in §3.4:
 | Webhook events | — | the nine of §4.4 | the nine of §4.4 | the nine of §4.4 |
 
 `dev` and `staging` share Test mode, so Razorpay sends each test event to both webhooks; each environment ignores the other's subscriptions as `IGNORED_UNKNOWN_SUBSCRIPTION` (FR-028 criterion 4). Rotating a secret: add the new value in Secrets Manager, update it in the Razorpay Dashboard, then redeploy the backend.
+
+**Configuration per environment (complete)** *(v1.2)*. Every value that differs between environments, or that is a secret, is in this table, and nothing else may differ. Every other property (all of §3.4, `server.port=8080`, `management.server.port=8081`, timeouts, pool sizes) is set once in `application.yml` and has the same value everywhere. "Task env" = plain environment variable in the ECS task definition; "Secret" = ECS `secrets` entry from AWS Secrets Manager (CR-016); "Profile file" = `application-<profile>.yml` in the image. `ConfigCoverageTest` reads the four profile files and fails if one sets a key that is not in this table.
+
+| Name (env var or property) | Set in | local | dev | staging | prod |
+|---|---|---|---|---|---|
+| `SPRING_PROFILES_ACTIVE` | Task env (local: `./mvnw spring-boot:run -Dspring-boot.run.profiles=local`) | `local` | `dev` | `staging` | `prod` |
+| `RO_DB_URL` → `spring.datasource.url` | Profile file (local) / task env | `jdbc:postgresql://localhost:5432/resume_optimizer` | `jdbc:postgresql://<RDS endpoint>:5432/resume_optimizer?sslmode=verify-full&sslrootcert=/etc/ssl/rds/global-bundle.pem` (the AWS RDS CA bundle is copied into the image at that path) | same form, `staging` endpoint | same form, `prod` endpoint |
+| `RO_DB_PASSWORD` → `spring.datasource.password` (user `ro_app`) | Profile file (local) / Secret | `local-app` | `ro/dev/db-app-password` | `ro/staging/db-app-password` | `ro/prod/db-app-password` |
+| `RO_DB_MIGRATOR_PASSWORD` → `spring.flyway.password` (user `ro_migrator`) | Profile file (local) / Secret | `local-migrator` | `ro/dev/db-migrator-password` | `ro/staging/db-migrator-password` | `ro/prod/db-migrator-password` |
+| `RO_REDIS_HOST`, `RO_REDIS_PORT` → `spring.data.redis.host`, `.port` | Profile file (local) / task env | `localhost`, `6379` | ElastiCache primary endpoint, `6379` | same, `staging` | same, `prod` |
+| `spring.data.redis.ssl.enabled` | Profile file | `false` | `true` | `true` | `true` |
+| `RO_REDIS_AUTH_TOKEN` → `spring.data.redis.password` | Secret | not set (no AUTH locally) | `ro/dev/redis-auth-token` | `ro/staging/redis-auth-token` | `ro/prod/redis-auth-token` |
+| `ro.ai.mode` | Profile file | `stub` | `live` | `live` | `live` |
+| `RO_AI_API_KEY` | Secret | not set (stub) | `ro/dev/anthropic-api-key` | `ro/staging/anthropic-api-key` | `ro/prod/anthropic-api-key` |
+| `ro.billing.mode` | Profile file | `stub` | `razorpay` | `razorpay` | `razorpay` |
+| `RO_RAZORPAY_KEY_ID`, `RO_RAZORPAY_KEY_SECRET`, `RO_RAZORPAY_PLAN_ID`, `RO_RAZORPAY_WEBHOOK_SECRET` | per "Razorpay per environment" above | | | | |
+| `ro.auth.jwks-uri`, `ro.auth.issuer` | Profile file | per "Platform auth per environment" above | | | |
+| `ro.app.public-base-url` (`PUBLIC_BASE_URL`) | Profile file | `http://localhost:3000` | `https://dev.app.surfingbear.com` | `https://staging.app.surfingbear.com` | `https://app.surfingbear.com` |
+| `springdoc.api-docs.enabled`, `springdoc.swagger-ui.enabled` | Profile file | `true` | `true` | `false` | `false` |
+| `logging.level.com.surfingbear` | Profile file | `DEBUG` | `INFO` | `INFO` | `INFO` |
+| `RO_WEB_LOGIN_URL` (frontend) | `frontend/.env.development` (local) / frontend task env | `http://localhost:3000/resume-optimizer/dev-login` | per "Platform auth per environment" | same | same |
+| `RO_WEB_DEV_LOGIN` (frontend) | `frontend/.env.development` / not set | `true` | not set (`false`) | not set | not set |
+| `RO_WEB_DEV_API_ORIGIN` (frontend) | `frontend/.env.development` | `http://localhost:8080` | not set | not set | not set |
+| `PORT` (frontend container) | Frontend task env | `3000` (`next dev`) | `3000` | `3000` | `3000` |
+
+`ro.worker.instance-id` is never set (default `<hostname>:<random UUID>`, §4.6.5). The RDS master secret `ro/<env>/db-master` is used only by the `ro-db-bootstrap` task (§5) and is never given to the backend. A missing required value stops start-up: Spring fails on an unresolved `${…}` placeholder, the CR-003 / CR-033 / `PUBLIC_BASE_URL` checks refuse bad values, and the frontend layout throws (§4.7).
 
 ### 1.8 Deployment
 
