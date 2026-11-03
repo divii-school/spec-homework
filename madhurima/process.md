@@ -6,6 +6,7 @@ List every AI conversation you used, with a link and one line on what it was for
 | Date | Tool | Link | What I used it for |
 |---|---|---|---|
 | 2026-10-16, 2026-10-19 | Claude Code (desktop app) | Local session — no shareable link | Read BRIEF/RUBRIC, set up repo access, drafted sections 0–8 section by section, ran an ID cross-reference check (every CR/FR/NFR/CMP/TBL/API/ERR reference defined; every FR/NFR in the traceability matrix) |
+| 2026-11-03 | Claude (claude.ai, linked to Notion and Slack) | Private session — no shareable link | Read Saswat's feedback DM and build-test run 1; fixed feedback point 3 (#7 alert job finds processes through Redis, #28 expired checkout asks Razorpay first) as spec v2.2 |
 
 ## Notes
 - Backend written for **Go** (my main stack): Gin, pgx with plain SQL, golang-migrate, my own Redis-list queue with a goroutine worker pool and DLQ, Docker Compose.

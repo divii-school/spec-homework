@@ -22,7 +22,7 @@ Status: **Open** = not fixed yet · **Fixed (vX.Y)** = fixed in that spec versio
 | 4 | API-016/017 vs 1.8 | `/readyz` is at the root but Nginx only forwards `/resume-optimizer/v1/*` to `api` | Add Nginx route for health checks to `api` | Open |
 | 5 | 1.8 vs FR-004, CMP-005 | API extracts text, but only the worker image has `poppler-utils` | Install `poppler-utils` in the API image | Fixed (v2.1) |
 | 6 | CR-010, config | No full env var list (Redis, S3 bucket/region/endpoint, Slack webhook, log level, CORS, dev model, frontend API URL) | One config table: name, secret?, required?, value per env | Fixed (v2.1) |
-| 7 | API-018, NFR-011, CMP-011 | Alert job reads "all processes" on port 9090 but has no way to find them; scaled workers can't share one host port | Processes push counters to Redis, or define scrape targets | Open |
+| 7 | API-018, NFR-011, CMP-011 | Alert job reads "all processes" on port 9090 but has no way to find them; scaled workers can't share one host port | Processes push counters to Redis, or define scrape targets | Fixed (v2.2) — every process publishes its snapshot to `ro:metrics:*` (TTL 90 s); alert job uses `SCAN` (4.7 "Alert check") |
 | 8 | API-018 vs FR-018, NFR-002, 4.4 | Metric names `ro_retention_deleted_total`, `ro_analysis_duration_seconds` and the JWKS alert are not in API-018 | Add fields to API-018 or remove references; say which process alerts | Fixed (v2.1) |
 | 9 | NFR-002 vs NFR-010 | 10 analyses/s target vs 1,000/hour capacity | Align load numbers | Open |
 | 10 | FR-008 AC4 vs 4.7 | `attempts` incremented twice (on take and on recovery) | Increment only when a worker takes the job | Open |
@@ -43,7 +43,7 @@ Status: **Open** = not fixed yet · **Fixed (vX.Y)** = fixed in that spec versio
 | 25 | 1.8 vs 2.5, 1.6, NFR-014 | CI list misses lint, coverage gate, i18n check, Playwright/axe, `npm audit` | List every CI job in 1.8 | Open |
 | 26 | FR-022 AC1, 5.3 | Parallel subscribe creates two Razorpay subscriptions | Lock or placeholder row before calling Razorpay | Open |
 | 27 | FR-022 AC2/AC3, API-019 | Stale `created` / old `pending`/`halted` row blocks a free user | Expire stale rows inline; define outcome | Open |
-| 28 | FR-022 AC7, 4.7 billing | Expired-checkout job may cancel a subscription that was just paid | Fetch from Razorpay first; cancel only if still `created` | Open |
+| 28 | FR-022 AC7, 4.7 billing | Expired-checkout job may cancel a subscription that was just paid | Fetch from Razorpay first; cancel only if still `created` | Fixed (v2.2) — 4.7 "Expired checkout": fetch first, conditional updates, payment wins over expiry |
 | 29 | FR-022 AC5, API-020 | Razorpay may return `authenticated` with no period; breaks CHECK | Set `active` only when Razorpay says `active` with `current_end` | Open |
 | 30 | FR-023 AC6, `last_event_at` | "Never moves backwards" rule not precise (order, ties, fetches) | Skip whole event if older; define ties; fetches update `last_event_at` | Open |
 | 31 | API-024, FR-027, API-001 | "Latest subscription" unclear when an older row still grants Pro | Return the Pro-granting row first, else newest | Open |
