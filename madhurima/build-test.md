@@ -27,10 +27,10 @@ Status: **Open** = not fixed yet · **Fixed (vX.Y)** = fixed in that spec versio
 | 9 | NFR-002 vs NFR-010 | 10 analyses/s target vs 1,000/hour capacity | Align load numbers | Open |
 | 10 | FR-008 AC4 vs 4.7 | `attempts` incremented twice (on take and on recovery) | Increment only when a worker takes the job | Open |
 | 11 | NFR-013, `stuckAnalyses` | "Stuck > 15 min" has no reference timestamp; conflicts with retry timing | Define by status + `created_at`/`started_at`; align alert | Open |
-| 12 | FR-017 AC4, 4.7 | Erasure request stuck in `processing` is never retried | Sweep resets old `processing` rows to `pending` | Open |
-| 13 | FR-017 | Uploads/analyses allowed during an open erasure request | Write endpoints return 409 `ERASURE_IN_PROGRESS` | Open |
-| 14 | FR-021 AC4, API-014 | UI can't find the erasure request after reload; no settings route | Add "latest erasure request" endpoint and settings page | Open |
-| 15 | FR-021 vs 2.2, NFR-014 | 5 pages in FR-021, 3 in folder tree and accessibility check | Add `pro/`, `compare/` to 2.2 and NFR-014 | Open |
+| 12 | FR-017 AC4, 4.7 | Erasure request stuck in `processing` is never retried | Sweep resets old `processing` rows to `pending` | Fixed (v2.4) — sweep resets `processing` older than 30 min (`started_at`) |
+| 13 | FR-017 | Uploads/analyses allowed during an open erasure request | Write endpoints return 409 `ERASURE_IN_PROGRESS` | Fixed (v2.4) — API-003/004/008 → 409 `ERASURE_IN_PROGRESS` |
+| 14 | FR-021 AC4, API-014 | UI can't find the erasure request after reload; no settings route | Add "latest erasure request" endpoint and settings page | Fixed (v2.4) — API-025 latest request + settings page |
+| 15 | FR-021 vs 2.2, NFR-014 | 5 pages in FR-021, 3 in folder tree and accessibility check | Add `pro/`, `compare/` to 2.2 and NFR-014 | Fixed (v2.4) — 2.2 and NFR-014 list all 6 pages |
 | 16 | CR-017 vs FR-021 | Locale from JWT claim vs `/{locale}/` URL: which wins | URL wins; bare path redirects to JWT locale | Open |
 | 17 | CR-021, FR-002 | Consent notice text not provided | Add notice text (en, hi) | Open |
 | 18 | 1.5 headers | CSP blocks Next.js inline scripts; who sets headers is unclear | Nonce-based CSP set in Next.js middleware | Open |
