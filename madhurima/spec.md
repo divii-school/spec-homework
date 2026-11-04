@@ -42,11 +42,11 @@
 | CR-015 | Data retention | Retention periods are the fixed values in 3.3 and are enforced by scheduled jobs (FR-018), not by manual work. | Job tests; staging check |
 | CR-016 | Security | Browser-state-changing requests (POST, DELETE) using the cookie must send `Content-Type: application/json` or `multipart/form-data` and pass the `Origin` header check against the CORS allow-list; otherwise 403 `FORBIDDEN`. API-022 (server-to-server webhook) is exempt and is protected by CR-022 instead. The `sb_access` cookie is `SameSite=Lax`, set by the platform. | Integration test |
 | CR-022 | Payments | Card/UPI details are entered only in Razorpay Checkout and never reach this module. Every Razorpay webhook (API-022) is accepted only if `X-Razorpay-Signature` equals the hex HMAC-SHA256 of the raw request body with the webhook secret (constant-time compare); otherwise 401 `INVALID_WEBHOOK_SIGNATURE`. Every checkout result (API-020) is accepted only if `razorpay_signature` equals HMAC-SHA256 of `razorpay_payment_id + "|" + razorpay_subscription_id` with the key secret. | Unit tests with known signatures; code review |
-| CR-017 | i18n | UI text exists in English (`en`, default) and Hindi (`hi`). The locale comes from the `locale` JWT claim, falling back to `en`. API `message` fields are English only; the frontend shows a translated text keyed by the error `code`. | Frontend test: every error code has `en` and `hi` strings |
+| CR-017 | i18n | UI text exists in English (`en`, default) and Hindi (`hi`). (v2.3) The locale in the URL (`/{locale}/…`) always wins. A URL without a locale (`/resume-optimizer…`) is redirected (307) by the Next.js middleware to the same path with the JWT `locale` claim, or `en` if the claim is missing or not `en`/`hi`. An unsupported locale in the URL (e.g. `/fr/…`) redirects to `en`. API `message` fields are English only; the frontend shows a translated text keyed by the error `code`. | Frontend test: every error code has `en` and `hi` strings |
 | CR-018 | i18n | The API sends and accepts times only as RFC 3339 UTC with milliseconds (`2026-10-19T08:30:00.000Z`). The UI shows dates in IST, format `19 Oct 2026, 2:00 PM`. Scores are integers. | Contract tests |
 | CR-019 | Environments | Four environments: local, dev, staging, prod. Differences are in 1.7. Prod data is never copied to another environment. | Infra review |
 | CR-020 | Deployment | Every change reaches prod only through the CI/CD pipeline in 1.8. No manual deploys or DB changes in prod. | GitHub branch protection; servers accept SSH only with the CI deploy key |
-| CR-021 | Privacy (DPDP Act 2023) | Resume data is processed only after the user accepts the consent notice (FR-002). The notice states purpose (ATS analysis), data processed, retention, processors (AWS, Anthropic), and how to request erasure. Grievance contact: `privacy@surfingbear.com`. | Manual review of notice text; FR-002 tests |
+| CR-021 | Privacy (DPDP Act 2023) | Resume data is processed only after the user accepts the consent notice (FR-002). The notice states purpose (ATS analysis), data processed, retention, processors (AWS, Anthropic), and how to request erasure. Grievance contact: `privacy@surfingbear.com`. | Manual review of notice text (3.5, v2.3); FR-002 tests |
 
 ### 1.1 Authentication
 
@@ -120,7 +120,7 @@ Go implementation: handlers return `*apperr.Error{Code, HTTPStatus, Message, Det
 - **Transport:** TLS 1.2+ only, HSTS `max-age=31536000`. TLS ends at the Nginx load balancer (1.7).
 - **Encryption at rest:** managed PostgreSQL and Redis with disk encryption turned on; S3 bucket default encryption SSE-S3 (AES-256) for every object.
 - **Data retention:** 3.3 (Fixed values) and FR-018.
-- **Security headers (frontend):** `Content-Security-Policy: default-src 'self'; script-src 'self' https://checkout.razorpay.com; frame-src https://api.razorpay.com https://checkout.razorpay.com; connect-src 'self' https://api.surfingbear.com https://lumberjack.razorpay.com; frame-ancestors 'none'` (prod value; the API origin in `connect-src` changes per environment, 1.7; Razorpay entries needed for Checkout, FR-022), `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`.
+- **Security headers (frontend):** (v2.3) set by the Next.js middleware on every page response (Nginx adds only HSTS). The middleware creates a random nonce per request (16 bytes, base64) and passes it to Next.js, so Next's own inline scripts carry it. `Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-{nonce}' 'strict-dynamic' https://checkout.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src https://api.razorpay.com https://checkout.razorpay.com; connect-src 'self' https://api.surfingbear.com https://lumberjack.razorpay.com; frame-ancestors 'none'` (prod value; the API origin in `connect-src` changes per environment, 1.7; Razorpay entries needed for Checkout, FR-022), `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. Because of the nonce, pages are rendered per request (no static HTML caching). (v2.3) The API sets `X-Content-Type-Options: nosniff` and `Cache-Control: no-store` on every response itself (Gin middleware).
 - **Dependency scanning:** `govulncheck` and `npm audit --audit-level=high` in CI; a high or critical finding fails the build.
 
 ### 1.6 Internationalization (i18n)
@@ -139,7 +139,7 @@ CR-017, CR-018. Frontend uses `next-intl` with message files `frontend/messages/
 | AI provider | Stub server returning fixed JSON (`devtools/fakeai`) | Anthropic, low-cost model | Anthropic, prod model | Anthropic, prod model |
 | Payments | Razorpay **test mode** keys; webhooks forwarded with `ngrok` | Razorpay test mode | Razorpay test mode | Razorpay **live** mode |
 | Log level | DEBUG | DEBUG | INFO | INFO |
-| Test data | Seed script | Seed script | Synthetic resumes only | Real users |
+| Test data | `go run ./devtools/seeddata` (v2.3) | same | Synthetic resumes only | Real users |
 | Deploy | `docker compose up` | Auto on merge to `main` | Auto after dev deploy succeeds | Manual approval in GitHub Actions |
 
 **Configuration per environment** *(v2.1)*. Every setting is an environment variable, read once at start by `backend/internal/config` (`caarlos0/env`) or by the Next.js server. A process refuses to start if a required variable is missing or empty, if `RO_ENV = prod` and `RO_RAZORPAY_KEY_ID` starts with `rzp_test_`, or if `RO_ENV ≠ prod` and it starts with `rzp_live_`. "Secret" values follow CR-010; the other values are committed in `deploy/{env}.env` (dev, staging, prod) and `backend/.env.local.example` (local, copied by hand to `backend/.env`, which is git-ignored). The deploy job joins the committed file and the secrets into `/opt/resume-optimizer/.env`.
@@ -189,9 +189,18 @@ fakeauth is only in `docker-compose.yml`; it is never built into an image or dep
 
 ### 1.8 Deployment
 
-- **CI (GitHub Actions, on every pull request):** lint (2.5), `go test -race ./...`, frontend `npm test`, migration check (`migrate up` then `migrate down 1` on a fresh Postgres), `govulncheck`, Docker build. All must pass to merge.
+- **CI (GitHub Actions, on every pull request):** (v2.3, the full list) **backend:** `gofmt -l` and `goimports -l` empty, `go vet`, `golangci-lint`, `go test -race -cover` with the 70% line-coverage gate on `internal/` (2.5), `govulncheck`, migration check (`migrate up` then `migrate down 1` on a fresh Postgres); **frontend:** ESLint, `prettier --check`, `npm test`, i18n key check (every key in both `en.json` and `hi.json`, 1.6), `npm audit --audit-level=high` (1.5), Playwright end-to-end + `@axe-core/playwright` on all 6 pages against `docker compose` with fakeauth/fakeai (FR-021, NFR-014); **both:** Docker build of the 3 images. All must pass to merge.
 - **Build:** one Docker image per app: `resume-optimizer-api` (Go binary `api`, image includes `poppler-utils` for `pdftotext` and `pdfinfo`, because text is extracted during upload, FR-004, CMP-005), `resume-optimizer-worker` (Go binary `worker`, no `poppler-utils`: it only analyses text already stored in TBL-005), `resume-optimizer-web` (Next.js standalone). Tagged with the git SHA, pushed to GitHub Container Registry (`ghcr.io`).
-- **Run:** each app VM runs `docker compose` with services `api` (port 8080), `web` (port 3000), `worker` (2 containers, no public port). Nginx on the load-balancer VM forwards `/resume-optimizer/v1/*` to `api` and the rest to `web` on both app VMs, and checks API-017 every 10 s to take a VM out of rotation. Docker restart policy `unless-stopped`.
+- **Run:** each app VM runs `docker compose` with services `api` (port 8080), `web` (port 3000), `worker` (2 containers, no public port). Nginx on the load-balancer VM routes by host name (see **Hosting and routing** below), and checks API-017 every 10 s to take a VM out of rotation. Docker restart policy `unless-stopped`.
+- **Hosting and routing (v2.3):** Nginx has two `server` blocks per environment (dev and staging run Nginx on their single VM; prod on the load-balancer VM; local has no Nginx: web at `http://localhost:3000`, api at `http://localhost:8080`):
+
+| `server_name` (prod; dev/staging add `.dev` / `.staging`) | Path | Goes to | TLS certificate |
+|---|---|---|---|
+| `api.surfingbear.com` | `/resume-optimizer/v1/` | `api:8080` on the app VMs | Let's Encrypt via `certbot --nginx` on the Nginx VM; `certbot.timer` renews twice a day when < 30 days are left |
+| `api.surfingbear.com` | anything else (incl. `/healthz`, `/readyz`, `/internal/metrics`) | 404 from Nginx: health and metrics are **not public** | same |
+| `ro-web.surfingbear.com` (internal upstream name) | `/{en\|hi}/resume-optimizer`, `/{en\|hi}/resume-optimizer/*`, `/resume-optimizer`, `/ro-assets/*` | `web:3000` | same |
+
+  The public UI address stays `https://app.surfingbear.com/{locale}/resume-optimizer`: the platform's edge proxy for `app.surfingbear.com` forwards exactly the paths in the last row to `ro-web.surfingbear.com` (A-15). Next.js uses `assetPrefix: '/ro-assets'`, so its static files never clash with the platform's own `/_next/`. Health checks (API-016/017) are called by Nginx and Docker directly on each VM's port 8080 over the private network, not through the public host.
 - **Migrations:** the deploy job runs `migrate -path migrations -database $RO_DATABASE_URL up` (golang-migrate) once, before the new containers start. Migrations must be backward compatible with the previous release (expand → migrate → contract), so a rollback never needs a down migration.
 - **Release:** merge to `main` → dev → staging (automatic) → prod (manual approval by a tech lead). Deploy job (over SSH): `docker compose pull` → run migrations → restart VM 1, wait for API-017 to return 200 → restart VM 2. One VM always serves traffic.
 - **Rollback:** run the same workflow with the previous image tag (`workflow_dispatch` input `imageTag`); it sets `IMAGE_TAG` in `.env` and restarts the containers the same way. Target: rollback complete within 10 minutes. If API-017 does not return 200 within 60 s after a restart, the deploy job stops and rolls that VM back automatically.
@@ -251,7 +260,7 @@ surfingbear-resume-optimizer/
 │   │   ├── apperr/                # error type + code catalogue (6.3)
 │   │   └── repository/            # all SQL, hand-written with pgx (one file per table group)
 │   ├── migrations/                # golang-migrate: 000001_init.up.sql / 000001_init.down.sql ...
-│   ├── seed/                      # job_roles + job_role_skills seed (5.5)
+│   ├── devtools/seeddata/         # (v2.3) synthetic test users and resumes for local/dev only (1.7 "Test data"); job roles are NOT here, see 5.5
 │   ├── devtools/fakeauth, fakeai/ # local stubs
 │   ├── .golangci.yml
 │   ├── Makefile
@@ -413,6 +422,7 @@ A PR is approved only if all of these are true (checklist in the PR template):
 | A-12 | (v2.0) ₹299 includes GST; Razorpay sends the payment receipt by email; no refunds for unused days after cancel. | Keeps billing simple; "access continues until the end of the paid month" already gives the user what they paid for. |
 | A-13 | (v2.0) Billing records are kept 8 years and survive data erasure, keyed by a hash of `sub`, not by `users.id`. | Indian tax/accounting law requires keeping payment records; they contain no resume data. |
 | A-14 | (v2.1) The platform runs dev and staging auth at `https://auth.dev.surfingbear.com` and `https://auth.staging.surfingbear.com` (same JWKS path as prod) and login pages at `https://app.dev.surfingbear.com/login` and `https://app.staging.surfingbear.com/login`; tokens for dev/staging carry `aud` `resume-optimizer` too. To be confirmed with the platform team before the dev environment is set up. | Only prod values were given; the module needs a real login in dev and staging. |
+| A-15 | (v2.3) The platform's edge proxy for `app.surfingbear.com` (each environment) forwards `/{en\|hi}/resume-optimizer*`, `/resume-optimizer` and `/ro-assets/*` to this module's `ro-web` host (1.8). To be confirmed with the platform team, like A-14. | The brief puts the UI under `app.surfingbear.com`, which the platform owns; the module cannot run that host itself. |
 
 **Out of scope:** sign-up, login, password reset; (v2.0) refunds, coupons, yearly or other plans, changing the price of a running subscription, GST invoices generated by us; editing the resume inside the module or exporting an improved resume file; job-description upload or matching against a specific job posting; OCR; languages other than English for analysis; a mobile app; admin editing of job roles via UI; email notifications.
 
@@ -430,6 +440,21 @@ A PR is approved only if all of these are true (checklist in the PR template):
 Weights sum to 100. Example: scores 80, 60, 70, 50, 90, 100 → (80×25 + 60×20 + 70×15 + 50×15 + 90×15 + 100×10) / 100 = 73.5 → `overallScore = 74` (round half up).
 
 ---
+
+### 3.5 Consent notice text (v2.3, CR-021, FR-002)
+
+Version `2026-10-v1` (3.3). Shown in step 1 of the "New analysis" page (FR-021 AC 2). English is the source; `hi` is a translation of the same text stored under key `consent.notice` in `frontend/messages/hi.json`, reviewed by a Hindi speaker before release. Changing any sentence below means a new version in 3.3 (FR-002 AC 4).
+
+> **How we use your resume**
+> 1. **Purpose:** we use your resume only to check it against the job role you choose and to show you a score and suggestions.
+> 2. **What we process:** the file you upload, the text in it, the role and level you choose, and the results.
+> 3. **Who helps us:** files are stored with Amazon Web Services in Mumbai, India. The text is sent to Anthropic (Claude) to make the analysis; Anthropic does not keep it.
+> 4. **How long:** the file is deleted after 30 days; analyses after 1 year. Backups disappear within 7 days after that.
+> 5. **Your rights:** you can delete any resume or analysis, or all your data, at any time in Settings → "Delete all my data". This also withdraws this consent.
+> 6. **Payments:** if you buy Resume Pro, payment records are kept for 8 years because the law requires it. They contain no resume data.
+> 7. **Questions or complaints:** privacy@surfingbear.com.
+>
+> ☐ I have read this notice and I agree. → **Continue**
 
 ## 4. Architecture
 
@@ -1185,7 +1210,7 @@ Only the fields above are stored; the raw payload is not stored (it may contain 
 
 ### 5.5 Seed data (job roles and skills)
 
-Loaded by migration `00002_seed_job_roles.sql`. IDs are fixed. Importance codes: **C** = critical, **I** = important, **N** = nice_to_have. `display_order` is the order listed.
+(v2.3) Loaded by the golang-migrate migration `backend/migrations/000002_seed_job_roles.up.sql` (the `.down.sql` deletes these IDs), the same in every environment. This is the only way job roles are loaded. IDs are fixed. Importance codes: **C** = critical, **I** = important, **N** = nice_to_have. `display_order` is the order listed.
 
 | id | slug | name | Skills (importance) |
 |---|---|---|---|
@@ -1206,7 +1231,7 @@ Loaded by migration `00002_seed_job_roles.sql`. IDs are fixed. Importance codes:
 
 ### 6.1 Common rules
 
-- **Base URL:** `https://api.surfingbear.com/resume-optimizer/v1` (staging `https://api.staging.surfingbear.com/resume-optimizer/v1`, dev `https://api.dev.surfingbear.com/resume-optimizer/v1`, local `http://localhost:8080/resume-optimizer/v1`; `RO_WEB_API_BASE_URL` in 1.7). All paths below are relative to it, except API-016/017 (served at the root, `/healthz`, `/readyz`) and API-018 (port 9090, private network only).
+- **Base URL:** `https://api.surfingbear.com/resume-optimizer/v1` (staging `https://api.staging.surfingbear.com/resume-optimizer/v1`, dev `https://api.dev.surfingbear.com/resume-optimizer/v1`, local `http://localhost:8080/resume-optimizer/v1`; `RO_WEB_API_BASE_URL` in 1.7). All paths below are relative to it, except API-016/017 (served at the root, `/healthz`, `/readyz`, on port 8080 for the private network only; v2.3: Nginx does not expose them publicly, 1.8 "Hosting and routing") and API-018 (port 9090, private network only).
 - **Auth:** `sb_access` httpOnly cookie or `Authorization: Bearer <JWT>` (CR-001–CR-003). Every endpoint needs it except API-016, API-017, API-018 and API-022 (Razorpay signature, CR-022). Missing/invalid → 401 `UNAUTHENTICATED`.
 - **Content types:** requests `application/json; charset=utf-8` (API-004: `multipart/form-data`). Responses `application/json; charset=utf-8` except API-011 (`application/pdf`) and 204s (no body).
 - **Request ID:** `X-Request-Id` (CR-009) in every response.
@@ -1905,3 +1930,4 @@ Failure codes stored in `analyses.failure_code` (TBL-006) are exactly: `AI_UNAVA
 | v2.4 | 2026-11-04 | Madhurima Gorain | Improvement round (build test run 1, #12–#15): erasure requests stuck in `processing` are reset to `pending` by the sweep after a 30-min timeout (new fixed value, new TBL-011 `started_at`, consumer take step in 4.7); API-003, API-004 and API-008 return 409 `ERASURE_IN_PROGRESS` while an erasure is open; new API-025 "latest erasure request" and a settings page in FR-021, so the status is found after a reload; folder tree and NFR-014 now list all 6 frontend pages | Build test: a stuck erasure was never retried, new data could be added during erasure, the UI lost the request after reload, and page lists disagreed | FR-017, FR-021, NFR-014, 2.2, 3.3 fixed values, 4.7, TBL-011, API-003, API-004, API-008, API-025 (new), ERR-019, section 7 (FR-017, FR-021) |
 | v2.5 | 2026-11-04 | Madhurima Gorain | Improvement round (build test run 1, #19–#23): CORS allows `Idempotency-Key` and exposes `X-Request-Id`, `Retry-After`; API-022 exempt from the 16 KiB / strict-JSON rule (raw body for HMAC, 64 KiB, unknown fields allowed); one `details` shape for `QUOTA_EXCEEDED` in 1.4; idempotency key checked first, different body → new ERR-030 `IDEMPOTENCY_KEY_REUSED`; duplicate-file index made UNIQUE, parallel loser deletes its S3 object | Build test: rules in two places disagreed (CORS vs API-008, CR-012 vs API-022, 1.4 vs FR-013) and two races were open | CR-011, CR-012, 1.4, FR-003, FR-007, FR-013, API-008, 5.3, ERR-030 (new), section 7 (FR-003, FR-007) |
 | v2.6 | 2026-11-04 | Madhurima Gorain | Improvement round (build test run 1, #9–#11, #31–#33): NFR-002 load aligned to NFR-010; recovery no longer adds to `attempts` (only the worker's take does); one exact "stuck" rule by `created_at` / `started_at` for NFR-013 and `stuckAnalyses`; API-024 picks the Pro-granting row first; billing job step (d) deletes TBL-013 after 8 years and TBL-014 counts from `received_at`; subscription audit events defined (trigger, `entity_type = subscription`, `user_id` lookup or NULL) | Build test: contradicting load numbers, double counting of attempts, unclear reference times, and billing retention/audit rules not fully defined | NFR-002, NFR-013, FR-008, FR-027, 4.7, TBL-012, TBL-014, API-024, section 7 (NFR-013) |
+| v2.7 | 2026-11-04 | Madhurima Gorain | Improvement round (build test run 1, #3, #4, #16, #17, #18, #24, #25): hosting and routing table in 1.8 (Nginx `server_name` blocks, health and metrics not public, Let's Encrypt certificates, `assetPrefix`), new A-15 for the platform edge proxy; URL locale wins over the JWT claim; consent notice text v1 in new 3.5; nonce-based CSP set by Next.js middleware; one seed mechanism (migration `000002`); full CI job list | Build test: hosting, health route, locale rule, notice text, CSP, seed and CI were described in more than one way or not at all | 1.5, 1.7, 1.8, 2.2, 3.3, 3.5 (new), 5.5, 6.1, A-15 (new), CR-017, CR-021 |

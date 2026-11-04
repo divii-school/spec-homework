@@ -18,8 +18,8 @@ Status: **Open** = not fixed yet · **Fixed (vX.Y)** = fixed in that spec versio
 |---|---|---|---|---|
 | 1 | CR-002, CR-003, FR-001 AC3, 1.7 | Issuer, JWKS URL and login redirect are prod-only; local fakeauth cookie flow not described | Per-env auth config (`RO_AUTH_ISSUER`, `RO_AUTH_JWKS_URL`, `RO_AUTH_AUDIENCE`, login URL); describe how fakeauth sets `sb_access` | Fixed (v2.1) |
 | 2 | CR-011, 6.1, 1.5 | No dev web origin / API base URL; CSP `connect-src` only allows prod API | Per-env table: web origin, API base URL, CSP `connect-src` | Fixed (v2.1) |
-| 3 | 1.8, 6.1, 4.1 | Hosting of `api.` vs `app.surfingbear.com` unclear: Nginx server names, who routes the UI path, TLS certificates | Define Nginx `server_name` blocks, routing per host, certificate source and renewal | Open |
-| 4 | API-016/017 vs 1.8 | `/readyz` is at the root but Nginx only forwards `/resume-optimizer/v1/*` to `api` | Add Nginx route for health checks to `api` | Open |
+| 3 | 1.8, 6.1, 4.1 | Hosting of `api.` vs `app.surfingbear.com` unclear: Nginx server names, who routes the UI path, TLS certificates | Define Nginx `server_name` blocks, routing per host, certificate source and renewal | Fixed (v2.7) — 1.8 "Hosting and routing" + A-15 |
+| 4 | API-016/017 vs 1.8 | `/readyz` is at the root but Nginx only forwards `/resume-optimizer/v1/*` to `api` | Add Nginx route for health checks to `api` | Fixed (v2.7) — health checks private on port 8080, not routed publicly |
 | 5 | 1.8 vs FR-004, CMP-005 | API extracts text, but only the worker image has `poppler-utils` | Install `poppler-utils` in the API image | Fixed (v2.1) |
 | 6 | CR-010, config | No full env var list (Redis, S3 bucket/region/endpoint, Slack webhook, log level, CORS, dev model, frontend API URL) | One config table: name, secret?, required?, value per env | Fixed (v2.1) |
 | 7 | API-018, NFR-011, CMP-011 | Alert job reads "all processes" on port 9090 but has no way to find them; scaled workers can't share one host port | Processes push counters to Redis, or define scrape targets | Fixed (v2.2) — every process publishes its snapshot to `ro:metrics:*` (TTL 90 s); alert job uses `SCAN` (4.7 "Alert check") |
@@ -31,16 +31,16 @@ Status: **Open** = not fixed yet · **Fixed (vX.Y)** = fixed in that spec versio
 | 13 | FR-017 | Uploads/analyses allowed during an open erasure request | Write endpoints return 409 `ERASURE_IN_PROGRESS` | Fixed (v2.4) — API-003/004/008 → 409 `ERASURE_IN_PROGRESS` |
 | 14 | FR-021 AC4, API-014 | UI can't find the erasure request after reload; no settings route | Add "latest erasure request" endpoint and settings page | Fixed (v2.4) — API-025 latest request + settings page |
 | 15 | FR-021 vs 2.2, NFR-014 | 5 pages in FR-021, 3 in folder tree and accessibility check | Add `pro/`, `compare/` to 2.2 and NFR-014 | Fixed (v2.4) — 2.2 and NFR-014 list all 6 pages |
-| 16 | CR-017 vs FR-021 | Locale from JWT claim vs `/{locale}/` URL: which wins | URL wins; bare path redirects to JWT locale | Open |
-| 17 | CR-021, FR-002 | Consent notice text not provided | Add notice text (en, hi) | Open |
-| 18 | 1.5 headers | CSP blocks Next.js inline scripts; who sets headers is unclear | Nonce-based CSP set in Next.js middleware | Open |
+| 16 | CR-017 vs FR-021 | Locale from JWT claim vs `/{locale}/` URL: which wins | URL wins; bare path redirects to JWT locale | Fixed (v2.7) — URL wins; bare path redirects |
+| 17 | CR-021, FR-002 | Consent notice text not provided | Add notice text (en, hi) | Fixed (v2.7) — notice text in 3.5 |
+| 18 | 1.5 headers | CSP blocks Next.js inline scripts; who sets headers is unclear | Nonce-based CSP set in Next.js middleware | Fixed (v2.7) — nonce CSP in Next.js middleware |
 | 19 | CR-011 vs API-008 | CORS doesn't allow `Idempotency-Key`; no expose-headers | Add allow and expose headers | Fixed (v2.5) — CR-011 allows `Idempotency-Key`, exposes `X-Request-Id`, `Retry-After` |
 | 20 | CR-012 vs API-022 | 16 KiB limit and strict JSON conflict with Razorpay webhook | Exempt API-022: raw body, 64 KiB cap, lenient decode | Fixed (v2.5) — CR-012 exception for API-022 |
 | 21 | 1.4 vs FR-013, API-008 | `details` rule vs QUOTA_EXCEEDED shape | Allow `details` for QUOTA_EXCEEDED as 3 items | Fixed (v2.5) — one `details` shape in 1.4 |
 | 22 | FR-007 AC1/AC4 | Order of idempotency check vs quota/resume checks; same key with different body | Check key first; different body → 422 | Fixed (v2.5) — key checked first; different body → ERR-030 |
 | 23 | FR-003 AC8, 5.3 | Duplicate-file index not unique; parallel uploads both stored | Partial UNIQUE index; return existing on conflict | Fixed (v2.5) — UNIQUE partial index; loser deletes its S3 object |
-| 24 | 5.5 vs 2.2 vs 1.7 | Seed described 3 different ways | One mechanism: `000002_seed_job_roles.up/down.sql` | Open |
-| 25 | 1.8 vs 2.5, 1.6, NFR-014 | CI list misses lint, coverage gate, i18n check, Playwright/axe, `npm audit` | List every CI job in 1.8 | Open |
+| 24 | 5.5 vs 2.2 vs 1.7 | Seed described 3 different ways | One mechanism: `000002_seed_job_roles.up/down.sql` | Fixed (v2.7) — only migration `000002_seed_job_roles` |
+| 25 | 1.8 vs 2.5, 1.6, NFR-014 | CI list misses lint, coverage gate, i18n check, Playwright/axe, `npm audit` | List every CI job in 1.8 | Fixed (v2.7) — full CI list in 1.8 |
 | 26 | FR-022 AC1, 5.3 | Parallel subscribe creates two Razorpay subscriptions | Lock or placeholder row before calling Razorpay | Fixed (v2.3) — 4.7 "Subscribe steps": per-user Redis lock; second click returns the first row |
 | 27 | FR-022 AC2/AC3, API-019 | Stale `created` / old `pending`/`halted` row blocks a free user | Expire stale rows inline; define outcome | Fixed (v2.3) — 4.7 "Subscribe steps" step 4: stale rows fetched, then expired or cancelled |
 | 28 | FR-022 AC7, 4.7 billing | Expired-checkout job may cancel a subscription that was just paid | Fetch from Razorpay first; cancel only if still `created` | Fixed (v2.2) — 4.7 "Expired checkout": fetch first, conditional updates, payment wins over expiry |
