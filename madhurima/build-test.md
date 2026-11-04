@@ -34,11 +34,11 @@ Status: **Open** = not fixed yet · **Fixed (vX.Y)** = fixed in that spec versio
 | 16 | CR-017 vs FR-021 | Locale from JWT claim vs `/{locale}/` URL: which wins | URL wins; bare path redirects to JWT locale | Open |
 | 17 | CR-021, FR-002 | Consent notice text not provided | Add notice text (en, hi) | Open |
 | 18 | 1.5 headers | CSP blocks Next.js inline scripts; who sets headers is unclear | Nonce-based CSP set in Next.js middleware | Open |
-| 19 | CR-011 vs API-008 | CORS doesn't allow `Idempotency-Key`; no expose-headers | Add allow and expose headers | Open |
-| 20 | CR-012 vs API-022 | 16 KiB limit and strict JSON conflict with Razorpay webhook | Exempt API-022: raw body, 64 KiB cap, lenient decode | Open |
-| 21 | 1.4 vs FR-013, API-008 | `details` rule vs QUOTA_EXCEEDED shape | Allow `details` for QUOTA_EXCEEDED as 3 items | Open |
-| 22 | FR-007 AC1/AC4 | Order of idempotency check vs quota/resume checks; same key with different body | Check key first; different body → 422 | Open |
-| 23 | FR-003 AC8, 5.3 | Duplicate-file index not unique; parallel uploads both stored | Partial UNIQUE index; return existing on conflict | Open |
+| 19 | CR-011 vs API-008 | CORS doesn't allow `Idempotency-Key`; no expose-headers | Add allow and expose headers | Fixed (v2.5) — CR-011 allows `Idempotency-Key`, exposes `X-Request-Id`, `Retry-After` |
+| 20 | CR-012 vs API-022 | 16 KiB limit and strict JSON conflict with Razorpay webhook | Exempt API-022: raw body, 64 KiB cap, lenient decode | Fixed (v2.5) — CR-012 exception for API-022 |
+| 21 | 1.4 vs FR-013, API-008 | `details` rule vs QUOTA_EXCEEDED shape | Allow `details` for QUOTA_EXCEEDED as 3 items | Fixed (v2.5) — one `details` shape in 1.4 |
+| 22 | FR-007 AC1/AC4 | Order of idempotency check vs quota/resume checks; same key with different body | Check key first; different body → 422 | Fixed (v2.5) — key checked first; different body → ERR-030 |
+| 23 | FR-003 AC8, 5.3 | Duplicate-file index not unique; parallel uploads both stored | Partial UNIQUE index; return existing on conflict | Fixed (v2.5) — UNIQUE partial index; loser deletes its S3 object |
 | 24 | 5.5 vs 2.2 vs 1.7 | Seed described 3 different ways | One mechanism: `000002_seed_job_roles.up/down.sql` | Open |
 | 25 | 1.8 vs 2.5, 1.6, NFR-014 | CI list misses lint, coverage gate, i18n check, Playwright/axe, `npm audit` | List every CI job in 1.8 | Open |
 | 26 | FR-022 AC1, 5.3 | Parallel subscribe creates two Razorpay subscriptions | Lock or placeholder row before calling Razorpay | Fixed (v2.3) — 4.7 "Subscribe steps": per-user Redis lock; second click returns the first row |
