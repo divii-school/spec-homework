@@ -7,6 +7,7 @@ Self-run build tests for the improvement round (PLAYBOOK step 4).
 | Run | Date | Spec version | Guesses | Notes |
 |---|---|---|---|---|
 | 1 | 2026-10-30 | v2.0 | 33 | Baseline before any improvement-round change |
+| 2 | 2026-11-04 | v2.7 | 35 | All 33 of run 1 fixed (v2.1–v2.7). Run 2 read deeper; about 10 findings were side effects of the v2.3 payment rules. All fixed in v2.8 |
 
 ---
 
@@ -51,3 +52,47 @@ Status: **Open** = not fixed yet · **Fixed (vX.Y)** = fixed in that spec versio
 | 33 | TBL-012, FR-023 | `subscription.activated` audit trigger, `entity_type`, `user_id` undefined for webhooks | Define trigger, add `subscription` type, `user_id` NULL if unknown | Fixed (v2.6) — subscription audit events defined |
 
 **Overlap with Saswat's feedback DM:** #5 and #8 (leftovers), #1, #2 and #6 (config table), #7 and #28 (alert job, expired checkout).
+
+---
+
+## Run 2 — 2026-11-04 (spec v2.7)
+
+Same method and prompt as run 1. All items fixed in **v2.8** (change log row lists each fix).
+
+| # | Gap found | Status |
+|---|---|---|
+| 1 | 1.2 vs FR-012: free-plan suggestion rule | Fixed (v2.8) |
+| 2 | FR-007 vs API-008: repeat-key response | Fixed (v2.8) |
+| 3 | FR-007: check order incl. erasure and validation | Fixed (v2.8) |
+| 4 | API-002 vs 1.5: Cache-Control | Fixed (v2.8) |
+| 5 | 6.1: which rate-limit bucket in headers; CORS expose | Fixed (v2.8) |
+| 6 | CR-012: oversized multipart error code | Fixed (v2.8) |
+| 7 | NFR-005: uptime monitor vs private /readyz | Fixed (v2.8) |
+| 8 | 1.7: worker needs RO_RAZORPAY_KEY_ID | Fixed (v2.8) |
+| 9 | CR-010 vs 1.7: S3 key secrecy | Fixed (v2.8) |
+| 10 | 3.3 vs TBL-014: billing event retention | Fixed (v2.8) |
+| 11 | Expired checkout vs Status mapping | Fixed (v2.8) |
+| 12 | TBL-013 last_event_at note | Fixed (v2.8) |
+| 13 | Who may revive an `expired` row | Fixed (v2.8) |
+| 14 | Unique index vs authenticated / late payment | Fixed (v2.8) |
+| 15 | FR-023: status back to active after retry | Fixed (v2.8) |
+| 16 | Lock release wording | Fixed (v2.8) |
+| 17 | Flow 4: erasure attempts counted twice | Fixed (v2.8) |
+| 18 | 4.6: phone regex matches date ranges | Fixed (v2.8) |
+| 19 | 4.6: full system prompt missing | Fixed (v2.8) |
+| 20 | NFR-012: evaluation set location | Fixed (v2.8) |
+| 21 | Alert rules spread over the spec | Fixed (v2.8) |
+| 22 | p95 since start has no window | Fixed (v2.8) |
+| 23 | Cookie domain across hosts | Fixed (v2.8) |
+| 24 | Locale middleware JWT check | Fixed (v2.8) |
+| 25 | Frontend idempotency key per click | Fixed (v2.8) |
+| 26 | Pro page after 60 s polling | Fixed (v2.8) |
+| 27 | PDF language for hi users | Fixed (v2.8) |
+| 28 | UI copy, Hindi text, design | Fixed (v2.8) |
+| 29 | CI e2e without Razorpay stub or Pro user | Fixed (v2.8) |
+| 30 | Server compose file, dev data, Nginx path | Fixed (v2.8) |
+| 31 | Where migrations run | Fixed (v2.8) |
+| 32 | No infrastructure as code | Fixed (v2.8) |
+| 33 | search_path / schema_migrations | Fixed (v2.8) |
+| 34 | NFR-015 `db` package | Fixed (v2.8) |
+| 35 | Matrix: NFR-010 autoscaling | Fixed (v2.8) |
