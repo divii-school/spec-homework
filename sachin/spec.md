@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Author | Sachin S M |
-| Version | v1.4 |
+| Version | v1.5 |
 | Last updated | 2026-11-03 |
 | Status | Draft |
 | Backend stack | Spring Boot 3.4 (Java 21) |
@@ -2781,8 +2781,8 @@ Returns the user's analyses with `created_at > now() - 180 days` (rows the night
   "resumeId": "0b8f6a0e-4c1d-4f0e-a7a6-3f1f2a9d6c11",
   "jobRole": { "code": "BACKEND_ENGINEER", "name": "Backend Engineer" },
   "experienceLevel": "MID",
-  "overallScore": 68,
-  "scoreBand": "FAIR",
+  "overallScore": 71,
+  "scoreBand": "GOOD",
   "createdAt": "2026-10-22T09:17:02Z",
   "dimensions": [
     { "code": "KEYWORD_MATCH", "score": 72 },
@@ -2825,8 +2825,8 @@ Returns the user's analyses with `created_at > now() - 180 days` (rows the night
   "finishedAt": "2026-10-22T09:17:31Z",
   "failureReason": null,
   "result": {
-    "overallScore": 68,
-    "scoreBand": "FAIR",
+    "overallScore": 71,
+    "scoreBand": "GOOD",
     "dimensions": [
       { "code": "KEYWORD_MATCH", "score": 72, "weight": 25, "explanation": "Most backend keywords appear, but no job title matches the role." }
     ],
@@ -3177,18 +3177,18 @@ Endpoint checks, in order: (1) presence and equality → 400; (2) plan `PRO` →
     "jobRole": { "code": "BACKEND_ENGINEER", "name": "Backend Engineer" },
     "experienceLevel": "MID",
     "createdAt": "2026-10-22T09:17:02Z",
-    "overallScore": 68,
-    "scoreBand": "FAIR"
+    "overallScore": 71,
+    "scoreBand": "GOOD"
   },
   "to": {
     "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
     "jobRole": { "code": "BACKEND_ENGINEER", "name": "Backend Engineer" },
     "experienceLevel": "MID",
     "createdAt": "2026-10-25T06:40:11Z",
-    "overallScore": 77,
+    "overallScore": 78,
     "scoreBand": "GOOD"
   },
-  "overallScoreDelta": 9,
+  "overallScoreDelta": 7,
   "sameJobRole": true,
   "sameExperienceLevel": true,
   "dimensions": [
@@ -3419,3 +3419,4 @@ Each value is defined once in 4.7 and must read the same everywhere below. A cha
 | v1.2 | 2026-11-02 | Sachin S M | Build test 5 of the improvement round. (1) 4.3.3, CMP-010, CMP-011, FR-011, 7.1: CMP-011 runs every response check (schema, 4.6.4, missing-skill filter, suggestion checks, the more-than-half rule) and decides the single retry, at most 2 provider calls; it returns surviving suggestions with their offset, and CMP-010 only scores, ranks and saves. (2) FR-008 criterion 3 and 4.4: connection-level failures to Anthropic are retried like a 5xx, then `AI_PROVIDER_ERROR`; 4.4 holds the classification. (3) 4.3.6, TBL-019, 4.3.4, 4.8.7: a fetched `created` sets `next_attempt_at` = `expire_by` + 1 minute; the job takes only due rows; `CancellationOverdue` counts only due rows older than 24 h. (4) 4.3.9 table: `paused` or any unlisted status leaves the row unchanged with ERROR `billing.unknown_status`. (5) 4.4: `FakeRazorpayClient` stores status and the cycle-end flag; `created` until the first verification, cycle-end cancel stays `active` until `current_end`. (6) 4.8.2: the local `APP_MODE` and `JAVA_TOOL_OPTIONS` cells name `scripts/run-local.sh` and the web repository's `e2e/docker-compose.yml`, not the API repository's compose. | An independent agent reading only this file with the scorer's playbook build-test prompt logged 6 items (4 guesses, 2 contradictions, none high); all fixed at their source here. No ID renumbered or reused. | FR-008, FR-011, CMP-010, CMP-011, TBL-019, NFR-012 (alert), sections 4.3.3, 4.3.4, 4.3.6, 4.3.9, 4.4, 4.8.2, 4.8.7, 7.1 |
 | v1.3 | 2026-11-02 | Sachin S M | Build test 6 of the improvement round, the last of the round. (1) FR-030 criterion 3: state (b) needs `ACTIVE` and no cycle-end cancel, (c) is cancelling or `CANCELLED`; there are seven states, not six (also 2.2). (2) 4.8.7: `Api5xxRateHigh` counts only `INTERNAL_ERROR`; new warning `ServerBusy`; NFR-013 pointer. (3) FR-028 criterion 9: a second dialog text when `accessUntil` is null. (4) FR-013 criterion 4 and 4.7: after 150 s, polling every 30 s with "Check now" until 15 minutes after `createdAt`. (5) 3.4: keys and English texts for dimensions, levels, bands, severities, importance, statuses, the upgrade banner and every text the FRs quote, and the PDF labels; 3.4 is the single source of UI text. (6) 4.3.3: missing skills deduplicated; offset of the first occurrence; ties keep the AI's order. (7) 4.6.4: `FakeAiClient` uses only redacted lines without placeholders. (8) NFR-015: the input size is an expected range, not a cap. (9) 4.8.7 and NFR-020: label values of `ai_tokens_total`, `razorpay_webhook_events_total` and `billing_activation_seconds` (new path `checkout_expiry_fetch`). (10) CR-037 and 4.8.3: CSP with a per-request nonce, `X-Content-Type-Options`, `Referrer-Policy`. (11) A-18 and 4.5: 15-minute platform token, silent re-login through the platform session, what a redirect loses. (12) 4.7, 4.6.2, 4.8.2, TBL-006: `app.ai.prompt-version` / `ANTHROPIC_PROMPT_VERSION`. | An independent agent reading only this file with the scorer's playbook build-test prompt logged 12 items (2 contradictions, 10 guesses, none high); all fixed at their source here. Last build test of the round. No ID renumbered or reused. | CR-037, FR-013, FR-028, FR-030, NFR-013, NFR-015, NFR-020, A-18, TBL-006; sections 2.2, 3.4, 4.3.3, 4.5, 4.6.2, 4.6.4, 4.7, 4.8.2, 4.8.3, 4.8.7, 7.1, 7.3 |
 | v1.4 | 2026-11-03 | Sachin S M | Build test 7, run on the pushed v1.3. (1) FR-006 criterion 6, 4.3.2, 4.3.3, 4.7, TBL-006: `prompt_version` is written by the worker on `QUEUED → RUNNING`, not by the API, which never had `ANTHROPIC_PROMPT_VERSION`; the column is nullable with `ck_analysis_prompt_version`. (2) 4.3.8, 4.3.9, FR-029 test: a status change that is not skipped is applied even when the status stays the same (a renewal on an `ACTIVE` row), so the cycle dates and `last_event_at` are written; a reconciliation fix is a change to the status, the cycle dates or `access_until`. (3) Section 4 run modes, 4.8.4: each mode validates only the properties 4.7 marks required, scoped by the 4.8.2 rows; `DB_POOL_SIZE` added to the migrate list. (4) 4.3.6, TBL-019, FR-019 test: the erasure's TBL-019 insert is an upsert onto an existing `HALTED` row instead of a unique-key failure. (5) 4.8.5 step 3: the origin secret is 64 hex characters, as in 4.8.3. (6) CMP-019, 4.4: `fetch` takes a `FetchPurpose`, so the fake client moves to `active` only on the verification fetch after a valid signature. (7) FR-013 criterion 4, 4.7: the 150 s fast-poll window counts from `createdAt`, like the give-up time. (8) CR-037, 4.8.3: `'unsafe-eval'` in `script-src` only under `next dev`. (9) 3.4: keys for the page buttons, the four confirm dialogs, the FR-019 criterion 8 line, the FR-026 filter labels and "Simulate payment". (10) 4.8.3: one security-group table (load balancers, tasks, RDS, Redis). (11) 4.5: integration tests run the migrate mode against the container before the Spring context starts. (12) 4.8.4: the web repository's Playwright stack creates the bucket. (13) 4.3.3: errors in the worker that are not AI failures are logged and left to the sweeper. | A fresh agent reading only a copy of the pushed v1.3, with the scorer's playbook build-test prompt, logged 13 items (0 high, 3 medium, 10 low); the playbook's target is fewer than 5. Each was checked against the text and fixed at its source. No ID renumbered or reused. | FR-006, FR-013, FR-019, FR-029, CR-037, CMP-010, CMP-019, TBL-006, TBL-019; sections 3.4, 4 (run modes), 4.3.2, 4.3.3, 4.3.6, 4.3.8, 4.3.9, 4.4, 4.5, 4.7, 4.8.3, 4.8.4, 4.8.5, 7.1 |
+| v1.5 | 2026-11-04 | Sachin S M | Build test 8, run on the pushed v1.4. Worked examples recomputed with the FR-009 formula: API-008, API-009 and API-021 `from` dimensions 72/60/55/90/80/70 with weights 25/20/15/15/15/10 give 70.75 → `overallScore` 71, `GOOD` (was 68 `FAIR`); API-021 `to` dimensions 80/75/70/90/80/68 give 77.8 → 78 (was 77); `overallScoreDelta` 7 (was 9). No ID added or renumbered. The other build-test-8 items (filter-raised 401/403/429 through one error writer, CORS filter position, more 3.4 keys, APP_ENV for integration tests, first-migration order in the runbook, 2.2 page navigation details) are logged in transcripts/2026-11-03-build-test-8-v1.4.md for the next revision. |
