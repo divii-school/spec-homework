@@ -24,9 +24,9 @@ Status: **Open** = not fixed yet · **Fixed (vX.Y)** = fixed in that spec versio
 | 6 | CR-010, config | No full env var list (Redis, S3 bucket/region/endpoint, Slack webhook, log level, CORS, dev model, frontend API URL) | One config table: name, secret?, required?, value per env | Fixed (v2.1) |
 | 7 | API-018, NFR-011, CMP-011 | Alert job reads "all processes" on port 9090 but has no way to find them; scaled workers can't share one host port | Processes push counters to Redis, or define scrape targets | Fixed (v2.2) — every process publishes its snapshot to `ro:metrics:*` (TTL 90 s); alert job uses `SCAN` (4.7 "Alert check") |
 | 8 | API-018 vs FR-018, NFR-002, 4.4 | Metric names `ro_retention_deleted_total`, `ro_analysis_duration_seconds` and the JWKS alert are not in API-018 | Add fields to API-018 or remove references; say which process alerts | Fixed (v2.1) |
-| 9 | NFR-002 vs NFR-010 | 10 analyses/s target vs 1,000/hour capacity | Align load numbers | Open |
-| 10 | FR-008 AC4 vs 4.7 | `attempts` incremented twice (on take and on recovery) | Increment only when a worker takes the job | Open |
-| 11 | NFR-013, `stuckAnalyses` | "Stuck > 15 min" has no reference timestamp; conflicts with retry timing | Define by status + `created_at`/`started_at`; align alert | Open |
+| 9 | NFR-002 vs NFR-010 | 10 analyses/s target vs 1,000/hour capacity | Align load numbers | Fixed (v2.6) — NFR-002 uses the NFR-010 load |
+| 10 | FR-008 AC4 vs 4.7 | `attempts` incremented twice (on take and on recovery) | Increment only when a worker takes the job | Fixed (v2.6) — only the worker take increments `attempts` |
+| 11 | NFR-013, `stuckAnalyses` | "Stuck > 15 min" has no reference timestamp; conflicts with retry timing | Define by status + `created_at`/`started_at`; align alert | Fixed (v2.6) — stuck = `created_at` / `started_at` older than 15 min |
 | 12 | FR-017 AC4, 4.7 | Erasure request stuck in `processing` is never retried | Sweep resets old `processing` rows to `pending` | Fixed (v2.4) — sweep resets `processing` older than 30 min (`started_at`) |
 | 13 | FR-017 | Uploads/analyses allowed during an open erasure request | Write endpoints return 409 `ERASURE_IN_PROGRESS` | Fixed (v2.4) — API-003/004/008 → 409 `ERASURE_IN_PROGRESS` |
 | 14 | FR-021 AC4, API-014 | UI can't find the erasure request after reload; no settings route | Add "latest erasure request" endpoint and settings page | Fixed (v2.4) — API-025 latest request + settings page |
@@ -46,8 +46,8 @@ Status: **Open** = not fixed yet · **Fixed (vX.Y)** = fixed in that spec versio
 | 28 | FR-022 AC7, 4.7 billing | Expired-checkout job may cancel a subscription that was just paid | Fetch from Razorpay first; cancel only if still `created` | Fixed (v2.2) — 4.7 "Expired checkout": fetch first, conditional updates, payment wins over expiry |
 | 29 | FR-022 AC5, API-020 | Razorpay may return `authenticated` with no period; breaks CHECK | Set `active` only when Razorpay says `active` with `current_end` | Fixed (v2.3) — 4.7 "Status mapping": `active` only with `current_end`; `authenticated` stays `created` |
 | 30 | FR-023 AC6, `last_event_at` | "Never moves backwards" rule not precise (order, ties, fetches) | Skip whole event if older; define ties; fetches update `last_event_at` | Fixed (v2.3) — 4.7 "Event order rule": older events skipped whole; ties; fetches set `last_event_at` |
-| 31 | API-024, FR-027, API-001 | "Latest subscription" unclear when an older row still grants Pro | Return the Pro-granting row first, else newest | Open |
-| 32 | TBL-013 vs 4.7, 3.3 | 8-year deletion of TBL-013 not in billing job; start date differs | Add step for TBL-013; name exact date column per table | Open |
-| 33 | TBL-012, FR-023 | `subscription.activated` audit trigger, `entity_type`, `user_id` undefined for webhooks | Define trigger, add `subscription` type, `user_id` NULL if unknown | Open |
+| 31 | API-024, FR-027, API-001 | "Latest subscription" unclear when an older row still grants Pro | Return the Pro-granting row first, else newest | Fixed (v2.6) — Pro-granting row first, else newest |
+| 32 | TBL-013 vs 4.7, 3.3 | 8-year deletion of TBL-013 not in billing job; start date differs | Add step for TBL-013; name exact date column per table | Fixed (v2.6) — billing job step (d); dates named per table |
+| 33 | TBL-012, FR-023 | `subscription.activated` audit trigger, `entity_type`, `user_id` undefined for webhooks | Define trigger, add `subscription` type, `user_id` NULL if unknown | Fixed (v2.6) — subscription audit events defined |
 
 **Overlap with Saswat's feedback DM:** #5 and #8 (leftovers), #1, #2 and #6 (config table), #7 and #28 (alert job, expired checkout).
