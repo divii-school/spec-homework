@@ -41,11 +41,11 @@ Status: **Open** = not fixed yet · **Fixed (vX.Y)** = fixed in that spec versio
 | 23 | FR-003 AC8, 5.3 | Duplicate-file index not unique; parallel uploads both stored | Partial UNIQUE index; return existing on conflict | Open |
 | 24 | 5.5 vs 2.2 vs 1.7 | Seed described 3 different ways | One mechanism: `000002_seed_job_roles.up/down.sql` | Open |
 | 25 | 1.8 vs 2.5, 1.6, NFR-014 | CI list misses lint, coverage gate, i18n check, Playwright/axe, `npm audit` | List every CI job in 1.8 | Open |
-| 26 | FR-022 AC1, 5.3 | Parallel subscribe creates two Razorpay subscriptions | Lock or placeholder row before calling Razorpay | Open |
-| 27 | FR-022 AC2/AC3, API-019 | Stale `created` / old `pending`/`halted` row blocks a free user | Expire stale rows inline; define outcome | Open |
+| 26 | FR-022 AC1, 5.3 | Parallel subscribe creates two Razorpay subscriptions | Lock or placeholder row before calling Razorpay | Fixed (v2.3) — 4.7 "Subscribe steps": per-user Redis lock; second click returns the first row |
+| 27 | FR-022 AC2/AC3, API-019 | Stale `created` / old `pending`/`halted` row blocks a free user | Expire stale rows inline; define outcome | Fixed (v2.3) — 4.7 "Subscribe steps" step 4: stale rows fetched, then expired or cancelled |
 | 28 | FR-022 AC7, 4.7 billing | Expired-checkout job may cancel a subscription that was just paid | Fetch from Razorpay first; cancel only if still `created` | Fixed (v2.2) — 4.7 "Expired checkout": fetch first, conditional updates, payment wins over expiry |
-| 29 | FR-022 AC5, API-020 | Razorpay may return `authenticated` with no period; breaks CHECK | Set `active` only when Razorpay says `active` with `current_end` | Open |
-| 30 | FR-023 AC6, `last_event_at` | "Never moves backwards" rule not precise (order, ties, fetches) | Skip whole event if older; define ties; fetches update `last_event_at` | Open |
+| 29 | FR-022 AC5, API-020 | Razorpay may return `authenticated` with no period; breaks CHECK | Set `active` only when Razorpay says `active` with `current_end` | Fixed (v2.3) — 4.7 "Status mapping": `active` only with `current_end`; `authenticated` stays `created` |
+| 30 | FR-023 AC6, `last_event_at` | "Never moves backwards" rule not precise (order, ties, fetches) | Skip whole event if older; define ties; fetches update `last_event_at` | Fixed (v2.3) — 4.7 "Event order rule": older events skipped whole; ties; fetches set `last_event_at` |
 | 31 | API-024, FR-027, API-001 | "Latest subscription" unclear when an older row still grants Pro | Return the Pro-granting row first, else newest | Open |
 | 32 | TBL-013 vs 4.7, 3.3 | 8-year deletion of TBL-013 not in billing job; start date differs | Add step for TBL-013; name exact date column per table | Open |
 | 33 | TBL-012, FR-023 | `subscription.activated` audit trigger, `entity_type`, `user_id` undefined for webhooks | Define trigger, add `subscription` type, `user_id` NULL if unknown | Open |
