@@ -8,6 +8,7 @@ Self-run build tests for the improvement round (PLAYBOOK step 4).
 |---|---|---|---|---|
 | 1 | 2026-10-30 | v2.0 | 33 | Baseline before any improvement-round change |
 | 2 | 2026-11-04 | v2.7 | 35 | All 33 of run 1 fixed (v2.1–v2.7). Run 2 read deeper; about 10 findings were side effects of the v2.3 payment rules. All fixed in v2.8 |
+| 3 | 2026-11-04 | v2.8 | 24 | Deeper again: mostly deployment and operations details (VM files, migrations network, Nginx, local payments). All fixed in v2.9 |
 
 ---
 
@@ -96,3 +97,36 @@ Same method and prompt as run 1. All items fixed in **v2.8** (change log row lis
 | 33 | search_path / schema_migrations | Fixed (v2.8) |
 | 34 | NFR-015 `db` package | Fixed (v2.8) |
 | 35 | Matrix: NFR-010 autoscaling | Fixed (v2.8) |
+
+---
+
+## Run 3 — 2026-11-04 (spec v2.8)
+
+Same method and prompt. All items fixed in **v2.9**.
+
+| # | Gap found | Status |
+|---|---|---|
+| 1 | Header version vs change log | Fixed (v2.9) |
+| 2 | Cookie name fixed vs per-environment | Fixed (v2.9) |
+| 3 | Files on the VM / what deploy copies | Fixed (v2.9) |
+| 4 | Local payments: fake vs real test mode | Fixed (v2.9) |
+| 5 | Migrate container network on dev | Fixed (v2.9) |
+| 6 | Local schema, migrations, MinIO bucket | Fixed (v2.9) |
+| 7 | Terraform: who runs it, state, schema | Fixed (v2.9) |
+| 8 | Nginx config deploy and upstreams | Fixed (v2.9) |
+| 9 | Nginx OSS has no active health checks | Fixed (v2.9) |
+| 10 | Certificate for internal `ro-web` host | Fixed (v2.9) |
+| 11 | Routing misses paths CR-017 redirects | Fixed (v2.9) |
+| 12 | ghcr.io login on VMs | Fixed (v2.9) |
+| 13 | Health checks for web and worker | Fixed (v2.9) |
+| 14 | ElastiCache has no AOF | Fixed (v2.9) |
+| 15 | `processing → queued` not allowed | Fixed (v2.9) |
+| 16 | Text-matching normalisation undefined | Fixed (v2.9) |
+| 17 | Token counting method | Fixed (v2.9) |
+| 18 | Retention check job and storage | Fixed (v2.9) |
+| 19 | Alert "cleared" state | Fixed (v2.9) |
+| 20 | `users` has no hash column | Fixed (v2.9) |
+| 21 | Integer scores vs average | Fixed (v2.9) |
+| 22 | Admin stats have no UI | Fixed (v2.9) |
+| 23 | S3 delete failure on API-007 | Fixed (v2.9) |
+| 24 | API-001/024 vs FR-027 row choice | Fixed (v2.9) |
